@@ -1,0 +1,58 @@
+/**
+ * Client-side session: generate and hold the 64-byte secret, deliver it
+ * only through the attested (EHBP-encrypted) verified fetch, keep the
+ * returned bearer token for gated calls + the WSS.
+ *
+ * PROTOTYPE CUSTODY NOTE: the secret lives in localStorage for First
+ * Light. Real custody (passphrase wrap / OS keystore) comes later —
+ * the wire protocol does not change when it does.
+ */
+import type { SecureClient } from "tinfoil";
+import type { UnlockResponse, StateResponse } from "@waddle/sdk";
+
+const SECRET_KEY = "waddle.secret";
+const TOKEN_KEY = "waddle.token";
+
+function b64(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes));
+}
+
+export function getSecret(): string {
+  let s = localStorage.getItem(SECRET_KEY);
+  if (!s) {
+    s = b64(crypto.getRandomValues(new Uint8Array(64)));
+    localStorage.setItem(SECRET_KEY, s);
+  }
+  return s;
+}
+
+export function forgetSecret(): void {
+  localStorage.removeItem(SECRET_KEY);
+  localStorage.removeItem(TOKEN_KEY);
+}
+
+export function getToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+export async function unlock(client: SecureClient, enclaveURL: string): Promise<UnlockResponse> {
+  const nonce = b64(crypto.getRandomValues(new Uint8Array(16)));
+  const res = await client.fetch(`${enclaveURL}/unlock`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ secret: getSecret(), nonce }),
+  });
+  const body = (await res.json()) as UnlockResponse & { error?: string };
+  if (!res.ok) throw new Error(body.error ?? `unlock failed (${res.status})`);
+  localStorage.setItem(TOKEN_KEY, body.token);
+  return body;
+}
+
+export async function getState(client: SecureClient, enclaveURL: string): Promise<StateResponse> {
+  const res = await client.fetch(`${enclaveURL}/state`, {
+    headers: { Authorization: `Bearer ${getToken() ?? ""}` },
+  });
+  const body = (await res.json()) as StateResponse & { error?: string };
+  if (!res.ok) throw new Error(body.error ?? `state failed (${res.status})`);
+  return body;
+}

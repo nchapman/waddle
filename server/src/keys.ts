@@ -1,0 +1,47 @@
+/**
+ * Key derivation + AEAD helpers. Everything user-visible is derived from
+ * the 64-byte client secret; nothing derived is ever written plaintext.
+ */
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHmac,
+  hkdfSync,
+  randomBytes,
+  timingSafeEqual,
+} from "node:crypto";
+
+/** Constant domain-separation nonce for long-lived derivations. */
+const ROOT_NONCE = Buffer.from("waddle-root-v1");
+
+export function derive(secret: Buffer, label: string, nonce: Buffer = ROOT_NONCE, len = 32): Buffer {
+  return Buffer.from(hkdfSync("sha256", secret, nonce, `waddle/${label}`, len));
+}
+
+/** AES-256-GCM seal → iv || ciphertext || tag. */
+export function seal(key: Buffer, plaintext: Buffer, aad: string): Buffer {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  cipher.setAAD(Buffer.from(aad));
+  return Buffer.concat([iv, cipher.update(plaintext), cipher.final(), cipher.getAuthTag()]);
+}
+
+/** Throws if key or AAD is wrong — the unlock check rides on this. */
+export function open(key: Buffer, sealed: Buffer, aad: string): Buffer {
+  const iv = sealed.subarray(0, 12);
+  const tag = sealed.subarray(sealed.length - 16);
+  const decipher = createDecipheriv("aes-256-gcm", key, iv);
+  decipher.setAAD(Buffer.from(aad));
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(sealed.subarray(12, sealed.length - 16)), decipher.final()]);
+}
+
+export function hmac(key: Buffer, data: string): string {
+  return createHmac("sha256", key).update(data).digest("base64url");
+}
+
+export function constantTimeEqual(a: string, b: string): boolean {
+  const ba = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ba.length === bb.length && timingSafeEqual(ba, bb);
+}

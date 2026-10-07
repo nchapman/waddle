@@ -18,5 +18,7 @@ FROM node:24-slim
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=build /deploy ./
+# Writable state (anonymous volume) survives read-only rootfs enforcement.
+VOLUME /tmp/waddle-data
 EXPOSE 8080
 CMD ["node", "dist/index.js"]

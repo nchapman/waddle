@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { verifyEnclave, repin, type AttestationResult } from "./lib/attestation";
+import { unlock, getState, forgetSecret, getToken } from "./lib/session";
+import type { StateResponse } from "@waddle/sdk";
 
 const ENCLAVE_URL =
   import.meta.env.VITE_ENCLAVE_URL ?? "https://waddle.ddg-waddle.containers.tinfoil.dev";
@@ -9,7 +11,9 @@ type State =
   | { phase: "verifying" }
   | { phase: "error"; message: string }
   | { phase: "blocked"; result: AttestationResult }
-  | { phase: "verified"; result: AttestationResult; health: string };
+  | { phase: "attested"; result: AttestationResult; locked: boolean }
+  | { phase: "unlocking" }
+  | { phase: "unlocked"; result: AttestationResult; state: StateResponse };
 
 const box = (bg: string): React.CSSProperties => ({
   background: bg,
@@ -32,10 +36,9 @@ export function App() {
         setState({ phase: "blocked", result });
         return;
       }
-      // Prove the verified-request path: fetch /health through the pinned client.
       const res = await result.client.fetch(`${ENCLAVE_URL}/health`);
-      const body = (await res.json()) as { service: string; version: string; locked: boolean };
-      setState({ phase: "verified", result, health: `${body.service} v${body.version} · ${body.locked ? "locked" : "unlocked"}` });
+      const health = (await res.json()) as { locked: boolean };
+      setState({ phase: "attested", result, locked: health.locked });
     } catch (e) {
       setState({ phase: "error", message: e instanceof Error ? e.message : String(e) });
     }
@@ -45,6 +48,17 @@ export function App() {
     void run();
   }, [run]);
 
+  const doUnlock = useCallback(async (result: AttestationResult) => {
+    setState({ phase: "unlocking" });
+    try {
+      await unlock(result.client, ENCLAVE_URL);
+      const s = await getState(result.client, ENCLAVE_URL);
+      setState({ phase: "unlocked", result, state: s });
+    } catch (e) {
+      setState({ phase: "error", message: `unlock: ${e instanceof Error ? e.message : String(e)}` });
+    }
+  }, []);
+
   return (
     <main style={{ fontFamily: "system-ui", padding: "2rem", maxWidth: 720 }}>
       <h1>waddle</h1>
@@ -53,7 +67,10 @@ export function App() {
 
       {state.phase === "error" && (
         <p style={box("#fde8e8")}>
-          ⛔ attestation failed — <b>no secrets will move</b>: {state.message}
+          ⛔ {state.message}
+          <br />
+          <button onClick={() => void run()}>retry</button>{" "}
+          <button onClick={() => { forgetSecret(); void run(); }}>forget secret & retry</button>
         </p>
       )}
 
@@ -75,18 +92,49 @@ export function App() {
         </div>
       )}
 
-      {state.phase === "verified" && (
+      {state.phase === "attested" && (
         <>
           <p style={box("#e8f5e9")}>
             ✅ attested · {state.result.releaseTag} · pinned{" "}
-            {state.result.firstPin ? "(first connect — TOFU)" : "(match)"} ·{" "}
-            {state.health}
+            {state.result.firstPin ? "(first connect — TOFU)" : "(match)"}
+          </p>
+          {state.locked ? (
+            <div style={box("#eef")}>
+              🔐 <b>locked</b> — this enclave holds no key to your data.
+              <p style={{ fontSize: 13 }}>
+                Unlocking generates a 64-byte secret on this device, delivers it through the
+                attested channel, and derives every server-side key from it. It never leaves
+                except through that channel.
+              </p>
+              <button onClick={() => void doUnlock(state.result)}>
+                {getToken() ? "unlock with stored secret" : "generate secret & unlock"}
+              </button>
+            </div>
+          ) : (
+            <button onClick={() => void doUnlock(state.result)}>resume session</button>
+          )}
+        </>
+      )}
+
+      {state.phase === "unlocking" && <p style={box("#eee")}>🔑 unlocking…</p>}
+
+      {state.phase === "unlocked" && (
+        <>
+          <p style={box("#e8f5e9")}>
+            ✅ attested · {state.result.releaseTag} · <b>unlocked</b>
+            {state.state.enrolled ? " (enrolled)" : ""}
           </p>
           <p style={{ fontSize: 13, color: "#666" }}>
-            code <code>{fp(state.result.codeFingerprint)}</code> · repo{" "}
-            <code>{state.result.configRepo}</code> · steps{" "}
-            {Object.keys(state.result.steps).join(" ✓ ")} ✓
+            code <code>{fp(state.result.codeFingerprint)}</code> · session sees{" "}
+            {state.state.events.length} events
           </p>
+          <ul style={{ fontSize: 13 }}>
+            {state.state.events.slice(-5).map((e, i) => (
+              <li key={i}>
+                <code>{JSON.stringify(e).slice(0, 90)}</code>
+              </li>
+            ))}
+          </ul>
         </>
       )}
 
