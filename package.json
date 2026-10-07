@@ -1,0 +1,15 @@
+{
+  "name": "waddle",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.4.2",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "pnpm run --parallel --filter @waddle/sdk --filter @waddle/vm --filter @waddle/client dev",
+    "build": "pnpm -r build",
+    "check": "pnpm --filter @waddle/sdk build && pnpm -r check",
+    "test": "pnpm -r test"
+  }
+}

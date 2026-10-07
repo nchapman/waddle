@@ -1,0 +1,16 @@
+# Tinfoil container config — refined in Phase 0 ("Hello enclave").
+# This file (in its own public repo, tagged releases) is what Tinfoil
+# measures; the digest clients pin comes from it.
+#
+# apiVersion: v1
+# name: waddle
+# image: ghcr.io/OWNER/waddle@sha256:...   # digest-pinned
+# ports:
+#   - 8080
+# environment:
+#   - NODE_ENV=production
+# restart: no        # agent-directed sleep: process exit stops the container
+# volumes:
+#   - mount: /data/volume   # user-key encrypted volume, client-unlocked
+# healthcheck:
+#   path: /health
