@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^1.0.4",
+    "@fastify/cors": "^11.3.0",
     "@fastify/websocket": "^11.0.0",
     "@waddle/sdk": "workspace:*",
     "fastify": "^5.0.0",

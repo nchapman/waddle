@@ -5,6 +5,7 @@
  */
 import fastify from "fastify";
 import websocket from "@fastify/websocket";
+import cors from "@fastify/cors";
 import { hello, type GatewayEvent } from "@waddle/sdk";
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -12,6 +13,11 @@ const VERSION = "0.0.1";
 
 const app = fastify({ logger: true });
 await app.register(websocket);
+
+// Browser clients talk to us cross-origin (dev: Vite on :5173; prod: the client host).
+await app.register(cors, {
+  origin: (process.env.ALLOWED_ORIGINS ?? "http://localhost:5173").split(","),
+});
 
 app.get("/health", async () => hello(VERSION));
 
