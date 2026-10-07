@@ -1,6 +1,7 @@
 packages:
   - app
   - client
+  - concierge
   - sdk
 
 # pnpm 12 build-script approval (new home of onlyBuiltDependencies)
