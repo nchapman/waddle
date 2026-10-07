@@ -12,7 +12,7 @@ decisions, and the phased build plan with acceptance gates.
 
 | Path | What |
 |---|---|
-| `app/` | The single-user app that runs in the enclave (gateway + pi harness) |
+| `server/` | The server that runs in the enclave (gateway + pi harness) |
 | `client/` | React client — assistant-ui over AI SDK, attestation via tinfoil SDK |
 | `concierge/` | The always-on operator service — wake-only for now (scoped key, betterbase JWT auth) |
 | `sdk/` | The wire contract: event log protocol shared by vm + client (+ Expo later) |
