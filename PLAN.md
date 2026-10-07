@@ -183,7 +183,7 @@ Everything durable on the volume: workspace, memory, the event log, task records
 
 ## Tech stack
 
-- **Monorepo:** pnpm + TypeScript — `vm` (gateway + harness + connectors), `client` (React), `sdk` (protocol), `config` (public tinfoil-config repo).
+- **Monorepo:** pnpm + TypeScript — `app` (gateway + harness + connectors — the single-user app that runs in the enclave), `client` (React), `sdk` (protocol), `config` (public tinfoil-config repo).
 - **VM:** Node 22+, Fastify + ws, pi SDK, Playwright. No DB — files on the volume.
 - **Client:** Vite + React; **assistant-ui** (chat surface) over **Vercel AI SDK** (`ai` + `@ai-sdk/react`, `useChat` with a **custom `ChatTransport` bridged to our WSS protocol** — replay + live tail converted to UIMessage parts; `@assistant-ui/ai-sdk` runtime on top); tinfoil JS SDK (`SecureClient`) for attestation + pinning — the same `secureClient.fetch` mechanic their AI-SDK examples use; canvas screencast, sleep/status, attestation badge, OAuth handoff, wake button all consume the `sdk` directly (they're event-log events, not conversation parts). Expo later via `sdk` + AI SDK React hooks (assistant-ui stays web-only).
 - **Deploy:** single container, SHA-digest-pinned image; measured `tinfoil-config.yml` in a public repo; egress `open` (honest limit — see security domains). Tinfoil Projects give one config repo → N independently managed instances — the per-user primitive (quota 10/org). Container splits are a post-prototype hardening option.

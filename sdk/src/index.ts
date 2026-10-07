@@ -7,7 +7,7 @@
  */
 
 export interface HelloResponse {
-  service: "waddle-vm";
+  service: "waddle-app";
   version: string;
   /** Pre-unlock, only the unlock endpoint exists (the lock screen). */
   locked: boolean;
@@ -21,5 +21,5 @@ export type GatewayEvent =
   | { type: "sleep_cancelled"; reason: string };
 
 export function hello(version: string, locked = false): HelloResponse {
-  return { service: "waddle-vm", version, locked };
+  return { service: "waddle-app", version, locked };
 }

@@ -1,5 +1,5 @@
 packages:
-  - vm
+  - app
   - client
   - sdk
 

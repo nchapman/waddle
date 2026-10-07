@@ -12,7 +12,7 @@ decisions, and the phased build plan with acceptance gates.
 
 | Path | What |
 |---|---|
-| `vm/` | The single-user app that runs in the enclave (gateway + pi harness) |
+| `app/` | The single-user app that runs in the enclave (gateway + pi harness) |
 | `client/` | React client — assistant-ui over AI SDK, attestation via tinfoil SDK |
 | `sdk/` | The wire contract: event log protocol shared by vm + client (+ Expo later) |
 | `config/` | tinfoil-config.yml template (lives in its own public repo when deployed) |
