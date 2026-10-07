@@ -1,29 +1,22 @@
 # Waddle server image — the single artifact Tinfoil measures.
-FROM node:24-slim AS base
+# pnpm deploy flattens the workspace symlink farm into a self-contained
+# production tree; stage-copied symlinks are how the last image broke.
+FROM node:24-slim AS build
 RUN corepack enable
 WORKDIR /app
-
-FROM base AS deps
-COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
+COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
 COPY server/package.json server/package.json
 COPY sdk/package.json sdk/package.json
 RUN pnpm install --frozen-lockfile
-
-FROM base AS build
-COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/server/node_modules ./server/node_modules
-COPY --from=deps /app/sdk/node_modules ./sdk/node_modules
-COPY tsconfig.base.json pnpm-workspace.yaml package.json ./
 COPY server server
 COPY sdk sdk
-RUN pnpm --filter @waddle/sdk build && pnpm --filter @waddle/server build
+RUN pnpm --filter @waddle/sdk build \
+ && pnpm --filter @waddle/server build \
+ && pnpm --filter @waddle/server deploy --prod /deploy
 
-FROM base AS run
+FROM node:24-slim
 ENV NODE_ENV=production
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/sdk/dist ./sdk/dist
-COPY --from=build /app/sdk/package.json ./sdk/package.json
-COPY --from=build /app/server/dist ./server/dist
-COPY --from=build /app/server/package.json ./server/package.json
+WORKDIR /app
+COPY --from=build /deploy ./
 EXPOSE 8080
-CMD ["node", "server/dist/index.js"]
+CMD ["node", "dist/index.js"]

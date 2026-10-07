@@ -164,7 +164,11 @@ settings:
 
 importers:
 
-  .: {}
+  .:
+    devDependencies:
+      tinfoil:
+        specifier: ^1.2.2
+        version: 1.2.2(@aws-sdk/credential-provider-node@3.972.84)(@noble/curves@1.9.7)(@smithy/signature-v4@5.7.4)(ai@7.0.128(zod@4.6.5))(zod@4.6.5)
 
   client:
     dependencies:
