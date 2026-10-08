@@ -8,7 +8,7 @@
  * an encrypted workspace on scratch; tool events stream out live; sessions
  * are file-backed so context survives reconnects.
  */
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   createAgentSession,
@@ -54,9 +54,15 @@ type AgentHandle = {
   setSink: (s: object) => void;
   chat: (t: string) => Promise<void>;
   restoreContext: (rows: MemoryRow[]) => Promise<void>;
-  isStreaming: () => boolean;
+  nativeResumed: () => boolean;
+  sessionJsonl: () => string | null;
 };
 let ready: Promise<AgentHandle> | null = null;
+
+// Relay staging (pre-boot): the client sends restores right after unlock;
+// the session boots lazily on first use and picks these up.
+let stagedRestore: string | null = null; // path to a staged pi session file
+let stagedRows: MemoryRow[] | null = null; // legacy fallback (row-only backups)
 
 /** Black box: boot/crash evidence lands in the encrypted log, readable after
  *  restart+unlock — the only channel out of a dying process. */
@@ -65,17 +71,60 @@ export function setBlackbox(fn: (message: string) => void): void {
   blackbox = fn;
 }
 
-/** Idempotent per-boot init. The key must be set before the provider verifies. */
+/** Idempotent per-boot init. The key must be set before the provider verifies.
+ *  Boot itself is lazy: the first chat (or session read) starts the agent,
+ *  so restore relays that arrive between unlock and first use are folded in. */
 export function initAgent(apiKey: string): void {
   process.env.TINFOIL_API_KEY = apiKey;
-  if (ready) return;
-  ready = boot();
-  ready.catch((e) => blackbox?.(`agent boot failed: ${e instanceof Error ? `${e.message}` : String(e)}`));
 }
 
 export function agentReady(): boolean {
-  return ready !== null;
+  return process.env.TINFOIL_API_KEY != null; // key set (boot is lazy)
 }
+
+/** Stage a relayed pi session transcript. Returns false when the agent
+ *  already booted (relays must precede the first chat). */
+export function stageSessionJsonl(jsonl: string): boolean {
+  if (ready) return false;
+  mkdirSync(SESSIONS, { recursive: true });
+  const path = join(SESSIONS, `restore-${Date.now()}.jsonl`);
+  writeFileSync(path, jsonl, "utf8");
+  stagedRestore = path;
+  return true;
+}
+
+/** Stage relayed row history — the digest fallback for legacy backups. */
+export function stageHistoryRows(rows: MemoryRow[]): void {
+  stagedRows = rows;
+}
+
+/** Boot on first use. The session manager is seeded with the newest prior
+ *  session file (or a staged relay) — createAgentSession resumes it natively,
+ * so the agent wakes up with its full transcript, not a digest. */
+function ensureBooted(): Promise<AgentHandle> {
+  if (!process.env.TINFOIL_API_KEY) throw new Error("agent not initialized — unlock with an inference key first");
+  if (ready) return ready;
+  ready = boot();
+  ready.catch((e) => blackbox?.(`agent boot failed: ${e instanceof Error ? `${e.message}` : String(e)}`));
+  return ready;
+}
+
+/** Newest prior session file (the last conversation), or null on fresh scratch. */
+function newestSessionFile(): string | null {
+  if (!existsSync(SESSIONS)) return null;
+  let best: { path: string; mtime: number } | null = null;
+  for (const name of readdirSync(SESSIONS)) {
+    if (!name.endsWith(".jsonl")) continue;
+    const path = join(SESSIONS, name);
+    const mtime = statSync(path).mtimeMs;
+    if (!best || mtime > best.mtime) best = { path, mtime };
+  }
+  return best?.path ?? null;
+}
+
+/** The live event sink — module level, so it outlives boot and applies to
+ *  whichever session (fresh or resumed) the boot creates. */
+const sink: { onDelta?: (d: string) => void; onToolStart?: (c: string, t: string, a: unknown) => void; onToolEnd?: (c: string, t: string, r: unknown, e: boolean) => void; onAssistantFinal?: (t: string) => void; onApprovalRequest?: (req: { type: "approval_request"; callId: string; tool: string; input: unknown; at?: string }) => void; onSettled?: () => void } = {};
 
 async function boot() {
   mkdirSync(WORKSPACE, { recursive: true });
@@ -170,15 +219,25 @@ async function boot() {
     },
   ];
 
+  const resumeFrom = stagedRestore ?? newestSessionFile();
+  stagedRestore = null;
+  // Seed the manager with the prior conversation: createAgentSession
+  // rebuilds the live agent from the file (messages, model selection) —
+  // pi's own resume, no digest involved.
+  const sessionManager = SessionManager.create(WORKSPACE, SESSIONS);
+  if (resumeFrom) sessionManager.setSessionFile(resumeFrom);
+
   const { session } = await createAgentSession({
     cwd: WORKSPACE,
     modelRuntime,
     resourceLoader: loader,
     customTools: browserTools,
     // File-backed on scratch: context survives reconnects (and snapshots).
-    sessionManager: SessionManager.create(WORKSPACE, SESSIONS),
+    sessionManager,
     tools: ["read", "bash", "edit", "write", "browser_open", "browser_snapshot", "browser_click", "browser_type", "browser_scroll"],
   });
+  const nativeResumed = resumeFrom !== null;
+  if (nativeResumed) blackbox?.(`session resumed natively from ${resumeFrom}`);
 
   if (factoryError) throw new Error(`tinfoil provider factory failed (pi swallows these): ${factoryError}`);
   // The inline factory registers during session creation; the catalog
@@ -187,9 +246,6 @@ async function boot() {
   if (!tinfoilModel) throw new Error("tinfoil model not found — inline provider failed to register");
   await session.setModel(tinfoilModel);
 
-  // One persistent subscriber: everything flows through the sink, so queued
-  // and steered runs stream exactly like the first turn.
-  const sink: { onDelta?: (d: string) => void; onToolStart?: (c: string, t: string, a: unknown) => void; onToolEnd?: (c: string, t: string, r: unknown, e: boolean) => void; onAssistantFinal?: (t: string) => void; onApprovalRequest?: (req: { type: "approval_request"; callId: string; tool: string; input: unknown; at?: string }) => void; onSettled?: () => void } = {};
   const textOf = (content: unknown): string => {
     if (typeof content === "string") return content;
     if (Array.isArray(content)) {
@@ -240,9 +296,10 @@ async function boot() {
         agentBusy = false;
       }
     },
+    nativeResumed: () => nativeResumed,
     async restoreContext(rows: MemoryRow[]): Promise<void> {
-      // The Memory: sealed history becomes next-turn context — the agent
-      // wakes up remembering. Bounded digest; display:false (context, not UI).
+      // The Memory (fallback): sealed rows become next-turn context —
+      // display:false (context, not UI). Primary path is native resume.
       const text = buildRestoreContext(rows);
       if (!text) return;
       await session.sendCustomMessage(
@@ -250,16 +307,20 @@ async function boot() {
         { deliverAs: "nextTurn", triggerTurn: false },
       );
     },
-    isStreaming: () => streaming,
+    sessionJsonl: () => {
+      const file = session.sessionFile;
+      return file && existsSync(file) ? readFileSync(file, "utf8") : null;
+    },
   };
 }
 
 let agentBusy = false;
 let streaming = false;
 
-/** Wire the live event sink (the active WSS connection). */
-export async function setSink(
-  sink: {
+/** Wire the live event sink (the active WSS connection). Applies to the
+ *  session whenever it boots — no boot is forced here. */
+export function setSink(
+  next: {
     onDelta?: (delta: string) => void;
     onToolStart?: (callId: string, tool: string, args: unknown) => void;
     onToolEnd?: (callId: string, tool: string, result: unknown, isError: boolean) => void;
@@ -267,26 +328,36 @@ export async function setSink(
     onApprovalRequest?: (req: { type: "approval_request"; callId: string; tool: string; input: unknown; at?: string }) => void;
     onSettled?: () => void;
   },
-): Promise<void> {
-  if (!ready) throw new Error("agent not initialized");
-  (await ready).setSink(sink);
+): void {
+  Object.keys(sink).forEach((k) => delete sink[k as keyof typeof sink]);
+  Object.assign(sink, next);
 }
 
-/** Send a user turn: prompts when idle, steers when mid-run. */
+/** Send a user turn: prompts when idle, steers when mid-run. Boots lazily. */
 export async function chat(text: string): Promise<void> {
-  if (!ready) throw new Error("agent not initialized — unlock with an inference key first");
-  await (await ready).chat(text);
+  const handle = await ensureBooted();
+  await afterBootFallback(handle);
+  await handle.chat(text);
 }
 
-/** Inject prior sealed history as next-turn context (idempotent per boot). */
-let contextRestored = false;
-export async function restoreContext(rows: MemoryRow[]): Promise<void> {
-  if (!ready || contextRestored) return;
-  contextRestored = true;
+/** Digest fallback (legacy row-only backups): when the boot did not resume
+ *  a prior transcript natively, relayed rows become next-turn context. */
+async function afterBootFallback(handle: AgentHandle): Promise<void> {
+  if (!stagedRows || stagedRows.length === 0) return;
+  const rows = stagedRows;
+  stagedRows = null;
+  if (handle.nativeResumed()) return; // full transcript already in context
   try {
-    await (await ready).restoreContext(rows);
+    await handle.restoreContext(rows);
   } catch (e) {
-    contextRestored = false; // let a later attempt retry
+    stagedRows = rows; // let a later attempt retry
     blackbox?.(`history restore failed: ${e instanceof Error ? e.message : String(e)}`);
   }
+}
+
+/** The current session transcript (pi JSONL) — the client mirrors this in
+ *  its sealed backup so a fresh enclave can resume it verbatim. */
+export async function getSessionJsonl(): Promise<string | null> {
+  const handle = await ensureBooted();
+  return handle.sessionJsonl();
 }

@@ -29,7 +29,7 @@ import {
   readSnapshot,
   type AccountStore,
 } from "./lib/betterbase-store";
-import { sealSnapshot, openSnapshot, type SealedSnapshot } from "./lib/backup";
+import { sealSnapshot, openSnapshot, type SealedSnapshot, type SnapshotPayload } from "./lib/backup";
 import { WaddleChatTransport } from "./lib/waddle-transport";
 
 const DEV = import.meta.env.VITE_DEV === "1";
@@ -159,6 +159,7 @@ export function App() {
   const bbStoreReadyRef = useRef<Promise<AccountStore | null> | null>(null);
   const messagesRef = useRef<ChatMessage[]>([]);
   const genRef = useRef(0);
+  const attestedClientRef = useRef<AttestationResult["client"] | null>(null);
   const pushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // onServerEvent is a []-deps callback; it must see the *current* push
   // function (bbStore resolves after mount), so it reads through this ref.
@@ -284,7 +285,21 @@ export function App() {
       if (!store || !secret || messagesRef.current.length === 0) return;
       void (async () => {
         try {
-          const sealed: SealedSnapshot = await sealSnapshot(secret, messagesRef.current, genRef.current);
+          // Native-resume payload: the pi session transcript rides the same
+          // sealed envelope (account store only — localStorage stays lean).
+          let jsonl: string | null = null;
+          const client = attestedClientRef.current;
+          if (client && getToken()) {
+            try {
+              const res = await client.fetch(`${ENCLAVE_URL}/session`, {
+                headers: { Authorization: `Bearer ${getToken() ?? ""}` },
+              });
+              if (res.ok) jsonl = ((await res.json()) as { jsonl?: string | null }).jsonl ?? null;
+            } catch {
+              /* rows-only checkpoint this round */
+            }
+          }
+          const sealed: SealedSnapshot = await sealSnapshot(secret, messagesRef.current, genRef.current, jsonl);
           genRef.current = sealed.gen;
           await putSnapshot(store, JSON.stringify(sealed), sealed.gen);
         } catch (e) {
@@ -326,6 +341,7 @@ export function App() {
       setState({ phase: "unlocking" });
       try {
         setInferenceKey(keyInput);
+        attestedClientRef.current = result.client;
         await unlock(result.client, ENCLAVE_URL, keyInput || undefined);
         await getState(result.client, ENCLAVE_URL);
         const transport = transportRef.current!;
@@ -359,7 +375,7 @@ export function App() {
         }
         if (historyEvents.length === 0) {
           const secret = getSecret() ?? "";
-          let pulled: ChatMessage[] | null = null;
+          let pulled: SnapshotPayload | null = null;
           // The store opens async (workers + OPFS) and the auth context may
           // still be settling when auto-resume fires doUnlock. Poll for the
           // store promise — but only when a betterbase session exists, so
@@ -384,29 +400,36 @@ export function App() {
               console.warn("betterbase pull failed", e);
             }
           }
-          const relayHistory = async (rows: ChatMessage[]) => {
+          const relay = async (intent: Parameters<ChatConnection["send"]>[0]) => {
             // The ws may still be handshaking (or reconnecting) when the
             // pull finishes; retry until the frame actually goes out.
             for (let i = 0; i < 40; i++) {
               const target = connRef.current;
               if (!target) break;
               try {
-                target.send({
-                  type: "history_restore",
-                  rows: rows.map((m) => ({ role: m.role, text: m.text })),
-                });
+                target.send(intent);
                 return;
               } catch {
                 await new Promise((r) => setTimeout(r, 250));
               }
             }
-            throw new Error("history_restore: connection never opened");
+            throw new Error(`${intent.type}: connection never opened`);
           };
-          if (pulled && pulled.length > 0) {
-            await relayHistory(pulled);
-            seed = pulled;
+          const relayHistory = async (rows: ChatMessage[]) =>
+            relay({
+              type: "history_restore",
+              rows: rows.map((m) => ({ role: m.role, text: m.text })),
+            });
+          // Native resume first: the pi transcript must be staged before
+          // the agent's lazy boot (the first chat). Rows follow for the
+          // enclave's sealed log — the UI replay source for later clients.
+          if (pulled && (pulled.jsonl || pulled.rows.length > 0)) {
+            if (pulled.jsonl) await relay({ type: "session_restore", jsonl: pulled.jsonl });
+            if (pulled.rows.length > 0) await relayHistory(pulled.rows);
+            seed = pulled.rows;
           } else {
-            seed = (await loadSnapshot(secret)) ?? [];
+            const device = await loadSnapshot(secret);
+            seed = device?.rows ?? [];
             if (seed.length > 0) await relayHistory(seed);
           }
         }

@@ -27,6 +27,7 @@ export type GatewayEvent =
   /** Restored-history row (device snapshot or betterbase pull, sealed on relay). */
   | { type: "history_row"; role: "user" | "assistant" | "tool"; text: string; at?: string }
   | { type: "history_restored"; count: number }
+  | { type: "session_restored"; staged: boolean }
   | { type: "sleep_proposed"; reason: string }
   | { type: "sleep_cancelled"; reason: string }
   | { type: "sleep"; reason: string; at?: string }
@@ -73,7 +74,10 @@ export type UserIntent =
   | { type: "sleep_now" }
   | { type: "approval_response"; callId: string; approved: boolean }
   /** Relay a decrypted snapshot into the fresh enclave's sealed log. */
-  | { type: "history_restore"; rows: Array<{ role: "user" | "assistant" | "tool"; text: string }> };
+  | { type: "history_restore"; rows: Array<{ role: "user" | "assistant" | "tool"; text: string }> }
+  // Native resume: the client relays the backed-up pi session transcript
+  // (its own JSONL) so the agent boots with full context, not a digest.
+  | { type: "session_restore"; jsonl: string };
 
 /** Live stream chunk (transient — final message events are the persisted truth). */
 export interface DeltaEvent {

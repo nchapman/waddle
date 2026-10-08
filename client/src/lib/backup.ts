@@ -39,16 +39,26 @@ async function backupKey(secretB64: string): Promise<CryptoKey> {
 
 export type { SealedSnapshot };
 
+/** What travels inside the envelope: the UI rows plus (v2) the pi
+ *  session transcript — the agent's native-resume payload. Old envelopes
+ *  seal a bare array; openSnapshot normalizes both. */
+export interface SnapshotPayload {
+  rows: ChatMessage[];
+  jsonl?: string | null;
+}
+
 /** Encrypt under HKDF(secret, "waddle/backup") — the one envelope both the
  *  device snapshot and the betterbase store use. */
 export async function sealSnapshot(
   secret: string,
   messages: ChatMessage[],
   prevGen = 0,
+  jsonl?: string | null,
 ): Promise<SealedSnapshot> {
   const key = await backupKey(secret);
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const plaintext = new TextEncoder().encode(JSON.stringify(messages));
+  const payload: SnapshotPayload = { rows: messages, ...(jsonl ? { jsonl } : {}) };
+  const plaintext = new TextEncoder().encode(JSON.stringify(payload));
   const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext);
   return {
     v: 1,
@@ -62,7 +72,7 @@ export async function sealSnapshot(
 export async function openSnapshot(
   secret: string,
   sealed: SealedSnapshot,
-): Promise<ChatMessage[] | null> {
+): Promise<SnapshotPayload | null> {
   try {
     const key = await backupKey(secret);
     const pt = await crypto.subtle.decrypt(
@@ -70,15 +80,20 @@ export async function openSnapshot(
       key,
       unb64(sealed.ct) as unknown as BufferSource,
     );
-    return JSON.parse(new TextDecoder().decode(pt)) as ChatMessage[];
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(pt));
+    if (Array.isArray(parsed)) return { rows: parsed as ChatMessage[] }; // v1 envelope
+    if (parsed && typeof parsed === "object" && Array.isArray((parsed as SnapshotPayload).rows)) {
+      return parsed as SnapshotPayload;
+    }
+    return null;
   } catch {
     return null; // wrong secret or corrupt — treat as absent
   }
 }
 
-export async function saveSnapshot(secret: string, messages: ChatMessage[]): Promise<void> {
+export async function saveSnapshot(secret: string, messages: ChatMessage[], jsonl?: string | null): Promise<void> {
   const prev = loadSealed();
-  const snap = await sealSnapshot(secret, messages, prev?.gen ?? 0);
+  const snap = await sealSnapshot(secret, messages, prev?.gen ?? 0, jsonl);
   localStorage.setItem(BACKUP_KEY, JSON.stringify(snap));
 }
 
@@ -91,7 +106,7 @@ function loadSealed(): SealedSnapshot | null {
   }
 }
 
-export async function loadSnapshot(secret: string): Promise<ChatMessage[] | null> {
+export async function loadSnapshot(secret: string): Promise<SnapshotPayload | null> {
   const sealed = loadSealed();
   if (!sealed) return null;
   return openSnapshot(secret, sealed);

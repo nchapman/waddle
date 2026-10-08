@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { hello, type GatewayEvent, type UnlockRequest, type UnlockResponse, type StateResponse, type UserIntent } from "@waddle/sdk";
 import { Lock } from "./state.js";
 import { EventLog } from "./log.js";
-import { initAgent, chat, agentReady, restoreContext, setBlackbox, setSink } from "./agent.js";
+import { initAgent, chat, agentReady, stageSessionJsonl, stageHistoryRows, setBlackbox, setSink, getSessionJsonl } from "./agent.js";
 import { resolveApproval, denyAllPending, setOutcomeEmitter } from "./approvals.js";
 import { setBrowserEvents, browserLive, captureNow } from "./browser.js";
 
@@ -88,17 +88,10 @@ app.post("/unlock", async (request, reply) => {
     const { token, enrolled } = lock.unlock(secret, nonce);
     if (!log) log = new EventLog(lock.logKey, lock.storage);
     // The inference key rides the same attested, EHBP-encrypted unlock —
-    // memory-only, never on disk, never in config.
+    // memory-only, never on disk, never in config. The agent boots lazily
+    // on first use; a persisted pi session file (same scratch as this log)
+    // is resumed natively at boot — no digest needed on this path.
     if (inferenceKey) initAgent(inferenceKey);
-    // The Memory: a persisted log means prior sessions — hand them to the
-    // agent as next-turn context (no-op on a fresh boot; the relay path
-    // below covers the sleep-wiped case).
-    if (log) {
-      const prior = log.all
-        .filter((e) => (e.type === "message" && (e.role === "user" || e.role === "assistant")) || e.type === "history_row")
-        .map((e) => ({ role: (e.role === "tool" ? "tool" : e.role === "assistant" ? "assistant" : "user") as "user" | "assistant" | "tool", text: String(e.text ?? "") }));
-      if (prior.length > 0 && agentReady()) void restoreContext(prior);
-    }
     const res: UnlockResponse = { token, enrolled };
     return res;
   } catch (e) {
@@ -115,6 +108,17 @@ app.get("/state", async (request, reply) => {
     events: log?.all ?? [],
   };
   return res;
+});
+
+// The pi session transcript (JSONL) — the client mirrors it in its sealed
+// betterbase backup so a fresh enclave can resume the conversation natively.
+app.get("/session", async (request, reply) => {
+  if (!requireSession(request)) return reply.code(401).send({ error: "locked" });
+  try {
+    return { jsonl: await getSessionJsonl() };
+  } catch (e) {
+    return reply.code(500).send({ error: e instanceof Error ? e.message : String(e) });
+  }
 });
 
 // One agent turn at a time for First Light (pi requires steer/followUp
@@ -197,7 +201,7 @@ app.get("/ws", { websocket: true }, (socket, request) => {
     sockets.delete(socket);
     // Mid-turn disconnect: keep logging the run (the sealed log is the truth);
     // only the live wire is gone. Deltas drop, finals and tools persist.
-    void setSink({
+    setSink({
       onToolStart: (callId, tool, args) => {
         log?.append({ type: "tool_start", callId, tool, args, at: new Date().toISOString() });
       },
@@ -207,11 +211,11 @@ app.get("/ws", { websocket: true }, (socket, request) => {
       onAssistantFinal: (text) => {
         log?.append({ type: "message", role: "assistant", text, at: new Date().toISOString() });
       },
-    }).catch(() => undefined);
+    });
     denyAllPending(); // no client: the gate denies, the turn never hangs
   });
   lastActivity = Date.now();
-  void setSink({
+  setSink({
     onDelta: (d) => send({ type: "delta", messageId: "live", text: d }),
     onToolStart: (callId, tool, args) => {
       const evt = { type: "tool_start", callId, tool, args, at: new Date().toISOString() } as const;
@@ -230,7 +234,7 @@ app.get("/ws", { websocket: true }, (socket, request) => {
       log?.append({ ...evt });
       send(evt);
     },
-  }).catch((e) => send({ type: "error", message: `sink: ${e instanceof Error ? e.message : String(e)}` }));
+  });
   send({ type: "hello", hello: hello(VERSION, false) });
   const backlog = log?.all ?? [];
   for (const event of backlog) send(event as GatewayEvent);
@@ -271,14 +275,20 @@ app.get("/ws", { websocket: true }, (socket, request) => {
       }
       // No broadcast: the relaying client seeds from its own copy; future
       // connections get the rows via replay from the sealed log.
-      if (count > 0 && agentReady()) {
-        void restoreContext(
-          rows
-            .filter((r) => r.role === "user" || r.role === "assistant" || r.role === "tool")
-            .map((r) => ({ role: r.role as "user" | "assistant" | "tool", text: String(r.text ?? "") })),
-        );
-      }
+      const staged = rows
+        .filter((r) => r && typeof r === "object" && (r.role === "user" || r.role === "assistant" || r.role === "tool") && typeof r.text === "string" && r.text.trim())
+        .map((r) => ({ role: r.role as "user" | "assistant" | "tool", text: String(r.text ?? "") }));
+      if (staged.length > 0) stageHistoryRows(staged); // digest fallback if boot didn't resume natively
       send({ type: "history_restored", count });
+      return;
+    }
+    if (intent.type === "session_restore") {
+      const jsonl = (intent as { jsonl?: unknown }).jsonl;
+      // Stage the pi transcript: the lazily-booted session resumes it
+      // verbatim. Must precede the first chat (late relays fall back to
+      // the row digest above).
+      const staged = typeof jsonl === "string" && jsonl.trim().length > 0 ? stageSessionJsonl(jsonl) : false;
+      send({ type: "session_restored", staged });
       return;
     }
     if (intent.type !== "user_message" || !intent.text?.trim()) return;
