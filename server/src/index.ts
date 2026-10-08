@@ -158,7 +158,9 @@ app.get("/ws", { websocket: true }, (socket, request) => {
   socket.on("close", () => sockets.delete(socket));
   lastActivity = Date.now();
   send({ type: "hello", hello: hello(VERSION, false) });
-  for (const event of log?.all ?? []) send(event as GatewayEvent);
+  const backlog = log?.all ?? [];
+  for (const event of backlog) send(event as GatewayEvent);
+  send({ type: "replay_done", count: backlog.length });
 
   socket.on("message", async (raw: unknown) => {
     lastActivity = Date.now();

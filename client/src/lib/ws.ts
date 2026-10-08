@@ -20,7 +20,19 @@ export function connectChat(
 ): ChatConnection {
   const wsURL = `${enclaveURL.replace(/^http/, "ws")}/ws?token=${encodeURIComponent(token)}`;
   const socket = new WebSocket(wsURL);
-  socket.onmessage = (msg) => onEvent(JSON.parse(String(msg.data)) as ServerEvent);
+  // Replay guard: events before replay_done are history. Sleep events in the
+  // backlog are records of past naps — reacting to them would re-sleep a
+  // freshly woken enclave (and re-fire the stop relay).
+  let replayed = false;
+  socket.onmessage = (msg) => {
+    const event = JSON.parse(String(msg.data)) as ServerEvent;
+    if (event.type === "replay_done") {
+      replayed = true;
+      return;
+    }
+    if (!replayed && (event.type === "sleep" || event.type === "sleep_proposed")) return;
+    onEvent(event);
+  };
   socket.onclose = onClose;
   return {
     send: (intent) => socket.send(JSON.stringify(intent)),

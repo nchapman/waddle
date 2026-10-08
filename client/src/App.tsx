@@ -6,6 +6,7 @@ import { saveSnapshot, loadSnapshot } from "./lib/backup";
 import { getSecret } from "./lib/session";
 import type { StateResponse } from "@waddle/sdk";
 
+const DEV = import.meta.env.VITE_DEV === "1";
 const ENCLAVE_URL =
   import.meta.env.VITE_ENCLAVE_URL ?? "https://waddle.ddg-waddle.containers.tinfoil.dev";
 const CONFIG_REPO = import.meta.env.VITE_CONFIG_REPO ?? "nchapman/waddle-config";
@@ -44,6 +45,19 @@ const box = (bg: string): React.CSSProperties => ({
 });
 const fp = (s: string) => `${s.slice(0, 16)}…${s.slice(-8)}`;
 
+/** Dev parity: a structural stand-in so session/unlock code paths run unchanged. */
+const DEV_RESULT = {
+  ok: true,
+  client: { fetch: (...a: Parameters<typeof fetch>) => fetch(...a) },
+  configRepo: "dev",
+  enclaveHost: "localhost",
+  releaseTag: "dev",
+  releaseDigest: "",
+  codeFingerprint: "",
+  steps: {},
+  firstPin: false,
+} as unknown as import("./lib/attestation").AttestationResult;
+
 export function App() {
   const [state, setState] = useState<State>({ phase: "verifying" });
   const [keyInput, setKeyInput] = useState(getInferenceKey());
@@ -53,6 +67,12 @@ export function App() {
   const run = useCallback(async () => {
     setState({ phase: "verifying" });
     try {
+      if (DEV) {
+        const res = await fetch(`${ENCLAVE_URL}/health`);
+        const health = (await res.json()) as { locked: boolean };
+        setState({ phase: "attested", result: DEV_RESULT, locked: health.locked });
+        return;
+      }
       const result = await verifyEnclave(ENCLAVE_URL, CONFIG_REPO);
       if (result.pinConflict) {
         setState({ phase: "blocked", result });
@@ -208,7 +228,7 @@ export function App() {
       {state.phase === "attested" && (
         <>
           <p style={box("#e8f5e9")}>
-            ✅ attested · {state.result.releaseTag} · pinned{" "}
+            {DEV ? "🛠 DEV — no attestation (local parity)" : `✅ attested · ${state.result.releaseTag} · pinned`}{" "}
             {state.result.firstPin ? "(first connect — TOFU)" : "(match)"}
           </p>
           {state.locked ? (
@@ -255,7 +275,7 @@ export function App() {
       {state.phase === "chat" && (
         <>
           <p style={box("#e8f5e9")}>
-            ✅ attested · {state.result.releaseTag} · unlocked ·{" "}
+            {DEV ? "🛠 DEV — unlocked (local parity)" : `✅ attested · ${state.result.releaseTag} · unlocked`} ·{" "}
             {state.connected ? "stream live" : "⚠️ disconnected — reload to re-replay"}
           </p>
           <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", minHeight: 200 }}>

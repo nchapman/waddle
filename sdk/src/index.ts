@@ -21,7 +21,9 @@ export type GatewayEvent =
   | { type: "message"; id?: string; at?: string; role: "user" | "assistant"; text: string }
   | { type: "sleep_proposed"; reason: string }
   | { type: "sleep_cancelled"; reason: string }
-  | { type: "sleep"; reason: string; at?: string };
+  | { type: "sleep"; reason: string; at?: string }
+  /** Marks the end of the initial backlog replay; live events follow. */
+  | { type: "replay_done"; count: number };
 
 export function hello(
   version: string,

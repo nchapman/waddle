@@ -48,7 +48,7 @@ async function wake(instance: string): Promise<string> {
     if (msg.includes("cannot deploy a running instance")) {
       const { stdout } = await exec(
         "tinfoil",
-        ["container", "update", instance, "--tag", process.env.CONCIERGE_WAKE_TAG ?? "v0.0.13", "--yes"],
+        ["container", "update", instance, "--tag", process.env.CONCIERGE_WAKE_TAG ?? "v0.0.14", "--yes"],
         { timeout: 180_000 },
       );
       return "(zombie redeploy) " + stdout.trim().split("\n").slice(-2).join(" | ");
