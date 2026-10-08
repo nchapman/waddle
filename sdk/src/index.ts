@@ -18,7 +18,7 @@ export interface HelloResponse {
 export type GatewayEvent =
   | { type: "hello"; hello: HelloResponse }
   | { type: "task_started"; taskId: string; goal: string }
-  | { type: "message"; eventId: string; role: "user" | "assistant"; text: string }
+  | { type: "message"; id?: string; at?: string; role: "user" | "assistant"; text: string }
   | { type: "sleep_proposed"; reason: string }
   | { type: "sleep_cancelled"; reason: string };
 
@@ -50,4 +50,19 @@ export interface StateResponse {
   unlocked: true;
   enrolled: boolean;
   events: Array<Record<string, unknown>>;
+}
+
+/** Client → server intent (WSS inbound). Inbound is always intent, never history. */
+export type UserIntent = { type: "user_message"; text: string };
+
+/** Live stream chunk (transient — final message events are the persisted truth). */
+export interface DeltaEvent {
+  type: "delta";
+  messageId: string;
+  text: string;
+}
+
+export interface ErrorEvent {
+  type: "error";
+  message: string;
 }

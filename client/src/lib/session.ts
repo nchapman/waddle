@@ -7,11 +7,22 @@
  * Light. Real custody (passphrase wrap / OS keystore) comes later —
  * the wire protocol does not change when it does.
  */
-import type { SecureClient } from "tinfoil";
 import type { UnlockResponse, StateResponse } from "@waddle/sdk";
+
+/** Structural: the attested SecureClient in prod, plain fetch in dev parity mode. */
+export type VerifiedFetcher = { fetch: typeof fetch };
 
 const SECRET_KEY = "waddle.secret";
 const TOKEN_KEY = "waddle.token";
+const INFERENCE_KEY = "waddle.inferenceKey";
+
+export function getInferenceKey(): string {
+  return localStorage.getItem(INFERENCE_KEY) ?? "";
+}
+
+export function setInferenceKey(key: string): void {
+  localStorage.setItem(INFERENCE_KEY, key);
+}
 
 function b64(bytes: Uint8Array): string {
   return btoa(String.fromCharCode(...bytes));
@@ -30,17 +41,24 @@ export function forgetSecret(): void {
   localStorage.removeItem(SECRET_KEY);
   localStorage.removeItem(TOKEN_KEY);
 }
-
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
 }
 
-export async function unlock(client: SecureClient, enclaveURL: string): Promise<UnlockResponse> {
+export async function unlock(
+  client: VerifiedFetcher,
+  enclaveURL: string,
+  inferenceKey?: string,
+): Promise<UnlockResponse> {
   const nonce = b64(crypto.getRandomValues(new Uint8Array(16)));
   const res = await client.fetch(`${enclaveURL}/unlock`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ secret: getSecret(), nonce }),
+    body: JSON.stringify({
+      secret: getSecret(),
+      nonce,
+      ...(inferenceKey ? { inferenceKey } : {}),
+    }),
   });
   const body = (await res.json()) as UnlockResponse & { error?: string };
   if (!res.ok) throw new Error(body.error ?? `unlock failed (${res.status})`);
@@ -48,7 +66,10 @@ export async function unlock(client: SecureClient, enclaveURL: string): Promise<
   return body;
 }
 
-export async function getState(client: SecureClient, enclaveURL: string): Promise<StateResponse> {
+export async function getState(
+  client: VerifiedFetcher,
+  enclaveURL: string,
+): Promise<StateResponse> {
   const res = await client.fetch(`${enclaveURL}/state`, {
     headers: { Authorization: `Bearer ${getToken() ?? ""}` },
   });

@@ -10,9 +10,11 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "1.0.4",
     "@earendil-works/pi-coding-agent": "^1.0.4",
     "@fastify/cors": "^11.3.0",
     "@fastify/websocket": "^11.0.0",
+    "@tinfoilsh/pi-provider": "^0.1.2",
     "@waddle/sdk": "workspace:*",
     "fastify": "^5.0.0",
     "tinfoil": "^1.2.2",
