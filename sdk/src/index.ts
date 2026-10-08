@@ -20,7 +20,8 @@ export type GatewayEvent =
   | { type: "task_started"; taskId: string; goal: string }
   | { type: "message"; id?: string; at?: string; role: "user" | "assistant"; text: string }
   | { type: "sleep_proposed"; reason: string }
-  | { type: "sleep_cancelled"; reason: string };
+  | { type: "sleep_cancelled"; reason: string }
+  | { type: "sleep"; reason: string; at?: string };
 
 export function hello(
   version: string,

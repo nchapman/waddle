@@ -109,6 +109,41 @@ app.get("/state", async (request, reply) => {
 // semantics for concurrent prompts — that arrives with the real harness).
 let streaming = false;
 
+// ── Sleep: the idle gate ────────────────────────────────────────────────
+// Unlocked + zero attached clients + idle past the gate → checkpoint (the
+// log is already sealed per-event) → broadcast → graceful exit. The
+// platform's restart policy is `no` (config default), so the instance
+// stops — and billing with it. The concierge wakes it.
+const IDLE_MS = Number(process.env.WADDLE_IDLE_MS ?? 120_000);
+const sockets = new Set<import("ws").WebSocket>();
+let lastActivity = Date.now();
+let sleeping = false;
+
+async function sleep(reason: string): Promise<never> {
+  if (sleeping) await new Promise(() => {}); // already going down
+  sleeping = true;
+  app.log.info({ reason }, "sleep gate fired");
+  log?.append({ type: "sleep", reason, at: new Date().toISOString() });
+  for (const s of sockets) {
+    try {
+      s.send(JSON.stringify({ type: "sleep", reason }));
+      s.close();
+    } catch {
+      /* going down regardless */
+    }
+  }
+  setTimeout(() => process.exit(0), 500).unref();
+  await app.close().catch(() => process.exit(0));
+  process.exit(0);
+}
+
+setInterval(() => {
+  if (sleeping || !lock.unlocked) return;
+  if (sockets.size === 0 && Date.now() - lastActivity > IDLE_MS) {
+    void sleep(`idle ${Math.round(IDLE_MS / 1000)}s with no clients`);
+  }
+}, 10_000).unref();
+
 // The WSS event stream: token via query param (browsers cannot set WS
 // headers; the channel rides the attested TLS + EHBP path).
 app.get("/ws", { websocket: true }, (socket, request) => {
@@ -119,11 +154,20 @@ app.get("/ws", { websocket: true }, (socket, request) => {
   }
   const send = (event: GatewayEvent | import("@waddle/sdk").DeltaEvent | import("@waddle/sdk").ErrorEvent) =>
     socket.send(JSON.stringify(event));
+  sockets.add(socket);
+  socket.on("close", () => sockets.delete(socket));
+  lastActivity = Date.now();
   send({ type: "hello", hello: hello(VERSION, false) });
   for (const event of log?.all ?? []) send(event as GatewayEvent);
 
   socket.on("message", async (raw: unknown) => {
-    const intent = JSON.parse(String(raw)) as UserIntent;
+    lastActivity = Date.now();
+    const intent = JSON.parse(String(raw)) as { type?: string; text?: string };
+    if (intent.type === "sleep_now") {
+      send({ type: "sleep_proposed", reason: "user requested" });
+      void sleep("user requested");
+      return;
+    }
     if (intent.type !== "user_message" || !intent.text?.trim()) return;
     if (!agentReady()) {
       send({ type: "error", message: "no inference key — reload and unlock with one" });
