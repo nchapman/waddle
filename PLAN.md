@@ -247,6 +247,30 @@ Step-up re-entry and connector-class approvals remain with the connector work;
 the gate's deny-timeout and disconnect paths emit verdict events so no banner
 can dangle.
 
+**Divergences (The Backbone, as built):** durable history lives in the user's
+betterbase store via a *tokenless relay*: the browser — never the enclave —
+holds the betterbase session (OAuth+PKCE, public client `a5be475c-5f9b-47f0-aa39-ace116f7a8c0`,
+scopes `openid sync`). The criterion-2 letter ("token delegated to the enclave
+at unlock, memory-only") diverges deliberately: no betterbase credential ever
+enters the enclave, even in memory. The snapshot is the same AEAD envelope as
+the device backup (HKDF(secret,"waddle/backup")), double-sealed under
+betterbase's platform E2EE — the store and the server both see only
+ciphertext. On a fresh boot (log empty or sleep-wiped) the client pulls,
+decrypts locally, and relays plaintext history over the attested ws
+(`history_restore` intent); the enclave seals those rows into its log — the
+same trust it holds for live turns. Device localStorage is the signed-out
+fallback. Facts that cost debugging time: sync record ids must be UUIDs
+(server storage layer rejects non-UUID ids — a rejected batch is quarantined
+*silently*); the local db is offline-only until a `BetterbaseProvider` mounts
+(sync engine); sleep wipes the scratch log down to the sleep marker, so the
+hydrate decision filters bookkeeping events. Compose parity (criterion 6) is
+the primary dev loop: all flows proven against betterbase-dev alongside the
+compose stack. v0.0.16 (digest `33374016…`) is built, pushed, digest-pinned
+in the config repo (tag + release `v0.0.16` published), and boots clean —
+but Tinfoil's control plane 500s on every new-version `update`/`deploy
+--tag` (old-version deploy works; retry over 20+ min, backoff, both paths);
+live-enclave proofs (criterion 7) resume when the platform recovers.
+
 **First milestone — First Light (the walking skeleton; Phase 0 + the spine of Phase 1):** *open the client, watch the attestation badge turn green, unlock with a secret only you hold, have a real conversation with the agent inside the enclave — then watch it sleep, and wake it back up.* Acceptance: (1) image on public GHCR digest-pinned, measured config repo, attested instance live; (2) in-browser SecureClient verification + report + TOFU pin that blocks on digest change; (3) lock screen → unlock: client-generated 64-byte secret delivered post-verification, locked→unlocked, session derived from the transcript; (4) real conversation: message → pi via Tinfoil inference (`@tinfoilsh/pi-provider` first, OpenAI-compat fallback) → streamed through the WSS event log → assistant-ui renders; refresh = full history via replay; (5) sleep + wake for real: idle gate → process exit (`restart: no`) → instance (and billing) stops → wake button → concierge boots → re-attest → unlock → snapshot restore → history intact; (6) identical flows under compose (docker backend) with betterbase-dev alongside. *Not in scope:* approvals UI, browser, connectors, memory, snapshots, multi-device.
 
 **Phase 0 — Spike the real risks (2–3 days).**

@@ -5,6 +5,10 @@ FROM node:24-slim AS build
 RUN corepack enable
 WORKDIR /app
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
+# The image builds server+sdk only; the client's betterbase source link
+# (outside this workspace) would break pnpm deploy. Strip it from the
+# lockfile — the client importer is not installed here.
+RUN sed -i '/betterbase/d' pnpm-lock.yaml
 COPY server/package.json server/package.json
 COPY sdk/package.json sdk/package.json
 RUN pnpm install --frozen-lockfile
