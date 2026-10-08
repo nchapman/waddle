@@ -7,6 +7,16 @@ import { getSecret } from "./lib/session";
 import type { StateResponse } from "@waddle/sdk";
 import type { UIMessage } from "@ai-sdk/react";
 import { ChatSurface } from "./ChatSurface";
+import { useAuth } from "betterbase/auth/react";
+import { BetterbaseProvider } from "betterbase/sync/react";
+import { COLLECTIONS } from "./lib/bb-collections";
+import {
+  openAccountStore,
+  putSnapshot,
+  readSnapshot,
+  type AccountStore,
+} from "./lib/betterbase-store";
+import { sealSnapshot, openSnapshot, type SealedSnapshot } from "./lib/backup";
 import { WaddleChatTransport } from "./lib/waddle-transport";
 
 const DEV = import.meta.env.VITE_DEV === "1";
@@ -64,11 +74,45 @@ const DEV_RESULT = {
   firstPin: false,
 } as unknown as import("./lib/attestation").AttestationResult;
 
+
+
+
+/** Deterministic history seed: map sealed log events to surface rows. */
+function eventsToRows(events: Array<Record<string, unknown>>): ChatMessage[] {
+  const rows: ChatMessage[] = [];
+  for (const e of events) {
+    const t = e.type as string | undefined;
+    if (t === "message" && (e.role === "user" || e.role === "assistant")) {
+      rows.push({ role: e.role as "user" | "assistant", text: String(e.text ?? "") });
+    } else if (t === "history_row" && typeof e.text === "string") {
+      rows.push({ role: e.role as ChatMessage["role"], text: e.text });
+    } else if (t === "tool_start") {
+      rows.push({ role: "tool", text: `⚙️ ${e.tool} ${JSON.stringify(e.args ?? {}).slice(0, 140)}` } as ChatMessage);
+    } else if (t === "tool_end") {
+      const result = JSON.stringify(e.result ?? "").slice(0, 100);
+      rows.push({ role: "tool", text: `${e.isError ? "⛔" : "✔"} ${e.tool} → ${result}` } as ChatMessage);
+    }
+  }
+  return rows;
+}
+
 export function App() {
   const [state, setState] = useState<State>({ phase: "verifying" });
   const [keyInput, setKeyInput] = useState(getInferenceKey());
   const connRef = useRef<ChatConnection | null>(null);
   const transportRef = useRef<WaddleChatTransport | null>(null);
+  const bb = useAuth();
+  const [bbStore, setBbStore] = useState<AccountStore | null>(null);
+  const bbStoreReadyRef = useRef<Promise<AccountStore | null> | null>(null);
+  const messagesRef = useRef<ChatMessage[]>([]);
+  const genRef = useRef(0);
+  const pushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // onServerEvent is a []-deps callback; it must see the *current* push
+  // function (bbStore resolves after mount), so it reads through this ref.
+  const pushFnRef = useRef<() => void>(() => {});
+  // True while the ws backlog for an already-seeded log streams in — its
+  // rows are in the seed, so ingesting them again would duplicate history.
+  const suppressReplayRef = useRef(false);
   if (!transportRef.current) transportRef.current = new WaddleChatTransport();
   const [draft, setDraft] = useState("");
 
@@ -103,12 +147,27 @@ export function App() {
   const onServerEvent = useCallback((event: ServerEvent) => {
     setState((s) => {
       // replay_done must land even while the unlock transition is finishing,
-      // or the chat waits forever on "replaying history…".
-      if (event.type === "replay_done" && s.phase === "chat") return { ...s, replayed: true };
+      // or the chat waits forever on "replaying history…". It also disarms
+      // backlog suppression (the backlog is fully streamed by then).
+      if (event.type === "replay_done") {
+        suppressReplayRef.current = false;
+        return s.phase === "chat" ? { ...s, replayed: true } : s;
+      }
+      if (suppressReplayRef.current && s.phase === "chat") {
+        // Backlog duplicate of the seeded history — drop.
+        if (event.type === "message" || event.type === "history_row" || event.type === "tool_start" || event.type === "tool_end") return s;
+      }
       if (s.phase !== "chat") return s;
+      if (event.type === "history_row") {
+        const messages = [...s.messages, { role: event.role, text: event.text } as ChatMessage];
+        messagesRef.current = messages;
+        return { ...s, messages };
+      }
       if (event.type === "message" && (event.role === "user" || event.role === "assistant")) {
         const messages = [...s.messages, { role: event.role, text: event.text }];
-        // Device snapshot after every sealed message — sleep comes when it wants.
+        messagesRef.current = messages;
+        pushFnRef.current();
+        // Device snapshot (fallback) after every sealed message.
         void saveSnapshot(getSecret(), messages);
         return {
           ...s,
@@ -119,6 +178,8 @@ export function App() {
       }
       if (event.type === "tool_start") {
         const messages = [...s.messages, { role: "tool", text: `⚙️ ${event.tool} ${JSON.stringify(event.args ?? {}).slice(0, 140)}` } as ChatMessage];
+        messagesRef.current = messages;
+        pushFnRef.current();
         return { ...s, messages };
       }
       if (event.type === "tool_end") {
@@ -137,7 +198,6 @@ export function App() {
       if (event.type === "approval_request") {
         return { ...s, pendingApproval: { callId: event.callId, tool: event.tool, input: event.input } };
       }
-      if (event.type === "replay_done") return { ...s, replayed: true };
       if (event.type === "run_settled") return s; // the transport finishes its stream
       // Deltas and tool activity render inside the assistant-ui thread. 
       if (event.type === "error") return { ...s, error: event.message };
@@ -156,6 +216,52 @@ export function App() {
       return s;
     });
   }, []);
+
+  /** Checkpoint to the user's betterbase store (debounced; sealed envelope). */
+  const scheduleBetterbasePush = useCallback(() => {
+    if (pushTimer.current) clearTimeout(pushTimer.current);
+    pushTimer.current = setTimeout(() => {
+      const store = bbStore;
+      const secret = getSecret();
+      if (!store || !secret || messagesRef.current.length === 0) return;
+      void (async () => {
+        try {
+          const sealed: SealedSnapshot = await sealSnapshot(secret, messagesRef.current, genRef.current);
+          genRef.current = sealed.gen;
+          await putSnapshot(store, JSON.stringify(sealed), sealed.gen);
+        } catch (e) {
+          console.warn("betterbase push failed", e);
+        }
+      })();
+    }, 800);
+  }, [bbStore]);
+
+  pushFnRef.current = scheduleBetterbasePush;
+
+  // Open the account store when signed in (scope = personal space).
+  useEffect(() => {
+    if (!bb.isAuthenticated || !bb.session) {
+      setBbStore(null);
+      return;
+    }
+    let disposed = false;
+    const spaceId = bb.personalSpaceId ?? bb.session.getPersonalSpaceId?.() ?? null;
+    if (!spaceId) return;
+    const ready = openAccountStore(spaceId)
+      .then((store) => {
+        if (disposed) return null;
+        setBbStore(store);
+        return store;
+      })
+      .catch((e) => {
+        console.warn("betterbase store failed to open", e);
+        return null;
+      });
+    bbStoreReadyRef.current = ready;
+    return () => {
+      disposed = true;
+    };
+  }, [bb.isAuthenticated, bb.session, bb.personalSpaceId]);
 
   const doUnlock = useCallback(
     async (result: AttestationResult) => {
@@ -177,18 +283,83 @@ export function App() {
         );
         connRef.current = conn;
         transport.attach((intent) => conn.send(intent));
-        // The enclave's scratch is wiped at sleep; if its log is empty, the
-        // device snapshot is the history. (Full server-side hydrate —
-        // importFromJsonl — arrives with the betterbase snapshot work.)
-        const restored = await loadSnapshot(getSecret());
+        // Fresh boot (scratch wiped): hydrate from the user's betterbase
+        // store first, relay the rows into the enclave's sealed log, and
+        // seed the surface. Device snapshot is the signed-out fallback.
         const state2 = await getState(result.client, ENCLAVE_URL);
+        // Sleep wipes the scratch: a post-wake log may hold only bookkeeping
+        // (the sleep marker). Only history-bearing rows count for seeding.
+        const historyEvents = state2.events.filter((e) => e.type !== "sleep");
+        let seed: ChatMessage[] = [];
+        if (historyEvents.length > 0) {
+          // The log already holds the history — seed from it directly and
+          // suppress the ws backlog's duplicate rows (cleared on replay_done,
+          // with a failsafe so live events can never be eaten).
+          seed = eventsToRows(historyEvents);
+          suppressReplayRef.current = seed.length > 0;
+          setTimeout(() => (suppressReplayRef.current = false), 8000);
+        }
+        if (historyEvents.length === 0) {
+          const secret = getSecret() ?? "";
+          let pulled: ChatMessage[] | null = null;
+          // The store opens async (workers + OPFS) and the auth context may
+          // still be settling when auto-resume fires doUnlock. Poll for the
+          // store promise — but only when a betterbase session exists, so
+          // signed-out unlocks never wait.
+          const hasBbSession = () =>
+            Object.keys(localStorage).some((k) => k.startsWith("betterbase_session_waddle_"));
+          const store = bbStore ?? (await new Promise<AccountStore | null>((resolve) => {
+            if (!hasBbSession()) return resolve(null);
+            const deadline = Date.now() + 5000;
+            (function tick() {
+              const ready = bbStoreReadyRef.current;
+              if (ready) return void ready.then(resolve);
+              if (Date.now() > deadline) return resolve(null);
+              setTimeout(tick, 60);
+            })();
+          }));
+          if (store && secret) {
+            try {
+              const blob = await readSnapshot(store);
+              if (blob) pulled = await openSnapshot(secret, JSON.parse(blob) as SealedSnapshot);
+            } catch (e) {
+              console.warn("betterbase pull failed", e);
+            }
+          }
+          const relayHistory = async (rows: ChatMessage[]) => {
+            // The ws may still be handshaking (or reconnecting) when the
+            // pull finishes; retry until the frame actually goes out.
+            for (let i = 0; i < 40; i++) {
+              const target = connRef.current;
+              if (!target) break;
+              try {
+                target.send({
+                  type: "history_restore",
+                  rows: rows.map((m) => ({ role: m.role, text: m.text })),
+                });
+                return;
+              } catch {
+                await new Promise((r) => setTimeout(r, 250));
+              }
+            }
+            throw new Error("history_restore: connection never opened");
+          };
+          if (pulled && pulled.length > 0) {
+            await relayHistory(pulled);
+            seed = pulled;
+          } else {
+            seed = (await loadSnapshot(secret)) ?? [];
+            if (seed.length > 0) await relayHistory(seed);
+          }
+        }
+        messagesRef.current = seed;
         setState({
           phase: "chat",
           result,
-          messages: state2.events.length === 0 && restored ? restored : [],
+          messages: seed,
           streaming: "",
           connected: true,
-          replayed: false, // set when the gateway finishes the backlog
+          replayed: historyEvents.length > 0 ? false : true,
         });
       } catch (e) {
         setState({ phase: "error", message: `unlock: ${e instanceof Error ? e.message : String(e)}` });
@@ -265,7 +436,7 @@ export function App() {
     setDraft("");
   }, [draft, state.phase]);
 
-  return (
+  const tree = (
     <main style={{ fontFamily: "system-ui", padding: "2rem", maxWidth: 720 }}>
       <h1>waddle</h1>
 
@@ -403,16 +574,69 @@ export function App() {
           {state.error && <p style={box("#fde8e8")}>⛔ {state.error}</p>}
           <button
             style={{ marginTop: "0.5rem" }}
-            onClick={() => connRef.current?.send({ type: "sleep_now" })}
+            onClick={() => {
+              // Final checkpoint before exit: seal + push now (no debounce),
+              // then sleep. If the push loses the race, the record stays
+              // dirty locally and syncs on the next connect — durable either way.
+              if (pushTimer.current) clearTimeout(pushTimer.current);
+              const store = bbStore;
+              const secret = getSecret();
+              if (store && secret && messagesRef.current.length > 0) {
+                void sealSnapshot(secret, messagesRef.current, genRef.current)
+                  .then((sealed) => {
+                    genRef.current = sealed.gen;
+                    return putSnapshot(store, JSON.stringify(sealed), sealed.gen);
+                  })
+                  .catch((e) => console.warn("betterbase sleep push failed", e));
+              }
+              connRef.current?.send({ type: "sleep_now" });
+            }}
           >
             💤 put waddle to sleep
           </button>
+
         </>
       )}
+
+      <p style={{ ...box("#f4f0ff"), marginTop: "0.5rem", fontSize: 13 }}>
+        {bb.isAuthenticated
+          ? `☁️ betterbase: ${bb.handle ?? "signed in"}${bbStore ? " · store connected" : " · opening store…"}`
+          : "☁️ betterbase: not connected — "}
+        {!bb.isAuthenticated && (
+          <button
+            style={{ marginLeft: 4 }}
+            onClick={() => void bb.login()}
+            disabled={!bb.clientId}
+          >
+            connect your store
+          </button>
+        )}
+      </p>
 
       <p style={{ fontSize: 12, color: "#999", marginTop: "2rem" }}>
         enclave {ENCLAVE_URL}
       </p>
     </main>
   );
+
+  // The sync engine mounts with the account store: pushes pending local
+  // puts, pulls server records into the local db. Without it the store is
+  // local-only (which is also why the device snapshot stays a fallback).
+  const bbClientId = import.meta.env.VITE_BETTERBASE_CLIENT_ID ?? "";
+  const bbDomain = import.meta.env.VITE_BETTERBASE_DOMAIN ?? "localhost:5377";
+  if (bbStore && bb.session) {
+    return (
+      <BetterbaseProvider
+        adapter={bbStore.db}
+        collections={COLLECTIONS}
+        session={bb.session}
+        clientId={bbClientId}
+        domain={bbDomain}
+        fileStore={bbStore.fileStore}
+      >
+        {tree}
+      </BetterbaseProvider>
+    );
+  }
+  return tree;
 }

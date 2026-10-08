@@ -1,9 +1,19 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import wasm from "vite-plugin-wasm";
 import { fileURLToPath } from "node:url";
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), wasm()],
+  worker: {
+    format: "es",
+    plugins: () => [wasm()],
+  },
+  optimizeDeps: {
+    // The betterbase SDK links as TypeScript source; pre-bundling would
+    // rebuild the wasm imports and break worker loading.
+    exclude: ["betterbase"],
+  },
   resolve: {
     alias: {
       // Hot-loop linking: consume sdk source directly (no dist needed in dev).

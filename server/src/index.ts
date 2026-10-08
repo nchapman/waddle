@@ -229,6 +229,24 @@ app.get("/ws", { websocket: true }, (socket, request) => {
       }
       return;
     }
+    if (intent.type === "history_restore") {
+      const rows = Array.isArray((intent as { rows?: unknown }).rows)
+        ? ((intent as { rows: Array<{ role?: string; text?: string }> }).rows ?? [])
+        : [];
+      let count = 0;
+      for (const row of rows) {
+        if (!row || typeof row !== "object") continue;
+        const role = row.role === "user" || row.role === "assistant" || row.role === "tool" ? row.role : null;
+        const text = typeof row.text === "string" ? row.text : "";
+        if (!role || !text.trim()) continue;
+        log?.append({ type: "history_row", role, text, at: new Date().toISOString() });
+        count++;
+      }
+      // No broadcast: the relaying client seeds from its own copy; future
+      // connections get the rows via replay from the sealed log.
+      send({ type: "history_restored", count });
+      return;
+    }
     if (intent.type !== "user_message" || !intent.text?.trim()) return;
     if (!agentReady()) {
       send({ type: "error", message: "no inference key — reload and unlock with one" });

@@ -24,6 +24,9 @@ export type GatewayEvent =
   | { type: "approval_request"; callId: string; tool: string; input: unknown; at?: string }
   | { type: "approval"; callId: string; tool: string; approved: boolean; at?: string }
   | { type: "run_settled"; at?: string }
+  /** Restored-history row (device snapshot or betterbase pull, sealed on relay). */
+  | { type: "history_row"; role: "user" | "assistant" | "tool"; text: string; at?: string }
+  | { type: "history_restored"; count: number }
   | { type: "sleep_proposed"; reason: string }
   | { type: "sleep_cancelled"; reason: string }
   | { type: "sleep"; reason: string; at?: string }
@@ -61,7 +64,12 @@ export interface StateResponse {
 }
 
 /** Client → server intent (WSS inbound). Inbound is always intent, never history. */
-export type UserIntent = { type: "user_message"; text: string } | { type: "sleep_now" } | { type: "approval_response"; callId: string; approved: boolean };
+export type UserIntent =
+  | { type: "user_message"; text: string }
+  | { type: "sleep_now" }
+  | { type: "approval_response"; callId: string; approved: boolean }
+  /** Relay a decrypted snapshot into the fresh enclave's sealed log. */
+  | { type: "history_restore"; rows: Array<{ role: "user" | "assistant" | "tool"; text: string }> };
 
 /** Live stream chunk (transient — final message events are the persisted truth). */
 export interface DeltaEvent {
