@@ -8,12 +8,28 @@
  * The browser boots lazily on first use and dies with the process.
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import WebSocket from "ws";
 
 const DATA_DIR = process.env.DATA_DIR ?? "/tmp/waddle-data";
 const PROFILE = `${DATA_DIR}/browser`;
+// The enclave mounts / read-only (only the DATA_DIR tmpfs is writable).
+// Chromium writes TMPDIR/HOME/XDG state and crashpad's database at boot;
+// on a read-only root it dies with SIGTRAP before CDP ever answers.
+// X over TCP (no /tmp unix socket — see BROWSER_ENV note).
+const X_DISPLAY = "127.0.0.1:99";
+const DISPLAY_ARG = ":99";
+const HOME = `${DATA_DIR}/home`;
+const TMP = `${DATA_DIR}/tmp`;
+const BROWSER_ENV = {
+  ...process.env,
+  DISPLAY: X_DISPLAY,
+  HOME,
+  TMPDIR: TMP,
+  XDG_CONFIG_HOME: `${HOME}/.config`,
+  XDG_CACHE_HOME: `${HOME}/.cache`,
+};
 const DEBUG_PORT = 9222;
-const DISPLAY = ":99";
 const CHROMIUM = process.env.WADDLE_CHROMIUM_BIN ?? "chromium";
 const XVFMB_BIN = process.env.WADDLE_XVFB_BIN ?? "Xvfb";
 
@@ -44,20 +60,41 @@ export function browserLive(): boolean {
   return cdp !== null && cdp.readyState === WebSocket.OPEN;
 }
 
+function tmpWritable(): boolean {
+  try {
+    mkdirSync("/tmp/.X11-unix", { recursive: true });
+    return true;
+  } catch {
+    return false; // read-only /tmp (the enclave) — headless path
+  }
+}
+
 /** Boot Xvfb + Chromium + the CDP bridge (idempotent). */
 export async function ensureBrowser(): Promise<void> {
   if (browserLive()) return;
   if (booting) return booting;
   booting = (async () => {
-    if (!xvfb) {
-      xvfb = spawn(XVFMB_BIN, [DISPLAY, "-screen", "0", "1280x800x24"], { stdio: "ignore" });
+    mkdirSync(`${DATA_DIR}/home/.config`, { recursive: true });
+    mkdirSync(`${DATA_DIR}/home/.cache`, { recursive: true });
+    mkdirSync(`${DATA_DIR}/tmp`, { recursive: true });
+    mkdirSync(PROFILE, { recursive: true });
+    // X needs /tmp writable (lock file, unix socket, xkbcomp keymap — all
+    // hardcoded there). The enclave mounts /tmp read-only, so there we run
+    // Chromium's new headless instead: same full browser + CDP, no display.
+    const headless = !tmpWritable();
+    if (!headless && !xvfb) {
+      xvfb = spawn(
+        XVFMB_BIN,
+        [DISPLAY_ARG, "-screen", "0", "1280x800x24", "-nolisten", "unix", "-listen", "tcp", "-ac"],
+        { stdio: "ignore", env: BROWSER_ENV },
+      );
       await new Promise((r) => setTimeout(r, 400));
     }
     if (!chromium) {
       chromium = spawn(
         CHROMIUM,
         [
-          `--display=${DISPLAY}`,
+          ...(headless ? ["--headless=new"] : [`--display=${X_DISPLAY}`]),
           "--no-sandbox",
           "--disable-gpu",
           "--disable-dev-shm-usage",
@@ -70,7 +107,7 @@ export async function ensureBrowser(): Promise<void> {
           "--remote-allow-origins=*",
           "about:blank",
         ],
-        { stdio: "ignore", env: { ...process.env, DISPLAY } },
+        { stdio: "ignore", env: BROWSER_ENV },
       );
       chromium.on("exit", () => {
         chromium = null;
