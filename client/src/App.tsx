@@ -8,6 +8,7 @@ import type { StateResponse } from "@waddle/sdk";
 import type { UIMessage } from "@ai-sdk/react";
 import { ChatSurface } from "./ChatSurface";
 import { BrowserDock, BrowserOverlay } from "./components/BrowserDock";
+import type { InputEvent } from "./components/InteractFrame";
 import { Shell, StoreFooter } from "./components/Shell";
 import { Chip } from "./components/DuckMark";
 import { ApprovalCard } from "./components/ApprovalCard";
@@ -68,6 +69,7 @@ type State =
       browserUrl?: string;
       browserTitle?: string;
       frameSeq?: number;
+      browserHeld?: boolean;
     };
 
 const box = (bg: string): React.CSSProperties => ({
@@ -218,6 +220,9 @@ export function App() {
       }
       if (event.type === "frame") {
         return s.phase === "chat" ? { ...s, frame: event.data, frameSeq: event.seq } : s;
+      }
+      if (event.type === "browser_control") {
+        return s.phase === "chat" ? { ...s, browserHeld: event.held } : s;
       }
       if (event.type === "browser_status") {
         return s.phase === "chat" ? { ...s, browserUrl: event.url, browserTitle: event.title } : s;
@@ -456,6 +461,18 @@ export function App() {
     }
   }, [state, doUnlock, keyInput]);
 
+  /** The user's hands: transient input intents over the live ws. */
+  const sendBrowserInput = useCallback(
+    (intent: { type: "browser_input"; events: InputEvent[] } | { type: "browser_release" }) => {
+      connRef.current?.send(intent);
+    },
+    [],
+  );
+  const releaseBrowser = useCallback(() => {
+    connRef.current?.send({ type: "browser_release" });
+    setState((s) => (s.phase === "chat" ? { ...s, browserHeld: false } : s));
+  }, []);
+
   const wake = useCallback(async () => {
     setState({ phase: "asleep", waking: true, note: "concierge booting the instance…" });
     try {
@@ -650,6 +667,9 @@ export function App() {
               url={state.browserUrl}
               title={state.browserTitle}
               onExpand={() => setBrowserExpanded(true)}
+              held={state.browserHeld === true}
+              onRelease={releaseBrowser}
+              send={sendBrowserInput}
             />
           }
         >
@@ -682,6 +702,9 @@ export function App() {
           url={state.browserUrl}
           title={state.browserTitle}
           onClose={() => setBrowserExpanded(false)}
+          held={state.browserHeld === true}
+          onRelease={releaseBrowser}
+          send={sendBrowserInput}
         />
       )}
     </div>

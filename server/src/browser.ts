@@ -11,6 +11,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";
 import WebSocket from "ws";
+import { toCdp, type UserInputEvent } from "./input-map.js";
 
 const DATA_DIR = process.env.DATA_DIR ?? "/tmp/waddle-data";
 const PROFILE = `${DATA_DIR}/browser`;
@@ -51,6 +52,95 @@ let lastSent = 0;
 const FRAME_MIN_INTERVAL_MS = 90; // ~11fps wire cap
 let currentUrl = "about:blank";
 let currentTitle = "";
+
+// ── user hands: interactive control over the shared browser ────────────
+// The user drives with real CDP input events; while they hold control the
+// agent's browser tools stand down (they see an explanatory result). Input
+// events are NEVER logged — only control transitions are sealed (the log
+// must not become a password recorder).
+let userControl = false;
+let controlIdle: ReturnType<typeof setTimeout> | null = null;
+let controlNotifier: ((held: boolean) => void) | null = null;
+let openDialog: { message: string; type: string } | null = null; // waiting on the user (Enter/Esc)
+let lastDialog: { message: string; type: string } | null = null; // for tool-result reporting
+const USER_CONTROL_IDLE_MS = 30_000;
+
+export function setControlNotifier(fn: (held: boolean) => void): void {
+  controlNotifier = fn;
+}
+
+export function userControlActive(): boolean {
+  return userControl;
+}
+
+export function releaseUserControl(): void {
+  if (!userControl) return;
+  userControl = false;
+  if (controlIdle) clearTimeout(controlIdle);
+  controlIdle = null;
+  controlNotifier?.(false);
+}
+
+function acquireUserControl(): void {
+  if (controlIdle) clearTimeout(controlIdle);
+  controlIdle = setTimeout(() => releaseUserControl(), USER_CONTROL_IDLE_MS);
+  if (userControl) return;
+  userControl = true;
+  controlNotifier?.(true);
+}
+
+/** True (with the reason) when the agent must stand down for the user. */
+export function userHasTheWheel(): string | null {
+  return userControl ? "the user is driving the browser right now — wait for them to hand back (they see your tool calls live), then retry" : null;
+}
+
+/** Viewport truth for input mapping: the page reports its own innerWidth/
+ *  innerHeight — the exact basis snapshot @(x,y) coords are computed against
+ *  (layout metrics can disagree with the page's view; never guess). Short TTL. */
+let viewportCache: { w: number; h: number; at: number } | null = null;
+async function viewportCss(): Promise<{ w: number; h: number }> {
+  if (viewportCache && Date.now() - viewportCache.at < 1000) return viewportCache;
+  // evalInPage (send) already resolves with CDP's result object: one unwrap.
+  const r = (await evalInPage("[window.innerWidth, window.innerHeight].join('x')")) as {
+    result?: { value?: unknown };
+  };
+  const [w, h] = String(r?.result?.value ?? "").split("x").map((n) => parseInt(n, 10));
+  const out = { w: Math.max(1, w || 1280), h: Math.max(1, h || 720), at: Date.now() };
+  viewportCache = out;
+  return out;
+}
+
+/** Dispatch user input: normalized events → CDP Input domain. Native JS
+ *  dialogs intercept keys: Enter accepts, Esc dismisses (the user's
+ *  “confirm something” — OAuth gates, unload prompts). */
+export async function userInput(evs: UserInputEvent[]): Promise<void> {
+  await ensureBrowser();
+  // Esc is reserved for hand-back client-side; as a key event it only ever
+  // means "dismiss the dialog" — drop it (and don't acquire) when none is
+  // open, or it would re-acquire control right after a release.
+  const live = openDialog
+    ? evs
+    : evs.filter((ev) => !(ev.t === "key" && ev.k === "Escape"));
+  if (live.length === 0) return;
+  acquireUserControl();
+  // A native dialog swallows input: Enter accepts, Esc dismisses — and the
+  // consumed key MUST NOT also dispatch to the page (an Enter re-dispatch
+  // re-submits the form and spawns a second dialog nothing answers).
+  const rest: UserInputEvent[] = [];
+  for (const ev of live) {
+    if (openDialog && ev.t === "key" && !ev.up && (ev.k === "Enter" || ev.k === "Escape")) {
+      await send("Page.handleJavaScriptDialog", { accept: ev.k === "Enter" }).catch(() => undefined);
+      openDialog = null;
+      continue;
+    }
+    rest.push(ev);
+  }
+  if (rest.length === 0 || !browserLive()) return;
+  const vp = await viewportCss();
+  for (const msg of toCdp(rest, vp)) {
+    await send(msg.method, msg.params).catch(() => undefined);
+  }
+}
 
 export function browserLive(): boolean {
   return cdp !== null && cdp.readyState === WebSocket.OPEN;
@@ -194,9 +284,29 @@ function handleCdp(raw: string): void {
     const frame = params.frame as { url?: string } | undefined;
     if (frame?.url && frame.url !== "about:blank") currentUrl = frame.url;
   }
+  if (msg.method === "Page.javascriptDialogOpening") {
+    // Dialog watchdog: a native dialog blocks the page until handled — and
+    // the evaluate that spawned it (agent clicks) hangs inside the dialog.
+    // While the user holds the wheel, THEY answer (Enter/Esc via userInput).
+    // An agent-spawned one is declined on the spot; settleDialog reports it.
+    lastDialog = { message: String(params.message ?? ""), type: String(params.type ?? "alert") };
+    openDialog = userControl ? lastDialog : null;
+    if (!userControl) {
+      void send("Page.handleJavaScriptDialog", { accept: false }).catch(() => undefined);
+    }
+  }
   if (msg.method === "Page.loadEventFired") {
     void refreshStatus().catch(() => undefined);
   }
+}
+
+/** Report (and clear) the dialog the agent's last action spawned — already
+ *  declined by the watchdog the moment it opened; this just tells the model. */
+async function settleDialog(): Promise<string | null> {
+  if (!lastDialog) return null;
+  const d = lastDialog;
+  lastDialog = null;
+  return `a ${d.type} dialog appeared: "${d.message.slice(0, 120)}" — auto-declined; if the task needs it accepted, ask the user to confirm it themselves`;
 }
 
 function send(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -234,6 +344,8 @@ async function evalInPage(expression: string): Promise<unknown> {
 
 /** Navigate and settle. Returns a digest for the model. */
 export async function browserNavigate(url: string): Promise<string> {
+  const wheel = userHasTheWheel();
+  if (wheel) return wheel;
   await ensureBrowser();
   const target = /^https?:\/\//i.test(url) ? url : `https://${url}`;
   const nav = (await send("Page.navigate", { url: target })) as { errorText?: string };
@@ -287,9 +399,13 @@ const SNAPSHOT_JS = `(() => {
     .sort((a, b) => Number(b.inMain) - Number(a.inMain));
   const els = ranked.slice(0, 120).map((r) => r.e);
   els.forEach((e, i) => e.setAttribute('data-waddle-idx', String(i)));
+  const vw = Math.max(1, window.innerWidth), vh = Math.max(1, window.innerHeight);
   const clickables = els.map((e, i) => {
-    const label = (e.innerText || e.value || e.placeholder || e.getAttribute('aria-label') || '').trim().replace(/\\s+/g, ' ').slice(0, 70);
-    return \`[\${i}] <\${e.tagName.toLowerCase()}> \${label}\`;
+    const kind = e.tagName === 'INPUT' && (e.getAttribute('type') || '').toLowerCase() === 'password' ? 'password field' : '';
+    const label = (e.innerText || e.placeholder || e.getAttribute('aria-label') || kind || '').trim().replace(/\\s+/g, ' ').slice(0, 70);
+    const r = e.getBoundingClientRect();
+    const cx = ((r.left + r.width / 2) / vw).toFixed(2), cy = ((r.top + Math.min(r.height, 60) / 2) / vh).toFixed(2);
+    return \`[\${i}] <\${e.tagName.toLowerCase()}> \${label} @(\${cx},\${cy})\`;
   });
   return {
     title: document.title,
@@ -340,6 +456,8 @@ export async function browserSnapshot(): Promise<string> {
 
 /** Click the numbered element (indexes come from the snapshot). */
 export async function browserClick(index: number): Promise<string> {
+  const wheel = userHasTheWheel();
+  if (wheel) return wheel;
   await ensureBrowser();
   await evalInPage(`(() => {
     const el = document.querySelector('[data-waddle-idx="${index}"]');
@@ -353,11 +471,14 @@ export async function browserClick(index: number): Promise<string> {
   })()`);
   await new Promise((r) => setTimeout(r, 700)); // let navigation/render settle
   await refreshStatus();
-  return digest();
+  const dialog = await settleDialog();
+  return dialog ? digest() + "\n[dialog] " + dialog : digest();
 }
 
 /** Scroll the page (long pages are unreadable from the top alone). */
 export async function browserScroll(direction: "up" | "down", amount: number): Promise<string> {
+  const wheel = userHasTheWheel();
+  if (wheel) return wheel;
   await ensureBrowser();
   const px = Math.max(50, Math.min(3000, Math.round(amount)));
   const delta = direction === "down" ? px : -px;
@@ -371,6 +492,8 @@ export async function browserScroll(direction: "up" | "down", amount: number): P
 
 /** Type text into the numbered element. */
 export async function browserType(index: number, text: string): Promise<string> {
+  const wheel = userHasTheWheel();
+  if (wheel) return wheel;
   await ensureBrowser();
   await evalInPage(`(() => {
     const el = document.querySelector('[data-waddle-idx="${index}"]');

@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>waddle hands test</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 480px; margin: 3rem auto; padding: 0 1rem; color: #1c1917; }
+  h1 { font-size: 1.25rem; }
+  label { display: block; margin: 0.75rem 0 0.25rem; font-weight: 600; font-size: 0.9rem; }
+  input { width: 100%; padding: 0.5rem; border: 1px solid #d6d3d1; border-radius: 8px; font-size: 1rem; }
+  button { margin-top: 1rem; padding: 0.5rem 1.25rem; border: 0; border-radius: 8px; background: #f7b32b; font-weight: 700; font-size: 1rem; cursor: pointer; }
+  .gate { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; align-items: center; justify-content: center; }
+  .gate.open { display: flex; }
+  .card { background: white; border-radius: 12px; padding: 1.5rem; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
+  .secret { display: none; margin-top: 1.5rem; padding: 1rem; background: #fef3c7; border-radius: 8px; font-weight: 600; }
+</style>
+</head>
+<body>
+  <h1>Sign in — waddle hands test</h1>
+  <p style="color:#78716c">A local form for proving the user can log the enclave browser into something.</p>
+  <form id="f">
+    <label for="user">username</label>
+    <input id="user" autocomplete="off" />
+    <label for="pass">password</label>
+    <input id="pass" type="password" autocomplete="off" />
+    <button type="submit">Log in</button>
+  </form>
+  <div id="welcome" class="secret"></div>
+  <div id="gate" class="gate">
+    <div class="card">
+      <div style="font-weight:700; margin-bottom:.5rem">Confirm access?</div>
+      <div style="margin-bottom:1rem; color:#78716c">This gate only opens for the human at the screen.</div>
+      <button id="allow">Approve</button>
+      <button id="deny" style="background:#e7e5e4">Deny</button>
+    </div>
+  </div>
+<script>
+  // Native-dialog variant: surfaced when the user logs in (page-level confirm).
+  document.getElementById("f").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const u = document.getElementById("user").value.trim();
+    const p = document.getElementById("pass").value;
+    if (!u || !p) return;
+    const ok = confirm("Sign in as " + u + "? (press Enter to confirm, Esc to cancel)");
+    if (!ok) return;
+    document.getElementById("gate").classList.add("open");
+  });
+  document.getElementById("allow").addEventListener("click", () => {
+    document.getElementById("gate").classList.remove("open");
+    const w = document.getElementById("welcome");
+    w.style.display = "block";
+    w.textContent = "Welcome, " + document.getElementById("user").value + " 🎉 the ducks are yours.";
+  });
+  document.getElementById("deny").addEventListener("click", () =>
+    document.getElementById("gate").classList.remove("open"));
+</script>
+</body>
+</html>

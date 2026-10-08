@@ -13,7 +13,7 @@ import { Lock } from "./state.js";
 import { EventLog } from "./log.js";
 import { initAgent, chat, agentReady, stageSessionJsonl, stageHistoryRows, setBlackbox, setSink, getSessionJsonl } from "./agent.js";
 import { resolveApproval, denyAllPending, setOutcomeEmitter } from "./approvals.js";
-import { setBrowserEvents, browserLive, captureNow } from "./browser.js";
+import { setBrowserEvents, browserLive, captureNow, userInput, releaseUserControl, setControlNotifier } from "./browser.js";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const VERSION = "0.0.1";
@@ -194,6 +194,11 @@ app.get("/ws", { websocket: true }, (socket, request) => {
       | import("@waddle/sdk").ErrorEvent
   ) => socket.send(JSON.stringify(event));
   sockets.add(socket);
+  setControlNotifier((held) => {
+    const evt = { type: "browser_control", held, at: new Date().toISOString() } as const;
+    log?.append({ ...evt }); // the transition is history; the input never is
+    for (const peer of sockets) peer.send(JSON.stringify(evt));
+  });
   if (browserLive()) {
     void captureNow(); // fresh frame for the new viewer
   }
@@ -258,6 +263,20 @@ app.get("/ws", { websocket: true }, (socket, request) => {
         log?.append(evt);
         send(evt);
       }
+      return;
+    }
+    if (intent.type === "browser_input") {
+      // Transient by contract: dispatched, never sealed.
+      const evs = (intent as { events?: unknown[] }).events;
+      if (Array.isArray(evs) && evs.length > 0 && evs.length <= 128) {
+        void userInput(evs as Parameters<typeof userInput>[0]).catch((e) =>
+          console.warn(`user input failed: ${e instanceof Error ? e.message : String(e)}`),
+        );
+      }
+      return;
+    }
+    if (intent.type === "browser_release") {
+      releaseUserControl();
       return;
     }
     if (intent.type === "history_restore") {

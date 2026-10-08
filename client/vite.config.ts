@@ -23,6 +23,9 @@ export default defineConfig({
     },
   },
   server: {
+    // The enclave's Chromium reaches this dev server as host.docker.internal
+    // (test pages under public/test) — allow the Host header through.
+    allowedHosts: ["host.docker.internal"],
     proxy: {
       "/health": "http://localhost:8080",
       "/ws": { target: "ws://localhost:8080", ws: true },

@@ -6,6 +6,9 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
+import { InteractFrame, type InputEvent } from "./InteractFrame";
+
+type Send = (intent: { type: "browser_input"; events: InputEvent[] } | { type: "browser_release" }) => void;
 
 function prettyUrl(u?: string): string {
   if (!u) return "about:blank";
@@ -22,11 +25,17 @@ export function BrowserDock({
   url,
   title,
   onExpand,
+  held,
+  onRelease,
+  send,
 }: {
   frame: string | null;
   url?: string;
   title?: string;
   onExpand: () => void;
+  held: boolean;
+  onRelease: () => void;
+  send: Send;
 }) {
   const [fps, setFps] = useState(0);
   const frames = useRef(0);
@@ -56,6 +65,15 @@ export function BrowserDock({
         <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
           {fps > 0 ? `${fps}fps` : "live"}
         </span>
+        {held && (
+          <button
+            onClick={onRelease}
+            className="shrink-0 rounded-lg border border-duck/60 bg-duck/10 px-2 py-1 text-[10px] font-medium text-duck"
+            title="hand the browser back to waddle (esc)"
+          >
+            you have the mouse — hand back
+          </button>
+        )}
         <button
           onClick={onExpand}
           className="shrink-0 rounded-lg border border-border px-2 py-1 text-xs text-muted-foreground transition-colors hover:border-duck/50 hover:text-duck"
@@ -65,11 +83,13 @@ export function BrowserDock({
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-hidden bg-black/40">
-        <img
-          src={frame}
-          alt="waddle's browser (live)"
-          className="h-full w-full object-contain object-top"
-        />
+        <InteractFrame frame={frame} held={held} onRelease={onRelease} send={send} className={cn("h-full w-full", held && "ring-1 ring-inset ring-duck/50")}>
+          <img
+            src={frame}
+            alt="waddle's browser (live — click to interact)"
+            className="h-full w-full object-contain object-top"
+          />
+        </InteractFrame>
       </div>
     </div>
   );
@@ -80,20 +100,29 @@ export function BrowserOverlay({
   url,
   title,
   onClose,
+  held,
+  onRelease,
+  send,
 }: {
   frame: string | null;
   url?: string;
   title?: string;
   onClose: () => void;
+  held: boolean;
+  onRelease: () => void;
+  send: Send;
 }) {
   useEffect(() => {
     if (!frame) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape") return;
+      // While holding the mouse, esc hands back first; the next esc closes.
+      if (held) onRelease();
+      else onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [frame, onClose]);
+  }, [frame, onClose, held, onRelease]);
 
   if (!frame) return null;
   return (
@@ -117,11 +146,13 @@ export function BrowserOverlay({
             esc ⤡
           </button>
         </div>
-        <img
-          src={frame}
-          alt="waddle's browser (live, expanded)"
-          className={cn("max-h-[84vh] w-full object-contain")}
-        />
+        <InteractFrame frame={frame} held={held} onRelease={onRelease} send={send} className={cn("w-full max-h-[84vh]", held && "ring-1 ring-inset ring-duck/50")}>
+          <img
+            src={frame}
+            alt="waddle's browser (live, expanded — click to interact)"
+            className="max-h-[84vh] w-full object-contain"
+          />
+        </InteractFrame>
       </div>
     </div>
   );

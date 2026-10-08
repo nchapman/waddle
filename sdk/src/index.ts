@@ -30,6 +30,10 @@ export type GatewayEvent =
   | { type: "session_restored"; staged: boolean }
   | { type: "sleep_proposed"; reason: string }
   | { type: "sleep_cancelled"; reason: string }
+  /** The user took/release interactive control of the shared browser. Only
+   *  control transitions are sealed/broadcast — never input events
+   *  themselves (keystrokes must not become history). */
+  | { type: "browser_control"; held: boolean; at?: string }
   | { type: "sleep"; reason: string; at?: string }
   /** Marks the end of the initial backlog replay; live events follow. */
   | { type: "replay_done"; count: number }
@@ -77,7 +81,12 @@ export type UserIntent =
   | { type: "history_restore"; rows: Array<{ role: "user" | "assistant" | "tool"; text: string }> }
   // Native resume: the client relays the backed-up pi session transcript
   // (its own JSONL) so the agent boots with full context, not a digest.
-  | { type: "session_restore"; jsonl: string };
+  | { type: "session_restore"; jsonl: string }
+  /** The user's hands: normalized input for the enclave browser. Transient —
+   *  never sealed into the log. */
+  | { type: "browser_input"; events: Array<{ t: "move" | "down" | "up"; x: number; y: number; b?: "left" | "right" | "middle" } | { t: "wheel"; dx: number; dy: number; x?: number; y?: number } | { t: "key"; k: string; up?: boolean } | { t: "text"; s: string }> }
+  /** Explicit hand-back (auto-releases on input idle too). */
+  | { type: "browser_release" };
 
 /** Live stream chunk (transient — final message events are the persisted truth). */
 export interface DeltaEvent {
