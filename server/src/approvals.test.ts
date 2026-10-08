@@ -64,3 +64,8 @@ test("browser clicks/snapshots/typing auto-allow (the URL gate is on open)", () 
   assert.equal(needsApproval("browser_click", { index: 3 }), false);
   assert.equal(needsApproval("browser_type", { index: 2, text: "hi" }), false);
 });
+
+test("browser_scroll auto-allows (reading motion, not a new destination)", () => {
+  assert.equal(needsApproval("browser_scroll", { direction: "down", amount: 800 }), false);
+  assert.equal(needsApproval("browser_scroll", { direction: "up" }), false);
+});

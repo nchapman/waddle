@@ -43,6 +43,8 @@ interface ChatMessage {
   role: "user" | "assistant" | "tool";
   text: string;
   error?: boolean;
+  /** Structured tool call (live + replay) — the seed renders real chips. */
+  tool?: { name: string; args?: unknown; result?: unknown; isError?: boolean };
 }
 export type { ChatMessage };
 
@@ -94,6 +96,29 @@ const DEV_RESULT = {
 
 
 
+/** Parse the legacy emoji mono format back into structured tool rows. */
+function parseToolText(text: string): ChatMessage["tool"] | undefined {
+  const start = /^⚙️ (\S+) (\{.*\})$/s.exec(text);
+  if (start) {
+    try {
+      return { name: start[1]!, args: JSON.parse(start[2]!) as unknown };
+    } catch {
+      return { name: start[1]!, args: start[2] };
+    }
+  }
+  const end = /^([⛔✔]) (\S+) → (.*)$/s.exec(text);
+  if (end) {
+    let result: unknown = end[3];
+    try {
+      result = JSON.parse(end[3]!) as unknown;
+    } catch {
+      /* result excerpt was truncated — keep the text */
+    }
+    return { name: end[2]!, result, isError: end[1] === "⛔" };
+  }
+  return undefined;
+}
+
 /** Deterministic history seed: map sealed log events to surface rows. */
 function eventsToRows(events: Array<Record<string, unknown>>): ChatMessage[] {
   const rows: ChatMessage[] = [];
@@ -102,12 +127,21 @@ function eventsToRows(events: Array<Record<string, unknown>>): ChatMessage[] {
     if (t === "message" && (e.role === "user" || e.role === "assistant")) {
       rows.push({ role: e.role as "user" | "assistant", text: String(e.text ?? "") });
     } else if (t === "history_row" && typeof e.text === "string") {
-      rows.push({ role: e.role as ChatMessage["role"], text: e.text });
+      const role = e.role as ChatMessage["role"];
+      rows.push({ role, text: e.text, ...(role === "tool" ? { tool: parseToolText(e.text) } : {}) });
     } else if (t === "tool_start") {
-      rows.push({ role: "tool", text: `⚙️ ${e.tool} ${JSON.stringify(e.args ?? {}).slice(0, 140)}` } as ChatMessage);
+      rows.push({
+        role: "tool",
+        text: `⚙️ ${e.tool} ${JSON.stringify(e.args ?? {}).slice(0, 140)}`,
+        tool: { name: String(e.tool ?? ""), args: e.args ?? {} },
+      } as ChatMessage);
     } else if (t === "tool_end") {
       const result = JSON.stringify(e.result ?? "").slice(0, 100);
-      rows.push({ role: "tool", text: `${e.isError ? "⛔" : "✔"} ${e.tool} → ${result}` } as ChatMessage);
+      rows.push({
+        role: "tool",
+        text: `${e.isError ? "⛔" : "✔"} ${e.tool} → ${result}`,
+        tool: { name: String(e.tool ?? ""), result: e.result ?? "", isError: !!e.isError },
+      } as ChatMessage);
     }
   }
   return rows;
@@ -201,14 +235,14 @@ export function App() {
         };
       }
       if (event.type === "tool_start") {
-        const messages = [...s.messages, { role: "tool", text: `⚙️ ${event.tool} ${JSON.stringify(event.args ?? {}).slice(0, 140)}` } as ChatMessage];
+        const messages = [...s.messages, { role: "tool", text: `⚙️ ${event.tool} ${JSON.stringify(event.args ?? {}).slice(0, 140)}`, tool: { name: event.tool, args: event.args ?? {} } } as ChatMessage];
         messagesRef.current = messages;
         pushFnRef.current();
         return { ...s, messages };
       }
       if (event.type === "tool_end") {
         const result = JSON.stringify(event.result ?? "").slice(0, 100);
-        const messages = [...s.messages, { role: "tool", text: `${event.isError ? "⛔" : "✔"} ${event.tool} → ${result}` } as ChatMessage];
+        const messages = [...s.messages, { role: "tool", text: `${event.isError ? "⛔" : "✔"} ${event.tool} → ${result}`, tool: { name: event.tool, result: event.result ?? "", isError: event.isError } } as ChatMessage];
         return { ...s, messages };
       }
       if (event.type === "approval") {
@@ -432,18 +466,71 @@ export function App() {
   // runtime re-sync and wipe live streaming turns.
   const chatState = state.phase === "chat" ? state : null;
   const replayedNow = chatState?.replayed ?? false;
-  const seedMessages = useMemo(
-    () =>
-      (chatState?.messages ?? []).map((m, i): UIMessage => ({
-        id: `h${i}`,
-        // Tool rows ride as assistant turns in the same mono format the live
-        // stream used, so a rehydrated thread matches what streamed.
-        role: m.role === "user" ? "user" : "assistant",
-        parts: [{ type: "text", text: m.role === "tool" ? `\`${m.text}\`` : m.text }],
-      })),
+  const seedMessages = useMemo(() => {
+    const rows = chatState?.messages ?? [];
+    const out: UIMessage[] = [];
+    let assistantParts: UIMessage["parts"] = [];
+    const flush = (id: string) => {
+      if (assistantParts.length > 0) out.push({ id, role: "assistant", parts: assistantParts });
+      assistantParts = [];
+    };
+    for (let i = 0; i < rows.length; i++) {
+      const m = rows[i]!;
+      if (m.role === "user") {
+        flush(`h${i}a`);
+        out.push({ id: `h${i}`, role: "user", parts: [{ type: "text", text: m.text }] });
+        continue;
+      }
+      if (m.role === "tool" && m.tool) {
+        // A completed call pairs its start row (args) with its end row
+        // (result) into one dynamic-tool part — same chip the live stream
+        // renders. Start-only rows (crash/interrupt) ride as input-available.
+        const next = rows[i + 1];
+        const start = m.tool.result === undefined ? m.tool : undefined;
+        if (start && next?.role === "tool" && next.tool?.name === m.tool.name && next.tool.result !== undefined) {
+          assistantParts.push({
+            type: "dynamic-tool",
+            toolName: m.tool.name,
+            toolCallId: `h${i}`,
+            state: next.tool.isError ? "output-error" : "output-available",
+            input: m.tool.args ?? {},
+            ...(next.tool.isError
+              ? { errorText: String(next.tool.result ?? "").slice(0, 200) }
+              : { output: next.tool.result ?? "" }),
+          } as UIMessage["parts"][number]);
+          i++; // consumed the end row
+          continue;
+        }
+        if (start) {
+          assistantParts.push({
+            type: "dynamic-tool",
+            toolName: m.tool.name,
+            toolCallId: `h${i}`,
+            state: "input-available",
+            input: m.tool.args ?? {},
+          } as UIMessage["parts"][number]);
+          continue;
+        }
+        // End row whose start was already consumed or absent.
+        assistantParts.push({
+          type: "dynamic-tool",
+          toolName: m.tool.name,
+          toolCallId: `h${i}e`,
+          state: m.tool.isError ? "output-error" : "output-available",
+          input: {},
+          ...(m.tool.isError
+            ? { errorText: String(m.tool.result ?? "").slice(0, 200) }
+            : { output: m.tool.result ?? "" }),
+        } as UIMessage["parts"][number]);
+        continue;
+      }
+      // Plain assistant text, or legacy tool rows without structure.
+      assistantParts.push({ type: "text", text: m.role === "tool" ? `\`${m.text}\`` : m.text });
+    }
+    flush("hz");
+    return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [replayedNow],
-  );
+  }, [replayedNow]);
 
   const answerApproval = useCallback(
     (approved: boolean) => {

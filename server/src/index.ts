@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { hello, type GatewayEvent, type UnlockRequest, type UnlockResponse, type StateResponse, type UserIntent } from "@waddle/sdk";
 import { Lock } from "./state.js";
 import { EventLog } from "./log.js";
-import { initAgent, chat, agentReady, setBlackbox, setSink } from "./agent.js";
+import { initAgent, chat, agentReady, restoreContext, setBlackbox, setSink } from "./agent.js";
 import { resolveApproval, denyAllPending, setOutcomeEmitter } from "./approvals.js";
 import { setBrowserEvents, browserLive, captureNow } from "./browser.js";
 
@@ -89,7 +89,17 @@ app.post("/unlock", async (request, reply) => {
     if (!log) log = new EventLog(lock.logKey, lock.storage);
     // The inference key rides the same attested, EHBP-encrypted unlock —
     // memory-only, never on disk, never in config.
-    if (inferenceKey) initAgent(inferenceKey);    const res: UnlockResponse = { token, enrolled };
+    if (inferenceKey) initAgent(inferenceKey);
+    // The Memory: a persisted log means prior sessions — hand them to the
+    // agent as next-turn context (no-op on a fresh boot; the relay path
+    // below covers the sleep-wiped case).
+    if (log) {
+      const prior = log.all
+        .filter((e) => (e.type === "message" && (e.role === "user" || e.role === "assistant")) || e.type === "history_row")
+        .map((e) => ({ role: (e.role === "tool" ? "tool" : e.role === "assistant" ? "assistant" : "user") as "user" | "assistant" | "tool", text: String(e.text ?? "") }));
+      if (prior.length > 0 && agentReady()) void restoreContext(prior);
+    }
+    const res: UnlockResponse = { token, enrolled };
     return res;
   } catch (e) {
     const err = e as { statusCode?: number; message: string };
@@ -261,6 +271,13 @@ app.get("/ws", { websocket: true }, (socket, request) => {
       }
       // No broadcast: the relaying client seeds from its own copy; future
       // connections get the rows via replay from the sealed log.
+      if (count > 0 && agentReady()) {
+        void restoreContext(
+          rows
+            .filter((r) => r.role === "user" || r.role === "assistant" || r.role === "tool")
+            .map((r) => ({ role: r.role as "user" | "assistant" | "tool", text: String(r.text ?? "") })),
+        );
+      }
       send({ type: "history_restored", count });
       return;
     }

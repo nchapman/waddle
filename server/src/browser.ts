@@ -273,9 +273,12 @@ function waitForLoad(timeoutMs: number): Promise<void> {
 
 const SNAPSHOT_JS = `(() => {
   const sel = 'a,button,input,textarea,select,[role="button"]';
-  const els = [...document.querySelectorAll(sel)]
+  const main = document.querySelector('main, article, [role="main"], #content, #mw-content-text');
+  const ranked = [...document.querySelectorAll(sel)]
     .filter((e) => e.getClientRects().length > 0 && !e.disabled)
-    .slice(0, 80);
+    .map((e) => ({ e, inMain: main ? main.contains(e) : false }))
+    .sort((a, b) => Number(b.inMain) - Number(a.inMain));
+  const els = ranked.slice(0, 120).map((r) => r.e);
   els.forEach((e, i) => e.setAttribute('data-waddle-idx', String(i)));
   const clickables = els.map((e, i) => {
     const label = (e.innerText || e.value || e.placeholder || e.getAttribute('aria-label') || '').trim().replace(/\\s+/g, ' ').slice(0, 70);
@@ -284,7 +287,16 @@ const SNAPSHOT_JS = `(() => {
   return {
     title: document.title,
     url: location.href,
-    text: (document.body?.innerText || '').replace(/\\n{3,}/g, '\\n\\n').slice(0, 2200),
+    // Text follows the viewport: the excerpt window slides with scrollY so
+    // browser_scroll reveals content below the initial fold.
+    text: (() => {
+      const full = (document.body?.innerText || '').replace(/\\n{3,}/g, '\\n\\n');
+      const scrollable = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+      const ratio = Math.min(1, Math.max(0, window.scrollY / scrollable));
+      const win = 2200;
+      const start = Math.floor(ratio * Math.max(0, full.length - win));
+      return full.slice(start, start + win) + (start > 0 ? '\\n[excerpt at scroll position — browser_scroll to read more]' : '');
+    })(),
     clickables: clickables.join('\\n'),
   };
 })()`;
@@ -330,6 +342,19 @@ export async function browserClick(index: number): Promise<string> {
   })()`);
   await new Promise((r) => setTimeout(r, 700)); // let navigation/render settle
   await refreshStatus();
+  return digest();
+}
+
+/** Scroll the page (long pages are unreadable from the top alone). */
+export async function browserScroll(direction: "up" | "down", amount: number): Promise<string> {
+  await ensureBrowser();
+  const px = Math.max(50, Math.min(3000, Math.round(amount)));
+  const delta = direction === "down" ? px : -px;
+  await evalInPage(`(() => {
+    window.scrollBy({ top: ${delta}, behavior: "instant" });
+    return location.href + " @" + Math.round(window.scrollY);
+  })()`);
+  await new Promise((r) => setTimeout(r, 350)); // let new content paint/settle
   return digest();
 }
 
