@@ -19,7 +19,15 @@ interface SealedSnapshot {
 }
 
 function b64(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes));
+  // Chunked: spreading a multi-MB ciphertext into one call overflows the
+  // stack — this broke every push once the pi transcript (jsonl) rode the
+  // snapshot. 32k args per slice is safely under any engine's limit.
+  let out = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    out += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(out);
 }
 function unb64(s: string): Uint8Array {
   return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));

@@ -87,3 +87,26 @@ agent navigated + user typed into the live enclave browser through the frame.
   inputPayloadInLog: false, controlTransitions: 24 ("agentduck" present only
   via the user's own chat message and the agent's tool args — conversation
   history, not keystroke capture).
+
+## Performance fixes (v0.0.24)
+- Stream: 20fps sustained on continuous-damage content (anim probe,
+  319 frames/16s), zero long tasks — frames ride a module bus (frame-bus)
+  and re-render only the dock/overlay <img>; App state untouched per frame.
+  Wire cap raised 90ms→40ms. Before: full-tree re-render per frame at a
+  10fps cap (66ms renders), 1-2fps feel on static pages (screencast is
+  damage-driven — pointer moves over static content produce no frames).
+- Idle CPU: both waddle tabs were 100-129% pegged in the betterbase OPFS
+  db worker. Chain: (1) b64 spread blew the stack on every seal → pushes
+  never reached betterbase; (2) the one record that DID sync long ago was
+  4.2MB (live session jsonl envelope) — every db open's
+  applyRemoteChanges CRDT-merges that 4MB text in WASM = tens of seconds
+  to minutes, wedging the worker past its 30s RPC timeout, pegging a core
+  per tab forever. Fixes: chunked b64; snapshots append fresh UUIDs (no
+  text re-merge — 9ms vs 20.5s at 100KB) with prune-to-3; jsonl cached
+  between pushes (refetch only when the row count moves); 60s push
+  backoff on failure; DB_BASE→"waddle2"; the 4.2MB server record
+  tombstoned in the dev sync db (protocol-correct shape). After: pushes
+  clean, workers 0% idle. put-probe.html (client root) reproduces the
+  CRDT blowup: tiny put 13ms, first 100KB put 9ms, re-put of the same
+  100KB text 20,501ms — betterbase-side bug to fix (char-merge complexity
+  on large text fields, plus applyRemoteChanges grinding with no yield).

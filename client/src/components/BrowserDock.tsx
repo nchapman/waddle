@@ -6,6 +6,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
+import { frameBus } from "@/lib/frame-bus";
 import { InteractFrame, type InputEvent } from "./InteractFrame";
 
 type Send = (intent: { type: "browser_input"; events: InputEvent[] } | { type: "browser_release" }) => void;
@@ -20,8 +21,14 @@ function prettyUrl(u?: string): string {
   }
 }
 
+/** Newest-frame subscription — dock/overlay re-render alone, never the tree. */
+function useLiveFrame(): string | null {
+  const [frame, setFrame] = useState<string | null>(null);
+  useEffect(() => frameBus.subscribe((f) => setFrame(f.data)), []);
+  return frame;
+}
+
 export function BrowserDock({
-  frame,
   url,
   title,
   onExpand,
@@ -29,7 +36,6 @@ export function BrowserDock({
   onRelease,
   send,
 }: {
-  frame: string | null;
   url?: string;
   title?: string;
   onExpand: () => void;
@@ -37,6 +43,7 @@ export function BrowserDock({
   onRelease: () => void;
   send: Send;
 }) {
+  const frame = useLiveFrame();
   const [fps, setFps] = useState(0);
   const frames = useRef(0);
   const lastTick = useRef(Date.now());
@@ -96,7 +103,6 @@ export function BrowserDock({
 }
 
 export function BrowserOverlay({
-  frame,
   url,
   title,
   onClose,
@@ -104,7 +110,6 @@ export function BrowserOverlay({
   onRelease,
   send,
 }: {
-  frame: string | null;
   url?: string;
   title?: string;
   onClose: () => void;
@@ -112,6 +117,7 @@ export function BrowserOverlay({
   onRelease: () => void;
   send: Send;
 }) {
+  const frame = useLiveFrame();
   useEffect(() => {
     if (!frame) return;
     const onKey = (e: KeyboardEvent) => {
@@ -122,7 +128,7 @@ export function BrowserOverlay({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [frame, onClose, held, onRelease]);
+  }, [onClose, held, onRelease]);
 
   if (!frame) return null;
   return (

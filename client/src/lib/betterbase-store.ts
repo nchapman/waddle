@@ -12,9 +12,12 @@
  */
 import { createDatabase, type Database } from "betterbase/db";
 import { FileStore, lazyWorkerFileStorage } from "betterbase/sync";
-import { snapshots, SNAPSHOT_ID } from "./bb-collections.js";
+import { snapshots, SNAPSHOT_ID, SNAPSHOT_KEEP } from "./bb-collections.js";
 
-const DB_BASE = "waddle";
+// v2: "waddle2" leaves behind the v1 db whose single legacy snapshot record
+// (huge, never successfully synced) wedged the worker — every put waited
+// behind its interminable CRDT merge and hit the 30s RPC timeout.
+const DB_BASE = "waddle2";
 
 const createDbWorker = () =>
   new Worker(new URL("../workers/bb-db-worker.ts", import.meta.url), { type: "module" });
@@ -46,16 +49,36 @@ export async function openAccountStore(personalSpaceId: string): Promise<Account
   return { db, fileStore, dbName };
 }
 
-/** Checkpoint: upsert the encrypted envelope as the "current" snapshot. */
+/** Checkpoint: append the encrypted envelope as a NEW record.
+ *  Never upsert SNAPSHOT_ID — betterbase's CRDT character-merges text
+ *  fields on update, and a large blob's re-merge runs tens of seconds to
+ *  minutes of WASM (it pegged a worker core per tab and blew the 30s RPC
+ *  timeout; fresh-id puts skip the merge entirely — ~10ms at 100KB).
+ *  Old records are pruned to the newest few. */
 export async function putSnapshot(store: AccountStore, blob: string, gen: number): Promise<void> {
-  await store.db.put(snapshots, { id: SNAPSHOT_ID, blob, gen, savedAt: Date.now() });
+  await store.db.put(snapshots, { id: crypto.randomUUID(), blob, gen, savedAt: Date.now() });
+  await pruneSnapshots(store);
+}
+
+/** Keep the newest SNAPSHOT_KEEP records; drop the rest. */
+async function pruneSnapshots(store: AccountStore): Promise<void> {
+  try {
+    const result = await store.db.query(snapshots, { limit: 50 });
+    const rows = [...result.records].sort((a, b) => (b.gen ?? 0) - (a.gen ?? 0));
+    for (const row of rows.slice(SNAPSHOT_KEEP)) {
+      await store.db.delete(snapshots, row.id);
+    }
+  } catch {
+    /* pruning is best-effort — a stale record never breaks checkpoints */
+  }
 }
 
 /** Latest snapshot envelope, or null when the account has none yet. */
 export async function readSnapshot(store: AccountStore): Promise<string | null> {
-  const result = await store.db.query(snapshots, { limit: 10 });
-  for (const row of result.records) {
-    if (row.id !== SNAPSHOT_ID) continue;
+  const result = await store.db.query(snapshots, { limit: 50 });
+  const rows = [...result.records].sort((a, b) => (b.gen ?? 0) - (a.gen ?? 0));
+  for (const row of rows) {
+    if (row.id === SNAPSHOT_ID) continue; // legacy single-record rows
     // Envelopes are JSON; anything else is debris from earlier probes.
     if (typeof row.blob === "string" && row.blob.startsWith("{")) return row.blob;
   }

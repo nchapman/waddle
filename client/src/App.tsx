@@ -31,6 +31,7 @@ import {
   type AccountStore,
 } from "./lib/betterbase-store";
 import { sealSnapshot, openSnapshot, type SealedSnapshot, type SnapshotPayload } from "./lib/backup";
+import { frameBus } from "./lib/frame-bus";
 import { WaddleChatTransport } from "./lib/waddle-transport";
 
 const DEV = import.meta.env.VITE_DEV === "1";
@@ -65,10 +66,9 @@ type State =
       replayed: boolean;
       error?: string;
       pendingApproval?: { callId: string; tool: string; input: unknown };
-      frame?: string | null;
+      frameLive?: boolean;
       browserUrl?: string;
       browserTitle?: string;
-      frameSeq?: number;
       browserHeld?: boolean;
     };
 
@@ -169,6 +169,12 @@ export function App() {
   // True while the ws backlog for an already-seeded log streams in — its
   // rows are in the seed, so ingesting them again would duplicate history.
   const suppressReplayRef = useRef(false);
+  const frameLiveRef = useRef(false);
+  // The pi transcript (jsonl) only grows when a turn is sealed — refetching
+  // it (and re-encrypting MBs) on every debounced push was the idle-CPU
+  // storm's fuel. Cache it, refetch only when the row count moved.
+  const jsonlCacheRef = useRef<{ len: number; jsonl: string | null }>({ len: -1, jsonl: null });
+  const pushBlockedUntilRef = useRef(0);
   if (!transportRef.current) transportRef.current = new WaddleChatTransport();
 
   const run = useCallback(async () => {
@@ -200,6 +206,19 @@ export function App() {
 
 
   const onServerEvent = useCallback((event: ServerEvent) => {
+    // Frame events never touch React state: they publish to the bus (the
+    // dock/overlay <img> subscribe alone). Publish HERE, outside the state
+    // updater — publishing inside it fired subscriber setStates during
+    // React's render pass ("update while rendering" warnings). The liveness
+    // flag flips once on first frame, never per frame.
+    if (event.type === "frame") {
+      frameBus.publish({ data: event.data, seq: event.seq });
+      if (!frameLiveRef.current) {
+        frameLiveRef.current = true;
+        setState((s) => (s.phase === "chat" ? { ...s, frameLive: true } : s));
+      }
+      return;
+    }
     setState((s) => {
       // replay_done must land even while the unlock transition is finishing,
       // or the chat waits forever on "replaying history…". It also disarms
@@ -217,9 +236,6 @@ export function App() {
         const messages = [...s.messages, { role: event.role, text: event.text } as ChatMessage];
         messagesRef.current = messages;
         return { ...s, messages };
-      }
-      if (event.type === "frame") {
-        return s.phase === "chat" ? { ...s, frame: event.data, frameSeq: event.seq } : s;
       }
       if (event.type === "browser_control") {
         return s.phase === "chat" ? { ...s, browserHeld: event.held } : s;
@@ -283,6 +299,10 @@ export function App() {
 
   /** Checkpoint to the user's betterbase store (debounced; sealed envelope). */
   const scheduleBetterbasePush = useCallback(() => {
+    // Circuit breaker: a failing store (e.g. betterbase worker wedged in a
+    // long CRDT merge) must not re-seal + re-put on every message — back
+    // off a minute after each failure.
+    if (Date.now() < pushBlockedUntilRef.current) return;
     if (pushTimer.current) clearTimeout(pushTimer.current);
     pushTimer.current = setTimeout(() => {
       const store = bbStore;
@@ -292,9 +312,10 @@ export function App() {
         try {
           // Native-resume payload: the pi session transcript rides the same
           // sealed envelope (account store only — localStorage stays lean).
-          let jsonl: string | null = null;
+          // Cached between pushes — see jsonlCacheRef.
+          let jsonl: string | null = jsonlCacheRef.current.jsonl;
           const client = attestedClientRef.current;
-          if (client && getToken()) {
+          if (client && getToken() && messagesRef.current.length !== jsonlCacheRef.current.len) {
             try {
               const res = await client.fetch(`${ENCLAVE_URL}/session`, {
                 headers: { Authorization: `Bearer ${getToken() ?? ""}` },
@@ -303,11 +324,13 @@ export function App() {
             } catch {
               /* rows-only checkpoint this round */
             }
+            jsonlCacheRef.current = { len: messagesRef.current.length, jsonl };
           }
           const sealed: SealedSnapshot = await sealSnapshot(secret, messagesRef.current, genRef.current, jsonl);
           genRef.current = sealed.gen;
           await putSnapshot(store, JSON.stringify(sealed), sealed.gen);
         } catch (e) {
+          pushBlockedUntilRef.current = Date.now() + 60_000;
           console.warn("betterbase push failed", e);
         }
       })();
@@ -632,7 +655,7 @@ export function App() {
         </div>
       ) : (
         <Shell
-          browserLive={!!state.frame}
+          browserLive={!!state.frameLive}
           onSleep={() => {
             // Final checkpoint before exit: seal + push now (no debounce),
             // then sleep. If the push loses the race, the record stays
@@ -648,6 +671,8 @@ export function App() {
                 })
                 .catch((e) => console.warn("betterbase sleep push failed", e));
             }
+            frameBus.reset();
+            frameLiveRef.current = false;
             connRef.current?.send({ type: "sleep_now" });
           }}
           statusChips={
@@ -658,12 +683,11 @@ export function App() {
               <Chip tone={state.connected ? "good" : "warn"}>
                 {state.connected ? "stream live" : "disconnected — reload"}
               </Chip>
-              {state.frame && <Chip tone="duck">👁 eyes on</Chip>}
+              {state.frameLive && <Chip tone="duck">👁 eyes on</Chip>}
             </>
           }
           browser={
             <BrowserDock
-              frame={state.frame ?? null}
               url={state.browserUrl}
               title={state.browserTitle}
               onExpand={() => setBrowserExpanded(true)}
@@ -698,7 +722,6 @@ export function App() {
       )}
       {state.phase === "chat" && browserExpanded && (
         <BrowserOverlay
-          frame={state.frame ?? null}
           url={state.browserUrl}
           title={state.browserTitle}
           onClose={() => setBrowserExpanded(false)}

@@ -1,0 +1,19 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>anim — fps probe</title>
+<style>
+  body { font-family: system-ui; margin: 40px; background: #fafafa; }
+  .box { width: 80px; height: 80px; border-radius: 16px;
+         background: linear-gradient(135deg, #f6d365 0%, #fda085 100%);
+         animation: orbit 2s linear infinite; }
+  @keyframes orbit { from { transform: translateX(0) rotate(0deg); }
+                     to   { transform: translateX(300px) rotate(360deg); } }
+</style>
+</head>
+<body>
+  <h3>fps probe</h3>
+  <div class="box"></div>
+</body>
+</html>

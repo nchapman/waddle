@@ -49,7 +49,7 @@ const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Err
 let booting: Promise<void> | null = null;
 let seq = 0;
 let lastSent = 0;
-const FRAME_MIN_INTERVAL_MS = 90; // ~11fps wire cap
+const FRAME_MIN_INTERVAL_MS = 40; // ~25fps wire cap — the dock's img keeps up
 let currentUrl = "about:blank";
 let currentTitle = "";
 

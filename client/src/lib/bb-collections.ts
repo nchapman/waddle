@@ -24,8 +24,13 @@ export const snapshots = collection("snapshots")
 /**
  * The snapshot record id: a fixed UUID (the sync storage layer refuses
  * non-UUID ids server-side) pinned so every checkpoint upserts one row.
+ * (Legacy: newer checkpoints append fresh UUIDs instead — see
+ * putSnapshot — this id only marks the pre-append rows.)
  */
 export const SNAPSHOT_ID = "3d444725-e6eb-44c8-b2ce-e86344d5d28f";
+
+/** How many recent snapshot records to keep when pruning. */
+export const SNAPSHOT_KEEP = 3;
 
 /** Stable collection list for the sync provider (must not be re-created per render). */
 export const COLLECTIONS = [snapshots];
