@@ -1,0 +1,23 @@
+# Local parity: the same image Tinfoil measures, run hot.
+# The concierge stays operator-side (host node process, docker backend —
+# the seam the design promises, not a code fork), exactly like its
+# tinfoil-backend sibling. betterbase-dev runs next door
+# (`cd ../betterbase-dev && just dev`); nothing here needs it yet.
+services:
+  waddle:
+    image: ghcr.io/nchapman/waddle:latest
+    platform: linux/amd64
+    container_name: waddle # stable name for the concierge's docker start/stop
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      NODE_ENV: production
+      DATA_DIR: /data # compose volume: the log survives restarts locally
+      WADDLE_IDLE_MS: "3600000" # 1h — local sleep is manual in practice
+    volumes:
+      - waddle-data:/data
+    restart: "no" # sleep = exit stays true locally
+
+volumes:
+  waddle-data:
