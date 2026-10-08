@@ -49,6 +49,7 @@ export async function unlock(
   client: VerifiedFetcher,
   enclaveURL: string,
   inferenceKey?: string,
+  bb?: import("./bb-grant.js").BbGrantPayload,
 ): Promise<UnlockResponse> {
   const nonce = b64(crypto.getRandomValues(new Uint8Array(16)));
   const res = await client.fetch(`${enclaveURL}/unlock`, {
@@ -58,6 +59,7 @@ export async function unlock(
       secret: getSecret(),
       nonce,
       ...(inferenceKey ? { inferenceKey } : {}),
+      ...(bb ? { bb } : {}),
     }),
   });
   const body = (await res.json()) as UnlockResponse & { error?: string };

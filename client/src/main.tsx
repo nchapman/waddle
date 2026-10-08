@@ -14,7 +14,7 @@ createRoot(document.getElementById("root")!).render(
     <AuthProvider
       domain={BB_DOMAIN}
       clientId={BB_CLIENT_ID}
-      scope="openid sync"
+      scope="openid sync files"
       storagePrefix="betterbase_session_waddle_"
     >
       <App />

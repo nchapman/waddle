@@ -1,4 +1,4 @@
 import { initWorker } from "betterbase/db/worker";
-import { snapshots } from "../lib/bb-collections.js";
+import { machines } from "../lib/bb-collections.js";
 
-initWorker([snapshots]);
+initWorker([machines]);

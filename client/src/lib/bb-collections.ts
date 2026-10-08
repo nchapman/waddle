@@ -1,36 +1,23 @@
 /**
  * waddle's betterbase collections.
  *
- * The durable conversation snapshot is a single-record collection: the
- * existing AEAD envelope (HKDF(unlock secret, "backup") — see lib/backup.ts)
- * rides as an opaque text blob. betterbase's E2EE already hides it from the
- * service; our envelope means even another client of the same account reads
- * nothing without the unlock secret. One record, id "current", upserted per
- * checkpoint — CRDT last-write on a doc, no per-event sync needed.
+ * The machine backup is FILE storage now (the enclave's own tar.gz — see
+ * server/src/bb-backup.ts): files only, no data records. This collection
+ * exists for exactly one row — the anchor record the files API requires
+ * every upload to reference (`X-Record-ID`). Created once, never updated:
+ * nothing here ever merges.
  */
 import { collection, t } from "betterbase/db";
 
-export const snapshots = collection("snapshots")
+export const machines = collection("machines")
   .v(1, {
-    /** JSON envelope: { n, ct, iv } — ciphertext + nonce, base64. */
-    blob: t.text(),
-    /** Monotonic generation; higher wins on merge decisions. */
-    gen: t.number(),
-    /** "updatedAt" is reserved — gen doubles as the timestamp-ordered version. */
-    savedAt: t.number(),
+    /** Human label for the anchor row ("waddle machine"). */
+    label: t.text(),
   })
   .build();
 
-/**
- * The snapshot record id: a fixed UUID (the sync storage layer refuses
- * non-UUID ids server-side) pinned so every checkpoint upserts one row.
- * (Legacy: newer checkpoints append fresh UUIDs instead — see
- * putSnapshot — this id only marks the pre-append rows.)
- */
-export const SNAPSHOT_ID = "3d444725-e6eb-44c8-b2ce-e86344d5d28f";
+/** Fixed anchor record id — the files API's X-Record-ID target. */
+export const MACHINES_ANCHOR_ID = "4f6a8c0e-1b2d-4e3f-9a5b-7c8d0e1f2a3b";
 
-/** How many recent snapshot records to keep when pruning. */
-export const SNAPSHOT_KEEP = 3;
-
-/** Stable collection list for the sync provider (must not be re-created per render). */
-export const COLLECTIONS = [snapshots];
+/** Stable collection list for the sync provider (never re-created per render). */
+export const COLLECTIONS = [machines];

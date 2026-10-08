@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>waddle cookie probe</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1rem; }
+    #out { margin-top: 1rem; padding: 1rem; border-radius: 0.5rem; background: #f0f4f8; font-family: ui-monospace, monospace; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>cookie probe</h1>
+  <p>This page sets a persistent cookie on first visit and reports it on every later visit.</p>
+  <div id="out">…</div>
+  <script>
+    const out = document.getElementById("out");
+    const m = document.cookie.match(/(?:^|;\s*)waddle_probe=([^;]+)/);
+    if (m) {
+      out.textContent = "COOKIE PRESENT: " + decodeURIComponent(m[1]);
+    } else {
+      const v = "probe-" + Date.now();
+      document.cookie = "waddle_probe=" + encodeURIComponent(v) + "; Max-Age=31536000; Path=/";
+      out.textContent = "cookie set now: " + v + " — reload to confirm; survives only if the browser profile is really restored.";
+    }
+  </script>
+</body>
+</html>

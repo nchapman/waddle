@@ -2,7 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { verifyEnclave, repin, type AttestationResult } from "./lib/attestation";
 import { unlock, getState, forgetSecret, getToken, getInferenceKey, setInferenceKey } from "./lib/session";
 import { connectChat, type ServerEvent, type ChatConnection } from "./lib/ws";
-import { saveSnapshot, loadSnapshot } from "./lib/backup";
+import {
+  openAccountStore,
+  ensureMachineAnchor,
+  type AccountStore,
+} from "./lib/betterbase-store";
 import { getSecret } from "./lib/session";
 import type { StateResponse } from "@waddle/sdk";
 import type { UIMessage } from "@ai-sdk/react";
@@ -24,13 +28,7 @@ import {
 import { useAuth } from "betterbase/auth/react";
 import { BetterbaseProvider } from "betterbase/sync/react";
 import { COLLECTIONS } from "./lib/bb-collections";
-import {
-  openAccountStore,
-  putSnapshot,
-  readSnapshot,
-  type AccountStore,
-} from "./lib/betterbase-store";
-import { sealSnapshot, openSnapshot, type SealedSnapshot, type SnapshotPayload } from "./lib/backup";
+import { buildBbGrant, resolveSyncEndpoint } from "./lib/bb-grant";
 import { frameBus } from "./lib/frame-bus";
 import { WaddleChatTransport } from "./lib/waddle-transport";
 
@@ -157,15 +155,14 @@ export function App() {
   const connRef = useRef<ChatConnection | null>(null);
   const transportRef = useRef<WaddleChatTransport | null>(null);
   const bb = useAuth();
+  // Live view of the auth hydration flag for async flows (closures capture
+  // a stale boolean; this ref tracks it across renders).
+  const bbLoadingRef = useRef(bb.isLoading);
+  bbLoadingRef.current = bb.isLoading;
   const [bbStore, setBbStore] = useState<AccountStore | null>(null);
   const bbStoreReadyRef = useRef<Promise<AccountStore | null> | null>(null);
   const messagesRef = useRef<ChatMessage[]>([]);
-  const genRef = useRef(0);
   const attestedClientRef = useRef<AttestationResult["client"] | null>(null);
-  const pushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // onServerEvent is a []-deps callback; it must see the *current* push
-  // function (bbStore resolves after mount), so it reads through this ref.
-  const pushFnRef = useRef<() => void>(() => {});
   // True while the ws backlog for an already-seeded log streams in — its
   // rows are in the seed, so ingesting them again would duplicate history.
   const suppressReplayRef = useRef(false);
@@ -246,9 +243,6 @@ export function App() {
       if (event.type === "message" && (event.role === "user" || event.role === "assistant")) {
         const messages = [...s.messages, { role: event.role, text: event.text }];
         messagesRef.current = messages;
-        pushFnRef.current();
-        // Device snapshot (fallback) after every sealed message.
-        void saveSnapshot(getSecret(), messages);
         return {
           ...s,
           streaming: event.role === "assistant" ? "" : s.streaming,
@@ -259,7 +253,6 @@ export function App() {
       if (event.type === "tool_start") {
         const messages = [...s.messages, { role: "tool", text: `⚙️ ${event.tool} ${JSON.stringify(event.args ?? {}).slice(0, 140)}`, tool: { name: event.tool, args: event.args ?? {} } } as ChatMessage];
         messagesRef.current = messages;
-        pushFnRef.current();
         return { ...s, messages };
       }
       if (event.type === "tool_end") {
@@ -297,47 +290,9 @@ export function App() {
     });
   }, []);
 
-  /** Checkpoint to the user's betterbase store (debounced; sealed envelope). */
-  const scheduleBetterbasePush = useCallback(() => {
-    // Circuit breaker: a failing store (e.g. betterbase worker wedged in a
-    // long CRDT merge) must not re-seal + re-put on every message — back
-    // off a minute after each failure.
-    if (Date.now() < pushBlockedUntilRef.current) return;
-    if (pushTimer.current) clearTimeout(pushTimer.current);
-    pushTimer.current = setTimeout(() => {
-      const store = bbStore;
-      const secret = getSecret();
-      if (!store || !secret || messagesRef.current.length === 0) return;
-      void (async () => {
-        try {
-          // Native-resume payload: the pi session transcript rides the same
-          // sealed envelope (account store only — localStorage stays lean).
-          // Cached between pushes — see jsonlCacheRef.
-          let jsonl: string | null = jsonlCacheRef.current.jsonl;
-          const client = attestedClientRef.current;
-          if (client && getToken() && messagesRef.current.length !== jsonlCacheRef.current.len) {
-            try {
-              const res = await client.fetch(`${ENCLAVE_URL}/session`, {
-                headers: { Authorization: `Bearer ${getToken() ?? ""}` },
-              });
-              if (res.ok) jsonl = ((await res.json()) as { jsonl?: string | null }).jsonl ?? null;
-            } catch {
-              /* rows-only checkpoint this round */
-            }
-            jsonlCacheRef.current = { len: messagesRef.current.length, jsonl };
-          }
-          const sealed: SealedSnapshot = await sealSnapshot(secret, messagesRef.current, genRef.current, jsonl);
-          genRef.current = sealed.gen;
-          await putSnapshot(store, JSON.stringify(sealed), sealed.gen);
-        } catch (e) {
-          pushBlockedUntilRef.current = Date.now() + 60_000;
-          console.warn("betterbase push failed", e);
-        }
-      })();
-    }, 800);
-  }, [bbStore]);
-
-  pushFnRef.current = scheduleBetterbasePush;
+  // (Machine backups are the enclave's own job now — it shelves itself
+  //  every 10 minutes and once more before the sleep gate exits. The
+  //  client's only role was the one-shot grant, built at unlock below.)
 
   // Open the account store when signed in (scope = personal space).
   useEffect(() => {
@@ -352,6 +307,9 @@ export function App() {
       .then((store) => {
         if (disposed) return null;
         setBbStore(store);
+        // The files API requires uploads to reference a real record — make
+        // sure the anchor row exists (created once, never updated).
+        void ensureMachineAnchor(store);
         return store;
       })
       .catch((e) => {
@@ -370,7 +328,31 @@ export function App() {
       try {
         setInferenceKey(keyInput);
         attestedClientRef.current = result.client;
-        await unlock(result.client, ENCLAVE_URL, keyInput || undefined);
+        // The bb session hydrates async from storage — an unlock racing it
+        // would silently shelf nothing all session. Wait briefly for it to
+        // settle (signed-in or not) before building the grant.
+        if (bbLoadingRef.current) {
+          await new Promise<void>((resolve) => {
+            const settle = () => {
+              clearInterval(poll);
+              clearTimeout(t);
+              resolve();
+            };
+            const t = setTimeout(settle, 3_000);
+            const poll = setInterval(() => {
+              if (!bbLoadingRef.current) settle();
+            }, 100);
+          });
+        }
+        // The machine-shelf grant: scoped betterbase credentials so the
+        // enclave can shelf + restore its own backups (epoch key wrapped
+        // under the unlock secret — memory-only both sides).
+        const grant = await buildBbGrant(
+          bb.session,
+          bb.personalSpaceId,
+          await resolveSyncEndpoint(),
+        );
+        await unlock(result.client, ENCLAVE_URL, keyInput || undefined, grant ?? undefined);
         await getState(result.client, ENCLAVE_URL);
         const transport = transportRef.current!;
         transport.setAppTap((e) => onServerEvent(e));
@@ -402,64 +384,10 @@ export function App() {
           setTimeout(() => (suppressReplayRef.current = false), 8000);
         }
         if (historyEvents.length === 0) {
-          const secret = getSecret() ?? "";
-          let pulled: SnapshotPayload | null = null;
-          // The store opens async (workers + OPFS) and the auth context may
-          // still be settling when auto-resume fires doUnlock. Poll for the
-          // store promise — but only when a betterbase session exists, so
-          // signed-out unlocks never wait.
-          const hasBbSession = () =>
-            Object.keys(localStorage).some((k) => k.startsWith("betterbase_session_waddle_"));
-          const store = bbStore ?? (await new Promise<AccountStore | null>((resolve) => {
-            if (!hasBbSession()) return resolve(null);
-            const deadline = Date.now() + 5000;
-            (function tick() {
-              const ready = bbStoreReadyRef.current;
-              if (ready) return void ready.then(resolve);
-              if (Date.now() > deadline) return resolve(null);
-              setTimeout(tick, 60);
-            })();
-          }));
-          if (store && secret) {
-            try {
-              const blob = await readSnapshot(store);
-              if (blob) pulled = await openSnapshot(secret, JSON.parse(blob) as SealedSnapshot);
-            } catch (e) {
-              console.warn("betterbase pull failed", e);
-            }
-          }
-          const relay = async (intent: Parameters<ChatConnection["send"]>[0]) => {
-            // The ws may still be handshaking (or reconnecting) when the
-            // pull finishes; retry until the frame actually goes out.
-            for (let i = 0; i < 40; i++) {
-              const target = connRef.current;
-              if (!target) break;
-              try {
-                target.send(intent);
-                return;
-              } catch {
-                await new Promise((r) => setTimeout(r, 250));
-              }
-            }
-            throw new Error(`${intent.type}: connection never opened`);
-          };
-          const relayHistory = async (rows: ChatMessage[]) =>
-            relay({
-              type: "history_restore",
-              rows: rows.map((m) => ({ role: m.role, text: m.text })),
-            });
-          // Native resume first: the pi transcript must be staged before
-          // the agent's lazy boot (the first chat). Rows follow for the
-          // enclave's sealed log — the UI replay source for later clients.
-          if (pulled && (pulled.jsonl || pulled.rows.length > 0)) {
-            if (pulled.jsonl) await relay({ type: "session_restore", jsonl: pulled.jsonl });
-            if (pulled.rows.length > 0) await relayHistory(pulled.rows);
-            seed = pulled.rows;
-          } else {
-            const device = await loadSnapshot(secret);
-            seed = device?.rows ?? [];
-            if (seed.length > 0) await relayHistory(seed);
-          }
+          // Fresh scratch with no shelf backup — a genuinely new machine.
+          // (When the enclave had a grant, it restored itself inside the
+          //  unlock call above: the history it pulled back from betterbase
+          //  already shows up in state2, and this branch is skipped.)
         }
         messagesRef.current = seed;
         setState({
@@ -474,7 +402,7 @@ export function App() {
         setState({ phase: "error", message: `unlock: ${e instanceof Error ? e.message : String(e)}` });
       }
     },
-    [keyInput, onServerEvent],
+    [keyInput, onServerEvent, bb.session, bb.personalSpaceId],
   );
   // Auto-resume: a stored token and an unlocked enclave mean a refresh —
   // reconnect, replay, continue. No manual click required.
@@ -657,20 +585,8 @@ export function App() {
         <Shell
           browserLive={!!state.frameLive}
           onSleep={() => {
-            // Final checkpoint before exit: seal + push now (no debounce),
-            // then sleep. If the push loses the race, the record stays
-            // dirty locally and syncs on the next connect — durable either way.
-            if (pushTimer.current) clearTimeout(pushTimer.current);
-            const store = bbStore;
-            const secret = getSecret();
-            if (store && secret && messagesRef.current.length > 0) {
-              void sealSnapshot(secret, messagesRef.current, genRef.current)
-                .then((sealed) => {
-                  genRef.current = sealed.gen;
-                  return putSnapshot(store, JSON.stringify(sealed), sealed.gen);
-                })
-                .catch((e) => console.warn("betterbase sleep push failed", e));
-            }
+            // The enclave shelves its own final checkpoint inside the sleep
+            // gate — nothing to push from here. Just tell it to go down.
             frameBus.reset();
             frameLiveRef.current = false;
             connRef.current?.send({ type: "sleep_now" });

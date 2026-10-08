@@ -309,6 +309,25 @@ async function settleDialog(): Promise<string | null> {
   return `a ${d.type} dialog appeared: "${d.message.slice(0, 120)}" — auto-declined; if the task needs it accepted, ask the user to confirm it themselves`;
 }
 
+/** Gracefully stop Chromium so it flushes cookies/localStorage to disk —
+ *  call before checkpointing the profile. */
+export async function stopBrowser(): Promise<void> {
+  const proc = chromium;
+  if (!proc) return;
+  try {
+    await send("Browser.close");
+  } catch {
+    proc.kill("SIGTERM");
+  }
+  await new Promise<void>((resolve) => {
+    const kill = setTimeout(() => proc.kill("SIGKILL"), 5_000);
+    proc.once("exit", () => {
+      clearTimeout(kill);
+      resolve();
+    });
+  });
+}
+
 function send(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> {
   const ws = cdp;
   if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error("browser not connected"));

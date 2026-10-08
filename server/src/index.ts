@@ -13,7 +13,18 @@ import { Lock } from "./state.js";
 import { EventLog } from "./log.js";
 import { initAgent, chat, agentReady, stageSessionJsonl, stageHistoryRows, setBlackbox, setSink, getSessionJsonl } from "./agent.js";
 import { resolveApproval, denyAllPending, setOutcomeEmitter } from "./approvals.js";
-import { setBrowserEvents, browserLive, captureNow, userInput, releaseUserControl, setControlNotifier } from "./browser.js";
+import { setBrowserEvents, browserLive, captureNow, userInput, releaseUserControl, setControlNotifier, stopBrowser } from "./browser.js";
+// (createArchive/restoreArchive live behind bb-backup.ts now; the old
+// debug GET /archive is gone — machine bytes never travel unsealed)
+import { setBbGrant, clearBbGrant, bbGrantActive, pushMachineBackup, pullMachineBackup } from "./bb-backup.js";
+
+/** Reject after ms — bounds restore/final-backup so nothing hangs the boot or the exit. */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(label)), ms);
+    p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+  });
+}
 
 const PORT = Number(process.env.PORT ?? 8080);
 const VERSION = "0.0.1";
@@ -81,12 +92,67 @@ app.get("/probe", async () => {
   };
 });
 
+// The whole-machine backup: opaque tar.gz of the working directory.
+// GET (session-gated) for the client's sleep/periodic shelf-run; POST
+// (session-gated, fresh-log-only) restores a machine before anything
+// boots. The client is a pipe — it never opens the blob.
+app.addContentTypeParser("application/gzip", { parseAs: "buffer" }, (_req, body, done) => done(null, body));
+app.addContentTypeParser("application/octet-stream", { parseAs: "buffer" }, (_req, body, done) => done(null, body));
 app.post("/unlock", async (request, reply) => {
-  const { secret, nonce, inferenceKey } = (request.body ?? {}) as UnlockRequest & { inferenceKey?: string };
+  const { secret, nonce, inferenceKey, bb } = (request.body ?? {}) as UnlockRequest & {
+    inferenceKey?: string;
+    bb?: import("./bb-backup.js").BbGrant;
+  };
   if (!secret || !nonce) return reply.code(400).send({ error: "secret and nonce required" });
   try {
     const { token, enrolled } = lock.unlock(secret, nonce);
     if (!log) log = new EventLog(lock.logKey, lock.storage);
+    // The machine-shelf grant (if the client is signed in to betterbase):
+    // unwrap the epoch key in memory, and on a fresh enclave restore the
+    // whole machine from the shelf BEFORE this unlock returns — the
+    // client's next /state read sees the restored history and seeds from
+    // it like any live boot. Restore failures never brick the unlock.
+    if (bb) {
+      try {
+        await setBbGrant(secret, bb);
+      } catch (e) {
+        app.log.warn({ err: String(e) }, "bb grant rejected — backups disabled this session");
+        clearBbGrant();
+      }
+      if (bbGrantActive() && (log?.all ?? []).every((e) => e.type === "sleep")) {
+        try {
+          // Freshness is re-checked inside the pull right before the tree
+          // swap — a restore that outlives this window must never wipe a
+          // machine that started living in the meantime.
+          const fresh = () => (log?.all ?? []).every((e) => e.type === "sleep");
+          const pulled = await withTimeout(pullMachineBackup(fresh), 60_000, "restore timeout");
+          if (pulled) {
+            log = new EventLog(lock.logKey, lock.storage);
+            app.log.info({ gen: pulled.gen, events: log.all.length }, "machine restored from shelf");
+          }
+        } catch (e) {
+          app.log.warn({ err: String(e) }, "machine restore failed — booting fresh");
+        }
+      }
+      // First checkpoint of the session (also heals a restore that found
+      // nothing — an empty machine shelves its empty state once). A quick
+      // retry covers first-run timing: the anchor record the files API
+      // references may still be syncing to the server when this fires.
+      if (bbGrantActive()) {
+        const first = () =>
+          pushMachineBackup()
+            .then((r) => app.log.info({ pushed: r.pushed, fp: r.digest.slice(0, 12) }, "initial backup"))
+            .catch((e) => {
+              app.log.warn({ err: String(e) }, "initial backup failed — retrying in 30s");
+              setTimeout(() => {
+                if (!sleeping && bbGrantActive()) {
+                  void pushMachineBackup().catch(() => undefined);
+                }
+              }, 30_000).unref();
+            });
+        void first();
+      }
+    }
     // The inference key rides the same attested, EHBP-encrypted unlock —
     // memory-only, never on disk, never in config. The agent boots lazily
     // on first use; a persisted pi session file (same scratch as this log)
@@ -161,10 +227,32 @@ async function sleep(reason: string): Promise<never> {
       /* going down regardless */
     }
   }
+  // Final machine checkpoint — the enclave shelves itself on the way
+  // down, so auto-shutdown can never lose the session. Stop Chromium first:
+  // a live profile is mid-write, and its cookie jar flushes only on exit.
+  // Bounded so a hung shelf never blocks the exit; the periodic push ≤ 10min
+  // old either way.
+  if (bbGrantActive()) {
+    await withTimeout(stopBrowser(), 10_000, "browser stop timeout").catch((e) =>
+      app.log.warn({ err: String(e) }, "browser stop failed"),
+    );
+    await withTimeout(pushMachineBackup(), 30_000, "final backup timeout").then(
+      (r) => app.log.info({ pushed: r.pushed, fp: r.digest.slice(0, 12) }, "final backup done"),
+      (e) => app.log.warn({ err: String(e) }, "final backup failed"),
+    );
+  }
   setTimeout(() => process.exit(0), 500).unref();
   await app.close().catch(() => process.exit(0));
   process.exit(0);
 }
+
+// Periodic machine checkpoint while unlocked + shelved.
+setInterval(() => {
+  if (sleeping || !lock.unlocked || !bbGrantActive()) return;
+  void pushMachineBackup()
+    .then((r) => app.log.info({ pushed: r.pushed, fp: r.digest.slice(0, 12) }, "periodic backup"))
+    .catch((e) => app.log.warn({ err: String(e) }, "periodic backup failed"));
+}, 10 * 60_000);
 
 setInterval(() => {
   if (sleeping || !lock.unlocked) return;
