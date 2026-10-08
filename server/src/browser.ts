@@ -273,7 +273,14 @@ function waitForLoad(timeoutMs: number): Promise<void> {
 
 const SNAPSHOT_JS = `(() => {
   const sel = 'a,button,input,textarea,select,[role="button"]';
-  const main = document.querySelector('main, article, [role="main"], #content, #mw-content-text');
+  // Tightest container wins: MediaWiki's #mw-content-text and semantic
+  // <article>/<main> beat generic wrappers like Vector's #content, which
+  // contains the page tabs (Article/Talk) — chrome, not content.
+  let main = null;
+  for (const s of ['#mw-content-text', 'article', 'main', '[role="main"]', '#content']) {
+    main = document.querySelector(s);
+    if (main) break;
+  }
   const ranked = [...document.querySelectorAll(sel)]
     .filter((e) => e.getClientRects().length > 0 && !e.disabled)
     .map((e) => ({ e, inMain: main ? main.contains(e) : false }))
@@ -297,7 +304,11 @@ const SNAPSHOT_JS = `(() => {
       const start = Math.floor(ratio * Math.max(0, full.length - win));
       return full.slice(start, start + win) + (start > 0 ? '\\n[excerpt at scroll position — browser_scroll to read more]' : '');
     })(),
-    clickables: clickables.join('\\n'),
+    clickables:
+      'Clickable elements cover the whole page (not just the viewport);\\n' +
+      'lowest indexes are main content. Page TEXT follows the current\\n' +
+      'scroll position.\\n' +
+      clickables.join('\\n'),
   };
 })()`;
 
