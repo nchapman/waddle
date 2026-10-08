@@ -117,11 +117,14 @@ export function InteractFrame({
       if (held) onRelease();
       return;
     }
-    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    // Printables ride keydown only — the handler is bound to keyup too, and
+    // a char queued on both would type twice for every physical press.
+    if (e.type === "keydown" && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
       queue.current.push({ t: "text", s: e.key });
       return;
     }
+    if (e.type === "keydown" && e.repeat) return; // OS auto-repeat: text already covers it
     if (KEY_SEND.has(e.key)) {
       e.preventDefault();
       queue.current.push({ t: "key", k: e.key, up: e.type === "keyup" });
