@@ -4,7 +4,7 @@ memory: 8192
 
 containers:
   - name: "waddle"
-    image: "ghcr.io/nchapman/waddle@sha256:333740164c93502e52e9d95057ebd9ad3eace506426e33444395a8990c3750af"
+    image: "ghcr.io/nchapman/waddle@sha256:45c893080b9aa4587726989190854de189ec236c755eb4925b0002f8bd90d87d"
     networks: [outbound]
     env:
       - PORT: "8080"
