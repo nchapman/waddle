@@ -19,6 +19,8 @@
     "@waddle/sdk": "workspace:*",
     "fastify": "^5.0.0",
     "tinfoil": "^1.2.2",
+    "typebox": "1.3.27",
+    "ws": "^8.22.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {

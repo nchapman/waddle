@@ -46,3 +46,21 @@ test("absent or empty path asks, never assumes", () => {
   assert.equal(needsApproval("write", { path: "" }), true);
   assert.equal(needsApproval("edit", {}), true);
 });
+
+test("browser_open: allowlisted domains pass — bare domains normalize like the tool", () => {
+  assert.equal(needsApproval("browser_open", { url: "news.ycombinator.com" }), false);
+  assert.equal(needsApproval("browser_open", { url: "https://news.ycombinator.com/" }), false);
+  assert.equal(needsApproval("browser_open", { url: "https://sub.en.wikipedia.org/wiki/X" }), false);
+});
+
+test("browser_open: non-listed or malformed domains ask", () => {
+  assert.equal(needsApproval("browser_open", { url: "https://evil.example.net/" }), true);
+  assert.equal(needsApproval("browser_open", { url: "not a url" }), true);
+  assert.equal(needsApproval("browser_open", {}), true);
+});
+
+test("browser clicks/snapshots/typing auto-allow (the URL gate is on open)", () => {
+  assert.equal(needsApproval("browser_snapshot", {}), false);
+  assert.equal(needsApproval("browser_click", { index: 3 }), false);
+  assert.equal(needsApproval("browser_type", { index: 2, text: "hi" }), false);
+});

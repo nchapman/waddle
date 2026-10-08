@@ -7,6 +7,7 @@ import { getSecret } from "./lib/session";
 import type { StateResponse } from "@waddle/sdk";
 import type { UIMessage } from "@ai-sdk/react";
 import { ChatSurface } from "./ChatSurface";
+import { BrowserPreview } from "./BrowserPreview";
 import { useAuth } from "betterbase/auth/react";
 import { BetterbaseProvider } from "betterbase/sync/react";
 import { COLLECTIONS } from "./lib/bb-collections";
@@ -49,6 +50,10 @@ type State =
       replayed: boolean;
       error?: string;
       pendingApproval?: { callId: string; tool: string; input: unknown };
+      frame?: string | null;
+      browserUrl?: string;
+      browserTitle?: string;
+      frameSeq?: number;
     };
 
 const box = (bg: string): React.CSSProperties => ({
@@ -94,6 +99,20 @@ function eventsToRows(events: Array<Record<string, unknown>>): ChatMessage[] {
     }
   }
   return rows;
+}
+
+
+// Live-dot pulse keyframes for the browser preview (plain DOM — no hook,
+// no re-render; injected once at module load).
+{
+  const id = "waddle-pulse-style";
+  if (typeof document !== "undefined" && !document.getElementById(id)) {
+    const style = document.createElement("style");
+    style.id = id;
+    style.textContent =
+      "@keyframes waddle-pulse{0%{box-shadow:0 0 0 0 rgba(34,197,94,.55)}70%{box-shadow:0 0 0 7px rgba(34,197,94,0)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}}";
+    document.head.appendChild(style);
+  }
 }
 
 export function App() {
@@ -162,6 +181,12 @@ export function App() {
         const messages = [...s.messages, { role: event.role, text: event.text } as ChatMessage];
         messagesRef.current = messages;
         return { ...s, messages };
+      }
+      if (event.type === "frame") {
+        return s.phase === "chat" ? { ...s, frame: event.data, frameSeq: event.seq } : s;
+      }
+      if (event.type === "browser_status") {
+        return s.phase === "chat" ? { ...s, browserUrl: event.url, browserTitle: event.title } : s;
       }
       if (event.type === "message" && (event.role === "user" || event.role === "assistant")) {
         const messages = [...s.messages, { role: event.role, text: event.text }];
@@ -519,6 +544,7 @@ export function App() {
 
       {state.phase === "chat" && (
         <>
+          <BrowserPreview frame={state.frame ?? null} url={state.browserUrl} title={state.browserTitle} />
           {state.replayed ? (
             <ChatSurface
               transport={transportRef.current!}

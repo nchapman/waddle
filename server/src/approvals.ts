@@ -49,9 +49,28 @@ export function setOutcomeEmitter(next: (outcome: ApprovalOutcome & { at: string
 }
 let outcomeEmitter: (outcome: ApprovalOutcome & { at: string }) => void = () => undefined;
 
+/** Domains the agent may open without asking (comma-separated env). */
+const BROWSER_ALLOWLIST = (process.env.WADDLE_BROWSER_ALLOWLIST ?? "example.com,news.ycombinator.com,en.wikipedia.org,tinfoil.sh,localhost")
+  .split(",")
+  .map((d) => d.trim().toLowerCase())
+  .filter(Boolean);
+
 /** Does this call need the human? */
 export function needsApproval(toolName: string, input: Record<string, unknown>): boolean {
   if (toolName === "bash" || toolName === "powershell") return true;
+  if (toolName === "browser_open") {
+    // The URL/domain gate: allowlisted domains pass, everything else asks.
+    // Same normalization as the tool itself — the model often passes bare domains.
+    const raw = String(input.url ?? "").trim();
+    const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+    try {
+      const host = new URL(withScheme).hostname.toLowerCase();
+      if (host && BROWSER_ALLOWLIST.some((d) => host === d || host.endsWith(`.${d}`))) return false;
+    } catch {
+      /* unparsable URL: ask */
+    }
+    return true;
+  }
   if (toolName === "write" || toolName === "edit") {
     // Writes auto-allow inside the workspace; anything else asks.
     return !inWorkspace(String(input.path ?? ""));

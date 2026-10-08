@@ -31,7 +31,11 @@ export type GatewayEvent =
   | { type: "sleep_cancelled"; reason: string }
   | { type: "sleep"; reason: string; at?: string }
   /** Marks the end of the initial backlog replay; live events follow. */
-  | { type: "replay_done"; count: number };
+  | { type: "replay_done"; count: number }
+  /** Live browser frame (jpeg data URL) — ephemeral broadcast, never logged. */
+  | { type: "frame"; data: string; seq: number }
+  /** Browser navigation/status: what the enclave's Chromium is showing. */
+  | { type: "browser_status"; url: string; title: string; live: boolean };
 
 export function hello(
   version: string,

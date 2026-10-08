@@ -2,6 +2,10 @@
 # pnpm deploy flattens the workspace symlink farm into a self-contained
 # production tree; stage-copied symlinks are how the last image broke.
 FROM node:24-slim AS build
+# The Eyes: Chromium (headful under Xvfb) inside the measured image.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends chromium xvfb fonts-liberation fonts-dejavu-core \
+ && rm -rf /var/lib/apt/lists/*
 RUN corepack enable
 WORKDIR /app
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
@@ -20,6 +24,10 @@ RUN pnpm --filter @waddle/sdk build \
 
 FROM node:24-slim
 ENV NODE_ENV=production
+# Runtime half of the browser stack: the browser binary + fonts (no build tools).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends chromium xvfb fonts-liberation fonts-dejavu-core \
+ && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /deploy ./
 # Writable state (anonymous volume) survives read-only rootfs enforcement.

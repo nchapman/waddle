@@ -247,6 +247,28 @@ Step-up re-entry and connector-class approvals remain with the connector work;
 the gate's deny-timeout and disconnect paths emit verdict events so no banner
 can dangle.
 
+**Divergences (The Eyes, as built — pulled forward for the demo):** the
+browser phase ships before connectors/memory, demo-first. Architecture as
+planned-in-spirit but concretely: headful Chromium under Xvfb inside the
+enclave container (apt chromium, `--no-sandbox` as root), driven over local
+CDP (ws to the page target). The viewport streams to the client as `frame`
+events — jpeg q55, 1024px, wire-throttled ~10fps — riding the *existing*
+attested ws as ephemeral broadcasts, never sealed into the log (frames are
+views, not history); `browser_status` events update the client's URL bar.
+The plan's "broker-mediated browser + take-over" lands as: agent tools
+(browser_open / browser_snapshot / browser_click / browser_type) with the
+approval gate on `browser_open` only — allowlisted domains
+(`WADDLE_BROWSER_ALLOWLIST`) pass, everything else asks; clicks/types/snapshots
+auto-allow; in-page link navigation follows without re-ask (the gate is the
+explicit-open boundary). DOM-model driving (numbered clickables via
+`data-waddle-idx`, no vision) — snapshot gives the model text + indices;
+clicks highlight the element in the stream so the user sees exactly what the
+agent clicked. Client: a BrowserPreview card (URL bar, LIVE pulse, fps
+counter, expand) above the chat, fixed-overlay expanded view, ESC to
+collapse. Post-fix proof: bare-domain allowlist normalization matches the
+tool's (regression-tested). Live WebRTC capture remains the production
+upgrade path.
+
 **Divergences (The Backbone, as built):** durable history lives in the user's
 betterbase store via a *tokenless relay*: the browser — never the enclave —
 holds the betterbase session (OAuth+PKCE, public client `a5be475c-5f9b-47f0-aa39-ace116f7a8c0`,

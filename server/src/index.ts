@@ -13,6 +13,7 @@ import { Lock } from "./state.js";
 import { EventLog } from "./log.js";
 import { initAgent, chat, agentReady, setBlackbox, setSink } from "./agent.js";
 import { resolveApproval, denyAllPending, setOutcomeEmitter } from "./approvals.js";
+import { setBrowserEvents, browserLive, captureNow } from "./browser.js";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const VERSION = "0.0.1";
@@ -117,6 +118,19 @@ let streaming = false;
 // stops — and billing with it. The concierge wakes it.
 const IDLE_MS = Number(process.env.WADDLE_IDLE_MS ?? 120_000);
 const sockets = new Set<import("ws").WebSocket>();
+
+// The Eyes: browser frames + navigation status are broadcast-only (never
+// sealed into the log — they are views, not history).
+setBrowserEvents({
+  onFrame: (data, seq) => {
+    const evt = JSON.stringify({ type: "frame", data, seq } satisfies GatewayEvent);
+    for (const s of sockets) if (s.readyState === 1) s.send(evt);
+  },
+  onStatus: (status) => {
+    const evt = JSON.stringify({ type: "browser_status", ...status } satisfies GatewayEvent);
+    for (const s of sockets) if (s.readyState === 1) s.send(evt);
+  },
+});
 let lastActivity = Date.now();
 let sleeping = false;
 
@@ -166,6 +180,9 @@ app.get("/ws", { websocket: true }, (socket, request) => {
       | import("@waddle/sdk").ErrorEvent
   ) => socket.send(JSON.stringify(event));
   sockets.add(socket);
+  if (browserLive()) {
+    void captureNow(); // fresh frame for the new viewer
+  }
   socket.on("close", () => {
     sockets.delete(socket);
     // Mid-turn disconnect: keep logging the run (the sealed log is the truth);
