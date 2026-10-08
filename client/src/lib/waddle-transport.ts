@@ -3,8 +3,9 @@
  *
  * sendMessages() hands the user's text to the enclave gateway and maps the
  * gateway's event stream into UIMessageChunks: deltas stream, tool activity
- * and approval verdicts ride along as fenced text, run_settled closes the
- * turn (steered and queued replies all land first).
+ * rides as real tool parts (the Thread renders them as chips), approval
+ * verdicts ride as fenced text, run_settled closes the turn (steered and
+ * queued replies all land first).
  *
  * Chunk protocol (learned the hard way): 'start' opens the message,
  * 'text-start' opens the part BEFORE any text-delta, and text-end + finish
@@ -84,6 +85,13 @@ export class WaddleChatTransport implements ChatTransport<UIMessage> {
             controller.enqueue({ type: "text-start", id: "w" });
           }
         };
+        // Tool parts must not nest inside an open text part.
+        const closeText = () => {
+          if (textOpen) {
+            textOpen = false;
+            controller.enqueue({ type: "text-end", id: "w" });
+          }
+        };
         const finish = () => {
           if (!open) return;
           open = false;
@@ -103,14 +111,29 @@ export class WaddleChatTransport implements ChatTransport<UIMessage> {
                 controller.enqueue(text(event.text));
                 break;
               case "tool_start":
-                ensureText();
-                controller.enqueue(text(`\n\`⚙️ ${event.tool} ${short(JSON.stringify(event.args ?? {}))}\`\n`));
+                closeText();
+                controller.enqueue({ type: "tool-input-start", toolCallId: event.callId, toolName: event.tool });
+                controller.enqueue({
+                  type: "tool-input-delta",
+                  toolCallId: event.callId,
+                  inputTextDelta: JSON.stringify(event.args ?? {}),
+                });
                 break;
               case "tool_end":
-                ensureText();
-                controller.enqueue(
-                  text(`\`${event.isError ? "⛔" : "✔"} ${event.tool} → ${short(JSON.stringify(event.result ?? ""))}\`\n`),
-                );
+                closeText();
+                if (event.isError) {
+                  controller.enqueue({
+                    type: "tool-output-error",
+                    toolCallId: event.callId,
+                    errorText: short(JSON.stringify(event.result ?? ""), 200),
+                  });
+                } else {
+                  controller.enqueue({
+                    type: "tool-output-available",
+                    toolCallId: event.callId,
+                    output: event.result ?? "",
+                  });
+                }
                 break;
               case "approval":
                 ensureText();

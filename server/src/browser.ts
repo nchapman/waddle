@@ -2,13 +2,14 @@
  * The Eyes: a real Chromium inside the enclave, driven by the agent over
  * CDP, streamed to the user as live frames over the attested ws.
  *
- * Headful under Xvfb (research: CDP screencast from a virtual display is
- * the proven cheap path; OS-level capture → WebRTC is the production
- * upgrade). Frames are ephemeral broadcasts — never sealed into the log.
- * The browser boots lazily on first use and dies with the process.
+ * Chromium runs --headless=new (the full browser, no display): the enclave
+ * mounts /tmp read-only which kills Xvfb (lock file, unix socket, xkbcomp
+ * keymap — all hardcoded /tmp), and headless works identically in compose
+ * and the enclave — one code path. Frames are ephemeral broadcasts, never
+ * sealed into the log; the browser boots lazily and dies with the process.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import WebSocket from "ws";
 
 const DATA_DIR = process.env.DATA_DIR ?? "/tmp/waddle-data";
@@ -16,14 +17,11 @@ const PROFILE = `${DATA_DIR}/browser`;
 // The enclave mounts / read-only (only the DATA_DIR tmpfs is writable).
 // Chromium writes TMPDIR/HOME/XDG state and crashpad's database at boot;
 // on a read-only root it dies with SIGTRAP before CDP ever answers.
-// X over TCP (no /tmp unix socket — see BROWSER_ENV note).
-const X_DISPLAY = "127.0.0.1:99";
-const DISPLAY_ARG = ":99";
+
 const HOME = `${DATA_DIR}/home`;
 const TMP = `${DATA_DIR}/tmp`;
 const BROWSER_ENV = {
   ...process.env,
-  DISPLAY: X_DISPLAY,
   HOME,
   TMPDIR: TMP,
   XDG_CONFIG_HOME: `${HOME}/.config`,
@@ -31,7 +29,6 @@ const BROWSER_ENV = {
 };
 const DEBUG_PORT = 9222;
 const CHROMIUM = process.env.WADDLE_CHROMIUM_BIN ?? "chromium";
-const XVFMB_BIN = process.env.WADDLE_XVFB_BIN ?? "Xvfb";
 
 /** Wire events out of the runtime (broadcast-only; none are logged). */
 export interface BrowserEvents {
@@ -44,7 +41,6 @@ export function setBrowserEvents(next: BrowserEvents): void {
 }
 
 // ── process + CDP state ────────────────────────────────────────────────
-let xvfb: ChildProcess | null = null;
 let chromium: ChildProcess | null = null;
 let cdp: WebSocket | null = null;
 let msgId = 0;
@@ -60,16 +56,7 @@ export function browserLive(): boolean {
   return cdp !== null && cdp.readyState === WebSocket.OPEN;
 }
 
-function tmpWritable(): boolean {
-  try {
-    mkdirSync("/tmp/.X11-unix", { recursive: true });
-    return true;
-  } catch {
-    return false; // read-only /tmp (the enclave) — headless path
-  }
-}
-
-/** Boot Xvfb + Chromium + the CDP bridge (idempotent). */
+/** Boot Chromium + the CDP bridge (idempotent). */
 export async function ensureBrowser(): Promise<void> {
   if (browserLive()) return;
   if (booting) return booting;
@@ -78,23 +65,16 @@ export async function ensureBrowser(): Promise<void> {
     mkdirSync(`${DATA_DIR}/home/.cache`, { recursive: true });
     mkdirSync(`${DATA_DIR}/tmp`, { recursive: true });
     mkdirSync(PROFILE, { recursive: true });
-    // X needs /tmp writable (lock file, unix socket, xkbcomp keymap — all
-    // hardcoded there). The enclave mounts /tmp read-only, so there we run
-    // Chromium's new headless instead: same full browser + CDP, no display.
-    const headless = !tmpWritable();
-    if (!headless && !xvfb) {
-      xvfb = spawn(
-        XVFMB_BIN,
-        [DISPLAY_ARG, "-screen", "0", "1280x800x24", "-nolisten", "unix", "-listen", "tcp", "-ac"],
-        { stdio: "ignore", env: BROWSER_ENV },
-      );
-      await new Promise((r) => setTimeout(r, 400));
+    // Stale singleton locks from a previous container life would kill the
+    // browser instantly on a persisted profile — clear them before boot.
+    for (const f of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) {
+      rmSync(`${PROFILE}/${f}`, { force: true });
     }
     if (!chromium) {
       chromium = spawn(
         CHROMIUM,
         [
-          ...(headless ? ["--headless=new"] : [`--display=${X_DISPLAY}`]),
+          "--headless=new",
           "--no-sandbox",
           "--disable-gpu",
           "--disable-dev-shm-usage",

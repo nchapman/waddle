@@ -1,10 +1,11 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import wasm from "vite-plugin-wasm";
+import tailwindcss from "@tailwindcss/vite";
 import { fileURLToPath } from "node:url";
 
 export default defineConfig({
-  plugins: [react(), wasm()],
+  plugins: [react(), wasm(), tailwindcss()],
   worker: {
     format: "es",
     plugins: () => [wasm()],
@@ -18,6 +19,7 @@ export default defineConfig({
     alias: {
       // Hot-loop linking: consume sdk source directly (no dist needed in dev).
       "@waddle/sdk": fileURLToPath(new URL("../sdk/src/index.ts", import.meta.url)),
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
   server: {

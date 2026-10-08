@@ -7,7 +7,19 @@ import { getSecret } from "./lib/session";
 import type { StateResponse } from "@waddle/sdk";
 import type { UIMessage } from "@ai-sdk/react";
 import { ChatSurface } from "./ChatSurface";
-import { BrowserPreview } from "./BrowserPreview";
+import { BrowserDock, BrowserOverlay } from "./components/BrowserDock";
+import { Shell, StoreFooter } from "./components/Shell";
+import { Chip } from "./components/DuckMark";
+import { ApprovalCard } from "./components/ApprovalCard";
+import {
+  VerifyingScreen,
+  AttestedScreen,
+  BlockedScreen,
+  UnlockingScreen,
+  LockedForm,
+  AsleepScreen,
+  ErrorScreen,
+} from "./components/Ceremony";
 import { useAuth } from "betterbase/auth/react";
 import { BetterbaseProvider } from "betterbase/sync/react";
 import { COLLECTIONS } from "./lib/bb-collections";
@@ -102,21 +114,9 @@ function eventsToRows(events: Array<Record<string, unknown>>): ChatMessage[] {
 }
 
 
-// Live-dot pulse keyframes for the browser preview (plain DOM — no hook,
-// no re-render; injected once at module load).
-{
-  const id = "waddle-pulse-style";
-  if (typeof document !== "undefined" && !document.getElementById(id)) {
-    const style = document.createElement("style");
-    style.id = id;
-    style.textContent =
-      "@keyframes waddle-pulse{0%{box-shadow:0 0 0 0 rgba(34,197,94,.55)}70%{box-shadow:0 0 0 7px rgba(34,197,94,0)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}}";
-    document.head.appendChild(style);
-  }
-}
-
 export function App() {
   const [state, setState] = useState<State>({ phase: "verifying" });
+  const [browserExpanded, setBrowserExpanded] = useState(false);
   const [keyInput, setKeyInput] = useState(getInferenceKey());
   const connRef = useRef<ChatConnection | null>(null);
   const transportRef = useRef<WaddleChatTransport | null>(null);
@@ -133,7 +133,6 @@ export function App() {
   // rows are in the seed, so ingesting them again would duplicate history.
   const suppressReplayRef = useRef(false);
   if (!transportRef.current) transportRef.current = new WaddleChatTransport();
-  const [draft, setDraft] = useState("");
 
   const run = useCallback(async () => {
     setState({ phase: "verifying" });
@@ -454,195 +453,128 @@ export function App() {
     [state],
   );
 
-  const send = useCallback(() => {
-    const text = draft.trim();
-    if (!text || state.phase !== "chat" || !connRef.current) return;
-    connRef.current.send({ type: "user_message", text });
-    setDraft("");
-  }, [draft, state.phase]);
-
   const tree = (
-    <main style={{ fontFamily: "system-ui", padding: "2rem", maxWidth: 720 }}>
-      <h1>waddle</h1>
-
-      {state.phase === "verifying" && <p style={box("#eee")}>🔒 verifying enclave…</p>}
-
-      {state.phase === "error" && (
-        <p style={box("#fde8e8")}>
-          ⛔ {state.message}
-          <br />
-          <button onClick={() => void run()}>retry</button>{" "}
-          <button onClick={() => { forgetSecret(); void run(); }}>forget secret & retry</button>{" "}
-          <button onClick={() => void wake()}>☀️ wake waddle (instance may be asleep)</button>
-        </p>
-      )}
-
-      {state.phase === "blocked" && (
-        <div style={box("#fff3cd")}>
-          ⚠️ <b>code fingerprint changed — blocked.</b>
-          <p>
-            pinned: <code>{fp(state.result.pinConflict!.pinned)}</code>
-            <br />
-            current: <code>{fp(state.result.pinConflict!.current)}</code>
-          </p>
-          <p style={{ fontSize: 13 }}>
-            Check the release ({state.result.releaseTag} · digest{" "}
-            {fp(state.result.releaseDigest)}) before approving.
-          </p>
-          <button onClick={() => { repin(state.result); void run(); }}>
-            I reviewed it — approve new fingerprint
-          </button>
+    <div className="flex h-full flex-col">
+      {state.phase !== "chat" ? (
+        <div className="flex-1 overflow-auto">
+          {state.phase === "verifying" && <VerifyingScreen />}
+          {state.phase === "error" && (
+            <ErrorScreen
+              message={state.message}
+              onRetry={() => void run()}
+              onForget={() => { forgetSecret(); void run(); }}
+              onWake={() => void wake()}
+            />
+          )}
+          {state.phase === "blocked" && (
+            <BlockedScreen
+              pinned={fp(state.result.pinConflict!.pinned)}
+              current={fp(state.result.pinConflict!.current)}
+              releaseTag={state.result.releaseTag}
+              releaseDigest={fp(state.result.releaseDigest)}
+              onApprove={() => { repin(state.result); void run(); }}
+            />
+          )}
+          {state.phase === "attested" && state.locked && (
+            <LockedForm
+              keyInput={keyInput}
+              onKeyInput={setKeyInput}
+              hasStoredSecret={!!getToken()}
+              onUnlock={() => void doUnlock(state.result)}
+            />
+          )}
+          {state.phase === "attested" && !state.locked && (
+            <AttestedScreen
+              releaseTag={DEV ? "DEV" : state.result.releaseTag}
+              firstPin={state.result.firstPin}
+              locked={false}
+              onUnlock={() => void doUnlock(state.result)}
+              onResume={() => void doUnlock(state.result)}
+            />
+          )}
+          {state.phase === "unlocking" && <UnlockingScreen />}
+          {state.phase === "asleep" && (
+            <AsleepScreen waking={state.waking} note={state.note} onWake={() => void wake()} />
+          )}
+          <StoreFooter
+            connected={bb.isAuthenticated}
+            handle={bb.handle ?? undefined}
+            opening={!!bbStore || !bb.isAuthenticated ? false : true}
+            onConnect={bb.clientId ? () => void bb.login() : undefined}
+          />
         </div>
-      )}
-
-      {state.phase === "attested" && (
-        <>
-          <p style={box("#e8f5e9")}>
-            {DEV ? "🛠 DEV — no attestation (local parity)" : `✅ attested · ${state.result.releaseTag} · pinned`}{" "}
-            {state.result.firstPin ? "(first connect — TOFU)" : "(match)"}
-          </p>
-          {state.locked ? (
-            <div style={box("#eef")}>
-              🔐 <b>locked</b> — this enclave holds no key to your data.
-              <p style={{ fontSize: 13 }}>
-                Unlocking generates a 64-byte secret on this device, delivers it through the
-                attested channel, and derives every server-side key from it.
-              </p>
-              <p style={{ fontSize: 13 }}>
-                <label>
-                  inference key (Tinfoil, memory-only):{" "}
-                  <input
-                    type="password"
-                    value={keyInput}
-                    onChange={(e) => setKeyInput(e.target.value)}
-                    placeholder="tk_…"
-                    style={{ width: 240 }}
-                  />
-                </label>
-              </p>
-              <button onClick={() => void doUnlock(state.result)}>
-                {getToken() ? "unlock with stored secret" : "generate secret & unlock"}
-              </button>
+      ) : (
+        <Shell
+          browserLive={!!state.frame}
+          onSleep={() => {
+            // Final checkpoint before exit: seal + push now (no debounce),
+            // then sleep. If the push loses the race, the record stays
+            // dirty locally and syncs on the next connect — durable either way.
+            if (pushTimer.current) clearTimeout(pushTimer.current);
+            const store = bbStore;
+            const secret = getSecret();
+            if (store && secret && messagesRef.current.length > 0) {
+              void sealSnapshot(secret, messagesRef.current, genRef.current)
+                .then((sealed) => {
+                  genRef.current = sealed.gen;
+                  return putSnapshot(store, JSON.stringify(sealed), sealed.gen);
+                })
+                .catch((e) => console.warn("betterbase sleep push failed", e));
+            }
+            connRef.current?.send({ type: "sleep_now" });
+          }}
+          statusChips={
+            <>
+              <Chip tone="good">
+                {DEV ? "dev parity" : `attested · ${state.result.releaseTag}`}
+              </Chip>
+              <Chip tone={state.connected ? "good" : "warn"}>
+                {state.connected ? "stream live" : "disconnected — reload"}
+              </Chip>
+              {state.frame && <Chip tone="duck">👁 eyes on</Chip>}
+            </>
+          }
+          browser={
+            <BrowserDock
+              frame={state.frame ?? null}
+              url={state.browserUrl}
+              title={state.browserTitle}
+              onExpand={() => setBrowserExpanded(true)}
+            />
+          }
+        >
+          {state.pendingApproval && (
+            <ApprovalCard
+              tool={state.pendingApproval.tool}
+              input={state.pendingApproval.input}
+              onAnswer={answerApproval}
+            />
+          )}
+          {state.replayed ? (
+            <div className="min-h-0 flex-1 overflow-hidden rounded-2xl border border-border/60 bg-card/40">
+              <ChatSurface transport={transportRef.current!} initialMessages={seedMessages} />
             </div>
           ) : (
-            <button onClick={() => void doUnlock(state.result)}>resume session</button>
+            <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+              <span className="animate-pulse">replaying history…</span>
+            </div>
           )}
-        </>
-      )}
-
-      {state.phase === "unlocking" && <p style={box("#eee")}>🔑 unlocking…</p>}
-
-      {state.phase === "asleep" && (
-        <div style={box("#eef")}>
-          😴 <b>waddle is asleep</b> — the instance is stopped; billing stopped with it.
-          {state.note && <p style={{ fontSize: 13 }}>{state.note}</p>}
-          <button disabled={state.waking} onClick={() => void wake()}>
-            {state.waking ? "waking…" : "☀️ wake waddle"}
-          </button>
-        </div>
-      )}
-
-      {state.phase === "chat" && (
-        <>
-          <BrowserPreview frame={state.frame ?? null} url={state.browserUrl} title={state.browserTitle} />
-          {state.replayed ? (
-            <ChatSurface
-              transport={transportRef.current!}
-              initialMessages={seedMessages}
-              header={
-                <p style={{ ...box("#e8f5e9"), borderRadius: 0, margin: 0 }}>
-                  {DEV ? "🛠 DEV — unlocked (local parity)" : `✅ attested · ${state.result.releaseTag} · unlocked`} ·{" "}
-                  {state.connected ? "stream live" : "⚠️ disconnected — reload to re-replay"}
-                </p>
-              }
-              banner={
-                state.pendingApproval ? (
-                  <div style={{ ...box("#fff7e0"), borderRadius: 0, margin: 0 }}>
-                    <b>
-                      🔓 waddle wants to run <code>{state.pendingApproval.tool}</code>
-                    </b>
-                    <pre
-                      style={{
-                        background: "#fff",
-                        border: "1px solid #e0d9b8",
-                        borderRadius: 6,
-                        padding: "0.5rem 0.7rem",
-                        fontSize: 12,
-                        fontFamily: "ui-monospace, monospace",
-                        whiteSpace: "pre-wrap",
-                        wordBreak: "break-all",
-                        marginTop: "0.5rem",
-                      }}
-                    >
-                      {JSON.stringify(state.pendingApproval.input, null, 2)}
-                    </pre>
-                    <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
-                      <button
-                        style={{ background: "#2c8a4b", color: "#fff", border: 0, borderRadius: 6, padding: "0.4rem 1rem" }}
-                        onClick={() => answerApproval(true)}
-                      >
-                        approve
-                      </button>
-                      <button
-                        style={{ background: "#b03a2e", color: "#fff", border: 0, borderRadius: 6, padding: "0.4rem 1rem" }}
-                        onClick={() => answerApproval(false)}
-                      >
-                        deny
-                      </button>
-                    </div>
-                  </div>
-                ) : undefined
-              }
-            />
-          ) : (
-            <p style={box("#eee")}>replaying history…</p>
+          {state.error && (
+            <div className="mt-2 rounded-xl border border-gate-strong/50 bg-gate-strong/10 px-4 py-2.5 text-sm text-gate-strong">
+              ⛔ {state.error}
+            </div>
           )}
-          {state.error && <p style={box("#fde8e8")}>⛔ {state.error}</p>}
-          <button
-            style={{ marginTop: "0.5rem" }}
-            onClick={() => {
-              // Final checkpoint before exit: seal + push now (no debounce),
-              // then sleep. If the push loses the race, the record stays
-              // dirty locally and syncs on the next connect — durable either way.
-              if (pushTimer.current) clearTimeout(pushTimer.current);
-              const store = bbStore;
-              const secret = getSecret();
-              if (store && secret && messagesRef.current.length > 0) {
-                void sealSnapshot(secret, messagesRef.current, genRef.current)
-                  .then((sealed) => {
-                    genRef.current = sealed.gen;
-                    return putSnapshot(store, JSON.stringify(sealed), sealed.gen);
-                  })
-                  .catch((e) => console.warn("betterbase sleep push failed", e));
-              }
-              connRef.current?.send({ type: "sleep_now" });
-            }}
-          >
-            💤 put waddle to sleep
-          </button>
-
-        </>
+        </Shell>
       )}
-
-      <p style={{ ...box("#f4f0ff"), marginTop: "0.5rem", fontSize: 13 }}>
-        {bb.isAuthenticated
-          ? `☁️ betterbase: ${bb.handle ?? "signed in"}${bbStore ? " · store connected" : " · opening store…"}`
-          : "☁️ betterbase: not connected — "}
-        {!bb.isAuthenticated && (
-          <button
-            style={{ marginLeft: 4 }}
-            onClick={() => void bb.login()}
-            disabled={!bb.clientId}
-          >
-            connect your store
-          </button>
-        )}
-      </p>
-
-      <p style={{ fontSize: 12, color: "#999", marginTop: "2rem" }}>
-        enclave {ENCLAVE_URL}
-      </p>
-    </main>
+      {state.phase === "chat" && browserExpanded && (
+        <BrowserOverlay
+          frame={state.frame ?? null}
+          url={state.browserUrl}
+          title={state.browserTitle}
+          onClose={() => setBrowserExpanded(false)}
+        />
+      )}
+    </div>
   );
 
   // The sync engine mounts with the account store: pushes pending local
