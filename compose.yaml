@@ -15,6 +15,7 @@ services:
       NODE_ENV: production
       DATA_DIR: /data # compose volume: the log survives restarts locally
       WADDLE_IDLE_MS: "3600000" # 1h — local sleep is manual in practice
+      WADDLE_MODEL: ${WADDLE_MODEL:-deepseek-v4-1-flash}
     volumes:
       - waddle-data:/data
     restart: "no" # sleep = exit stays true locally

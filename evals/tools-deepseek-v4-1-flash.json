@@ -1,0 +1,43 @@
+{
+  "model": "deepseek-v4-1-flash",
+  "at": "2026-10-08T03:03:02.539Z",
+  "score": 5,
+  "total": 5,
+  "results": [
+    {
+      "name": "write-file",
+      "pass": true,
+      "toolCalls": 1,
+      "reply": "DONE",
+      "err": null
+    },
+    {
+      "name": "read-file",
+      "pass": true,
+      "toolCalls": 2,
+      "reply": "token-zulu-99",
+      "err": null
+    },
+    {
+      "name": "edit-file",
+      "pass": true,
+      "toolCalls": 6,
+      "reply": "DONE",
+      "err": null
+    },
+    {
+      "name": "bash-compute",
+      "pass": true,
+      "toolCalls": 7,
+      "reply": "391",
+      "err": null
+    },
+    {
+      "name": "multi-step",
+      "pass": true,
+      "toolCalls": 10,
+      "reply": "It says exactly: `ok`",
+      "err": null
+    }
+  ]
+}

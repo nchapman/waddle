@@ -1,0 +1,43 @@
+{
+  "model": "kimi-k3",
+  "at": "2026-10-08T03:11:35.591Z",
+  "score": 5,
+  "total": 5,
+  "results": [
+    {
+      "name": "write-file",
+      "pass": true,
+      "toolCalls": 1,
+      "reply": "DONE",
+      "err": null
+    },
+    {
+      "name": "read-file",
+      "pass": true,
+      "toolCalls": 2,
+      "reply": "token-zulu-99",
+      "err": null
+    },
+    {
+      "name": "edit-file",
+      "pass": true,
+      "toolCalls": 4,
+      "reply": "DONE",
+      "err": null
+    },
+    {
+      "name": "bash-compute",
+      "pass": true,
+      "toolCalls": 5,
+      "reply": "391",
+      "err": null
+    },
+    {
+      "name": "multi-step",
+      "pass": true,
+      "toolCalls": 8,
+      "reply": "The file says exactly:\n\nok",
+      "err": null
+    }
+  ]
+}

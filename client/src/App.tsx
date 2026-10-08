@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { verifyEnclave, repin, type AttestationResult } from "./lib/attestation";
 import { unlock, getState, forgetSecret, getToken, getInferenceKey, setInferenceKey } from "./lib/session";
 import { connectChat, type ServerEvent, type ChatConnection } from "./lib/ws";
 import { saveSnapshot, loadSnapshot } from "./lib/backup";
 import { getSecret } from "./lib/session";
 import type { StateResponse } from "@waddle/sdk";
+import type { UIMessage } from "@ai-sdk/react";
+import { ChatSurface } from "./ChatSurface";
+import { WaddleChatTransport } from "./lib/waddle-transport";
 
 const DEV = import.meta.env.VITE_DEV === "1";
 const ENCLAVE_URL =
@@ -14,8 +17,9 @@ const CONCIERGE_URL = import.meta.env.VITE_CONCIERGE_URL ?? "http://localhost:53
 const CONCIERGE_TOKEN = import.meta.env.VITE_CONCIERGE_TOKEN ?? "waddle-dev";
 
 interface ChatMessage {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "tool";
   text: string;
+  error?: boolean;
 }
 export type { ChatMessage };
 
@@ -32,7 +36,9 @@ type State =
       messages: ChatMessage[];
       streaming: string;
       connected: boolean;
+      replayed: boolean;
       error?: string;
+      pendingApproval?: { callId: string; tool: string; input: unknown };
     };
 
 const box = (bg: string): React.CSSProperties => ({
@@ -62,6 +68,8 @@ export function App() {
   const [state, setState] = useState<State>({ phase: "verifying" });
   const [keyInput, setKeyInput] = useState(getInferenceKey());
   const connRef = useRef<ChatConnection | null>(null);
+  const transportRef = useRef<WaddleChatTransport | null>(null);
+  if (!transportRef.current) transportRef.current = new WaddleChatTransport();
   const [draft, setDraft] = useState("");
 
   const run = useCallback(async () => {
@@ -91,8 +99,12 @@ export function App() {
     return () => connRef.current?.close();
   }, [run]);
 
+
   const onServerEvent = useCallback((event: ServerEvent) => {
     setState((s) => {
+      // replay_done must land even while the unlock transition is finishing,
+      // or the chat waits forever on "replaying history…".
+      if (event.type === "replay_done" && s.phase === "chat") return { ...s, replayed: true };
       if (s.phase !== "chat") return s;
       if (event.type === "message" && (event.role === "user" || event.role === "assistant")) {
         const messages = [...s.messages, { role: event.role, text: event.text }];
@@ -105,7 +117,29 @@ export function App() {
           error: undefined,
         };
       }
-      if (event.type === "delta") return { ...s, streaming: s.streaming + event.text };
+      if (event.type === "tool_start") {
+        const messages = [...s.messages, { role: "tool", text: `⚙️ ${event.tool} ${JSON.stringify(event.args ?? {}).slice(0, 140)}` } as ChatMessage];
+        return { ...s, messages };
+      }
+      if (event.type === "tool_end") {
+        const result = JSON.stringify(event.result ?? "").slice(0, 100);
+        const messages = [...s.messages, { role: "tool", text: `${event.isError ? "⛔" : "✔"} ${event.tool} → ${result}` } as ChatMessage];
+        return { ...s, messages };
+      }
+      if (event.type === "approval") {
+        const messages = [...s.messages, { role: "tool", text: `${event.approved ? "🔓" : "⛔"} ${event.tool} ${event.approved ? "approved" : "denied"} by user` } as ChatMessage];
+        return {
+          ...s,
+          messages,
+          pendingApproval: s.pendingApproval?.callId === event.callId ? undefined : s.pendingApproval,
+        };
+      }
+      if (event.type === "approval_request") {
+        return { ...s, pendingApproval: { callId: event.callId, tool: event.tool, input: event.input } };
+      }
+      if (event.type === "replay_done") return { ...s, replayed: true };
+      if (event.type === "run_settled") return s; // the transport finishes its stream
+      // Deltas and tool activity render inside the assistant-ui thread. 
       if (event.type === "error") return { ...s, error: event.message };
       if (event.type === "sleep") {
         connRef.current?.close();
@@ -130,13 +164,19 @@ export function App() {
         setInferenceKey(keyInput);
         await unlock(result.client, ENCLAVE_URL, keyInput || undefined);
         await getState(result.client, ENCLAVE_URL);
+        const transport = transportRef.current!;
+        transport.setAppTap((e) => onServerEvent(e));
         const conn = connectChat(
           ENCLAVE_URL,
           getToken() ?? "",
-          onServerEvent,
-          () => setState((s) => (s.phase === "chat" ? { ...s, connected: false } : s)),
+          (event) => transport.dispatch(event),
+          () => {
+            transport.detach();
+            setState((s) => (s.phase === "chat" ? { ...s, connected: false } : s));
+          },
         );
         connRef.current = conn;
+        transport.attach((intent) => conn.send(intent));
         // The enclave's scratch is wiped at sleep; if its log is empty, the
         // device snapshot is the history. (Full server-side hydrate —
         // importFromJsonl — arrives with the betterbase snapshot work.)
@@ -148,6 +188,7 @@ export function App() {
           messages: state2.events.length === 0 && restored ? restored : [],
           streaming: "",
           connected: true,
+          replayed: false, // set when the gateway finishes the backlog
         });
       } catch (e) {
         setState({ phase: "error", message: `unlock: ${e instanceof Error ? e.message : String(e)}` });
@@ -155,6 +196,13 @@ export function App() {
     },
     [keyInput, onServerEvent],
   );
+  // Auto-resume: a stored token and an unlocked enclave mean a refresh —
+  // reconnect, replay, continue. No manual click required.
+  useEffect(() => {
+    if (state.phase === "attested" && !state.locked && getToken() && keyInput) {
+      void doUnlock(state.result);
+    }
+  }, [state, doUnlock, keyInput]);
 
   const wake = useCallback(async () => {
     setState({ phase: "asleep", waking: true, note: "concierge booting the instance…" });
@@ -183,6 +231,32 @@ export function App() {
     }
     setState((st) => (st.phase === "asleep" ? { ...st, note: "gave up waiting — try again" } : st));
   }, [run]);
+
+  // History seed for the runtime: computed once when the backlog finishes.
+  // Identity must stay stable afterward — a fresh array per render makes the
+  // runtime re-sync and wipe live streaming turns.
+  const chatState = state.phase === "chat" ? state : null;
+  const replayedNow = chatState?.replayed ?? false;
+  const seedMessages = useMemo(
+    () =>
+      (chatState?.messages ?? []).map((m, i): UIMessage => ({
+        id: `h${i}`,
+        // Tool rows ride as assistant turns in the same mono format the live
+        // stream used, so a rehydrated thread matches what streamed.
+        role: m.role === "user" ? "user" : "assistant",
+        parts: [{ type: "text", text: m.role === "tool" ? `\`${m.text}\`` : m.text }],
+      })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [replayedNow],
+  );
+
+  const answerApproval = useCallback(
+    (approved: boolean) => {
+      if (state.phase !== "chat" || !state.pendingApproval || !connRef.current) return;
+      connRef.current.send({ type: "approval_response", callId: state.pendingApproval.callId, approved });
+    },
+    [state],
+  );
 
   const send = useCallback(() => {
     const text = draft.trim();
@@ -274,60 +348,65 @@ export function App() {
 
       {state.phase === "chat" && (
         <>
-          <p style={box("#e8f5e9")}>
-            {DEV ? "🛠 DEV — unlocked (local parity)" : `✅ attested · ${state.result.releaseTag} · unlocked`} ·{" "}
-            {state.connected ? "stream live" : "⚠️ disconnected — reload to re-replay"}
-          </p>
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", minHeight: 200 }}>
-            {state.messages.map((m, i) => (
-              <div
-                key={i}
-                style={{
-                  alignSelf: m.role === "user" ? "flex-end" : "flex-start",
-                  background: m.role === "user" ? "#dcedf8" : "#f1f1f1",
-                  borderRadius: 10,
-                  padding: "0.5rem 0.8rem",
-                  maxWidth: "80%",
-                  whiteSpace: "pre-wrap",
-                }}
-              >
-                {m.text}
-              </div>
-            ))}
-            {state.streaming && (
-              <div
-                style={{
-                  alignSelf: "flex-start",
-                  background: "#f9f9f9",
-                  borderRadius: 10,
-                  padding: "0.5rem 0.8rem",
-                  maxWidth: "80%",
-                  whiteSpace: "pre-wrap",
-                  opacity: 0.85,
-                }}
-              >
-                {state.streaming}
-                <span className="cursor">▍</span>
-              </div>
-            )}
-          </div>
+          {state.replayed ? (
+            <ChatSurface
+              transport={transportRef.current!}
+              initialMessages={seedMessages}
+              header={
+                <p style={{ ...box("#e8f5e9"), borderRadius: 0, margin: 0 }}>
+                  {DEV ? "🛠 DEV — unlocked (local parity)" : `✅ attested · ${state.result.releaseTag} · unlocked`} ·{" "}
+                  {state.connected ? "stream live" : "⚠️ disconnected — reload to re-replay"}
+                </p>
+              }
+              banner={
+                state.pendingApproval ? (
+                  <div style={{ ...box("#fff7e0"), borderRadius: 0, margin: 0 }}>
+                    <b>
+                      🔓 waddle wants to run <code>{state.pendingApproval.tool}</code>
+                    </b>
+                    <pre
+                      style={{
+                        background: "#fff",
+                        border: "1px solid #e0d9b8",
+                        borderRadius: 6,
+                        padding: "0.5rem 0.7rem",
+                        fontSize: 12,
+                        fontFamily: "ui-monospace, monospace",
+                        whiteSpace: "pre-wrap",
+                        wordBreak: "break-all",
+                        marginTop: "0.5rem",
+                      }}
+                    >
+                      {JSON.stringify(state.pendingApproval.input, null, 2)}
+                    </pre>
+                    <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
+                      <button
+                        style={{ background: "#2c8a4b", color: "#fff", border: 0, borderRadius: 6, padding: "0.4rem 1rem" }}
+                        onClick={() => answerApproval(true)}
+                      >
+                        approve
+                      </button>
+                      <button
+                        style={{ background: "#b03a2e", color: "#fff", border: 0, borderRadius: 6, padding: "0.4rem 1rem" }}
+                        onClick={() => answerApproval(false)}
+                      >
+                        deny
+                      </button>
+                    </div>
+                  </div>
+                ) : undefined
+              }
+            />
+          ) : (
+            <p style={box("#eee")}>replaying history…</p>
+          )}
           {state.error && <p style={box("#fde8e8")}>⛔ {state.error}</p>}
           <button
             style={{ marginTop: "0.5rem" }}
-            onClick={() => connRef.current?.send({ type: "sleep_now" } as never)}
+            onClick={() => connRef.current?.send({ type: "sleep_now" })}
           >
             💤 put waddle to sleep
           </button>
-          <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}>
-            <input
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && send()}
-              placeholder="talk to your agent…"
-              style={{ flex: 1, padding: "0.5rem 0.8rem" }}
-            />
-            <button onClick={send}>send</button>
-          </div>
         </>
       )}
 

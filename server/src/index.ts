@@ -11,7 +11,8 @@ import { readFileSync } from "node:fs";
 import { hello, type GatewayEvent, type UnlockRequest, type UnlockResponse, type StateResponse, type UserIntent } from "@waddle/sdk";
 import { Lock } from "./state.js";
 import { EventLog } from "./log.js";
-import { initAgent, chat, agentReady, setBlackbox } from "./agent.js";
+import { initAgent, chat, agentReady, setBlackbox, setSink } from "./agent.js";
+import { resolveApproval, denyAllPending, setOutcomeEmitter } from "./approvals.js";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const VERSION = "0.0.1";
@@ -152,11 +153,57 @@ app.get("/ws", { websocket: true }, (socket, request) => {
     socket.close(4401, "locked");
     return;
   }
-  const send = (event: GatewayEvent | import("@waddle/sdk").DeltaEvent | import("@waddle/sdk").ErrorEvent) =>
-    socket.send(JSON.stringify(event));
+  setOutcomeEmitter((outcome) => {
+    if (outcome.type === "approval") {
+      log?.append({ ...outcome });
+      for (const peer of sockets) peer.send(JSON.stringify(outcome));
+    }
+  });
+  const send = (
+    event:
+      | GatewayEvent
+      | import("@waddle/sdk").DeltaEvent
+      | import("@waddle/sdk").ErrorEvent
+  ) => socket.send(JSON.stringify(event));
   sockets.add(socket);
-  socket.on("close", () => sockets.delete(socket));
+  socket.on("close", () => {
+    sockets.delete(socket);
+    // Mid-turn disconnect: keep logging the run (the sealed log is the truth);
+    // only the live wire is gone. Deltas drop, finals and tools persist.
+    void setSink({
+      onToolStart: (callId, tool, args) => {
+        log?.append({ type: "tool_start", callId, tool, args, at: new Date().toISOString() });
+      },
+      onToolEnd: (callId, tool, result, isError) => {
+        log?.append({ type: "tool_end", callId, tool, result, isError, at: new Date().toISOString() });
+      },
+      onAssistantFinal: (text) => {
+        log?.append({ type: "message", role: "assistant", text, at: new Date().toISOString() });
+      },
+    }).catch(() => undefined);
+    denyAllPending(); // no client: the gate denies, the turn never hangs
+  });
   lastActivity = Date.now();
+  void setSink({
+    onDelta: (d) => send({ type: "delta", messageId: "live", text: d }),
+    onToolStart: (callId, tool, args) => {
+      const evt = { type: "tool_start", callId, tool, args, at: new Date().toISOString() } as const;
+      log?.append(evt);
+      send(evt);
+    },
+    onToolEnd: (callId, tool, result, isError) => {
+      const evt = { type: "tool_end", callId, tool, result, isError, at: new Date().toISOString() } as const;
+      log?.append(evt);
+      send(evt);
+    },
+    onApprovalRequest: (req) => send(req),
+    onSettled: () => send({ type: "run_settled", at: new Date().toISOString() }),
+    onAssistantFinal: (text) => {
+      const evt = { type: "message", role: "assistant", text, at: new Date().toISOString() } as const;
+      log?.append({ ...evt });
+      send(evt);
+    },
+  }).catch((e) => send({ type: "error", message: `sink: ${e instanceof Error ? e.message : String(e)}` }));
   send({ type: "hello", hello: hello(VERSION, false) });
   const backlog = log?.all ?? [];
   for (const event of backlog) send(event as GatewayEvent);
@@ -170,29 +217,30 @@ app.get("/ws", { websocket: true }, (socket, request) => {
       void sleep("user requested");
       return;
     }
+    if (intent.type === "approval_response") {
+      const { callId, approved } = intent as { callId?: string; approved?: boolean };
+      if (!callId || typeof approved !== "boolean") return;
+      const tool = resolveApproval(callId, approved);
+      if (tool !== null) {
+        // The verdict is history: replay shows the human's decision.
+        const evt = { type: "approval", callId, tool, approved, at: new Date().toISOString() } as const;
+        log?.append(evt);
+        send(evt);
+      }
+      return;
+    }
     if (intent.type !== "user_message" || !intent.text?.trim()) return;
     if (!agentReady()) {
       send({ type: "error", message: "no inference key — reload and unlock with one" });
       return;
     }
-    if (streaming) {
-      send({ type: "error", message: "one turn at a time (First Light)" });
-      return;
-    }
-    streaming = true;
-    const userEvent = { type: "message", role: "user", text: intent.text } as const;
-    log?.append({ ...userEvent, at: new Date().toISOString() });
+    const userEvent = { type: "message", role: "user", text: intent.text, at: new Date().toISOString() } as const;
+    log?.append({ ...userEvent });
     send(userEvent);
-    const messageId = randomUUID();
     try {
-      const text = await chat(intent.text, (delta) => send({ type: "delta", messageId, text: delta }));
-      const assistantEvent = { type: "message", role: "assistant", text, at: new Date().toISOString() } as const;
-      log?.append({ ...assistantEvent });
-      send(assistantEvent);
+      await chat(intent.text); // deltas/tools/finals stream via the sink
     } catch (e) {
       send({ type: "error", message: e instanceof Error ? e.message : String(e) });
-    } finally {
-      streaming = false;
     }
   });
 });

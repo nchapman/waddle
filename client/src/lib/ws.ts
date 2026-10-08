@@ -28,7 +28,6 @@ export function connectChat(
     const event = JSON.parse(String(msg.data)) as ServerEvent;
     if (event.type === "replay_done") {
       replayed = true;
-      return;
     }
     if (!replayed && (event.type === "sleep" || event.type === "sleep_proposed")) return;
     onEvent(event);

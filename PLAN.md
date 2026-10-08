@@ -234,6 +234,19 @@ Every step is a real-world side effect, and it compresses all five cores into on
 
 **Prerequisites (the kickoff checklist):** Tinfoil org + admin API key + inference key + spend ceiling (emails to Tinfoil drafted by the agent, sent by the owner). Betterbase: ✅ integration design settled against betterbase-dev source (accounts OAuth+PKCE, sync file routes, `crypto/ucan` minting — see §8); remaining: run `just dev` in `../betterbase-dev`, confirm `betterbase` npm linking (published vs workspace), register the waddle OAuth client via `setup-oauth-client.sh`. Owner-created: Google OAuth client (gmail.send + calendar; localhost + tinfoil redirect URIs), GitHub OAuth app + sandbox repo, throwaway test accounts (real creds gated on Phase 3; real calendar/Gmail sanctioned for the flagship), image registry + push token (GHCR), always-on host for the **concierge** (the wake service; local in dev). Operating policy: autonomous within a phase, evidence at every ✅ gate, stop-and-ask on invariant changes / real credentials / spend cap; secrets in gitignored `.env.local`.
 
+**Divergences (First Hands, as built):** bash ships in the workspace toolset now
+(the plan deferred it) because the approval gate makes it safe to run — bash always
+asks, reads auto-allow, writes auto-allow in-workspace only (policy unit-tested).
+The eval seed ran 5 tasks against both candidates (deepseek-v4-1-flash, kimi-k3)
+through the live harness: 5/5 and 5/5. assistant-ui renders via a custom
+`ChatTransport` over the gated WSS with one hard-won protocol rule: text parts
+must be opened (`text-start`) before ANY text-delta — tool lines and approval
+verdicts ride as fenced text in the assistant turn, and the seed of replayed
+history maps tool rows back the same way so rehydration matches what streamed.
+Step-up re-entry and connector-class approvals remain with the connector work;
+the gate's deny-timeout and disconnect paths emit verdict events so no banner
+can dangle.
+
 **First milestone — First Light (the walking skeleton; Phase 0 + the spine of Phase 1):** *open the client, watch the attestation badge turn green, unlock with a secret only you hold, have a real conversation with the agent inside the enclave — then watch it sleep, and wake it back up.* Acceptance: (1) image on public GHCR digest-pinned, measured config repo, attested instance live; (2) in-browser SecureClient verification + report + TOFU pin that blocks on digest change; (3) lock screen → unlock: client-generated 64-byte secret delivered post-verification, locked→unlocked, session derived from the transcript; (4) real conversation: message → pi via Tinfoil inference (`@tinfoilsh/pi-provider` first, OpenAI-compat fallback) → streamed through the WSS event log → assistant-ui renders; refresh = full history via replay; (5) sleep + wake for real: idle gate → process exit (`restart: no`) → instance (and billing) stops → wake button → concierge boots → re-attest → unlock → snapshot restore → history intact; (6) identical flows under compose (docker backend) with betterbase-dev alongside. *Not in scope:* approvals UI, browser, connectors, memory, snapshots, multi-device.
 
 **Phase 0 — Spike the real risks (2–3 days).**

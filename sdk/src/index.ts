@@ -19,6 +19,11 @@ export type GatewayEvent =
   | { type: "hello"; hello: HelloResponse }
   | { type: "task_started"; taskId: string; goal: string }
   | { type: "message"; id?: string; at?: string; role: "user" | "assistant"; text: string }
+  | { type: "tool_start"; callId: string; tool: string; args: unknown; at?: string }
+  | { type: "tool_end"; callId: string; tool: string; result: unknown; isError: boolean; at?: string }
+  | { type: "approval_request"; callId: string; tool: string; input: unknown; at?: string }
+  | { type: "approval"; callId: string; tool: string; approved: boolean; at?: string }
+  | { type: "run_settled"; at?: string }
   | { type: "sleep_proposed"; reason: string }
   | { type: "sleep_cancelled"; reason: string }
   | { type: "sleep"; reason: string; at?: string }
@@ -56,7 +61,7 @@ export interface StateResponse {
 }
 
 /** Client → server intent (WSS inbound). Inbound is always intent, never history. */
-export type UserIntent = { type: "user_message"; text: string };
+export type UserIntent = { type: "user_message"; text: string } | { type: "sleep_now" } | { type: "approval_response"; callId: string; approved: boolean };
 
 /** Live stream chunk (transient — final message events are the persisted truth). */
 export interface DeltaEvent {

@@ -1,35 +1,43 @@
 /**
  * The agent: pi embedded, Tinfoil inference from inside the enclave.
- * The @tinfoilsh/pi-provider extension verifies the inference TEE and
- * HPKE-encrypts every request (TEE-to-TEE); the API key arrives from
- * the client at unlock — memory-only, never on disk.
+ * The inline tinfoil provider verifies the inference TEE and HPKE-encrypts
+ * every request (TEE-to-TEE); the API key arrives from the client at
+ * unlock — memory-only, never on disk.
+ *
+ * The Hands: pi's built-in tool loop (read/bash/edit/write) runs against
+ * an encrypted workspace on scratch; tool events stream out live; sessions
+ * are file-backed so context survives reconnects.
  */
-import { createRequire } from "node:module";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import tinfoilProvider, { factoryError } from "./tinfoil-provider.js";
 import {
   createAgentSession,
   DefaultResourceLoader,
   ModelRuntime,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
-
-const require = createRequire(import.meta.url);
-const PROVIDER_ENTRY = require.resolve("@tinfoilsh/pi-provider/tinfoil.ts");
+import tinfoilProvider, { factoryError } from "./tinfoil-provider.js";
+import { needsApproval, requestApproval, setApprovalEmitter } from "./approvals.js";
 
 const DATA_DIR = process.env.DATA_DIR ?? "/tmp/waddle-data";
-const lockDataDir = () => DATA_DIR;
+const WORKSPACE = join(DATA_DIR, "workspace");
+const SESSIONS = join(DATA_DIR, "sessions");
 
 const SYSTEM_PROMPT = [
   "You are waddle — the user's personal agent, running privately in a secure enclave.",
-  "First Light: conversation only (no tools yet). Be concise, warm, and direct.",
+  "You have real tools: read, bash, edit, write. Your working directory is a private",
+  "workspace; treat it as the user's own files. Be concise, warm, and direct.",
   "You are a penguin-shaped agent; a light touch of personality is welcome.",
 ].join("\n");
 
-let ready: Promise<{
-  prompt: (text: string, onDelta: (delta: string) => void) => Promise<string>;
-}> | null = null;
+/** Live agent activity for the wire: text deltas + tool execution. */
+export interface AgentEvents {
+  onDelta: (delta: string) => void;
+  onToolStart?: (callId: string, tool: string, args: unknown) => void;
+  onToolEnd?: (callId: string, tool: string, result: unknown, isError: boolean) => void;
+}
+
+let ready: Promise<{ setSink: (s: object) => void; chat: (t: string) => Promise<void>; isStreaming: () => boolean }> | null = null;
 
 /** Black box: boot/crash evidence lands in the encrypted log, readable after
  *  restart+unlock — the only channel out of a dying process. */
@@ -38,7 +46,7 @@ export function setBlackbox(fn: (message: string) => void): void {
   blackbox = fn;
 }
 
-/** Idempotent per-boot init. The key must be set before the extension loads. */
+/** Idempotent per-boot init. The key must be set before the provider verifies. */
 export function initAgent(apiKey: string): void {
   process.env.TINFOIL_API_KEY = apiKey;
   if (ready) return;
@@ -51,27 +59,46 @@ export function agentReady(): boolean {
 }
 
 async function boot() {
+  mkdirSync(WORKSPACE, { recursive: true });
+  mkdirSync(SESSIONS, { recursive: true });
+
   const modelRuntime = await ModelRuntime.create({
     // /root is on the read-only rootfs — every pi path must live on scratch.
-    authPath: join(lockDataDir(), "pi-agent", "auth.json"),
-    modelsPath: join(lockDataDir(), "pi-agent", "models.json"),
+    authPath: join(DATA_DIR, "pi-agent", "auth.json"),
+    modelsPath: join(DATA_DIR, "pi-agent", "models.json"),
   });
-  const agentDir = join(lockDataDir(), "pi-agent");
+  const agentDir = join(DATA_DIR, "pi-agent");
   mkdirSync(agentDir, { recursive: true });
+  // The ask-gate extension: pi fires tool_call before execution; our async
+  // handler holds the call until the browser (or the timeout) decides.
+  // Deny => { block: true } => the tool does not run.
+  const approvalGate = {
+    name: "waddle-approvals",
+    factory: (pi: { on: (event: "tool_call", handler: (e: { toolCallId: string; toolName: string; input: Record<string, unknown> }) => Promise<{ block?: boolean; reason?: string }>) => void }) => {
+      pi.on("tool_call", async (event) => {
+        if (!needsApproval(event.toolName, event.input)) return {};
+        const approved = await requestApproval(event.toolCallId, event.toolName, event.input);
+        return approved ? {} : { block: true, reason: "the user denied this tool call in the browser" };
+      });
+    },
+  };
+
   const loader = new DefaultResourceLoader({
-    cwd: process.cwd(),
+    cwd: WORKSPACE,
     agentDir,
     systemPromptOverride: () => SYSTEM_PROMPT,
     appendSystemPromptOverride: () => [],
-    extensionFactories: [{ name: "waddle-tinfoil", factory: tinfoilProvider }],
+    extensionFactories: [approvalGate, { name: "waddle-tinfoil", factory: tinfoilProvider }],
   });
   await loader.reload();
 
   const { session } = await createAgentSession({
+    cwd: WORKSPACE,
     modelRuntime,
     resourceLoader: loader,
-    sessionManager: SessionManager.inMemory(),
-    noTools: "all",
+    // File-backed on scratch: context survives reconnects (and snapshots).
+    sessionManager: SessionManager.create(WORKSPACE, SESSIONS),
+    tools: ["read", "bash", "edit", "write"],
   });
 
   if (factoryError) throw new Error(`tinfoil provider factory failed (pi swallows these): ${factoryError}`);
@@ -81,30 +108,83 @@ async function boot() {
   if (!tinfoilModel) throw new Error("tinfoil model not found — inline provider failed to register");
   await session.setModel(tinfoilModel);
 
+  // One persistent subscriber: everything flows through the sink, so queued
+  // and steered runs stream exactly like the first turn.
+  const sink: { onDelta?: (d: string) => void; onToolStart?: (c: string, t: string, a: unknown) => void; onToolEnd?: (c: string, t: string, r: unknown, e: boolean) => void; onAssistantFinal?: (t: string) => void; onApprovalRequest?: (req: { type: "approval_request"; callId: string; tool: string; input: unknown; at?: string }) => void; onSettled?: () => void } = {};
+  const textOf = (content: unknown): string => {
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      return content
+        .map((part) =>
+          typeof part === "string" ? part : part && typeof part === "object" && "text" in part ? String((part as { text: unknown }).text) : "",
+        )
+        .join("");
+    }
+    return "";
+  };
+  setApprovalEmitter((event) => {
+    if (event.type === "approval_request") sink.onApprovalRequest?.(event);
+  });
+  session.subscribe((event) => {
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+      sink.onDelta?.(event.assistantMessageEvent.delta);
+    } else if (event.type === "tool_execution_start") {
+      sink.onToolStart?.(event.toolCallId, event.toolName, event.args);
+    } else if (event.type === "tool_execution_end") {
+      sink.onToolEnd?.(event.toolCallId, event.toolName, event.result, event.isError === true);
+    } else if (event.type === "agent_settled") {
+      sink.onSettled?.();
+    } else if (event.type === "message_end" && event.message?.role === "assistant") {
+      const text = textOf((event.message as { content?: unknown }).content);
+      if (text) sink.onAssistantFinal?.(text);
+    }
+  });
+
   return {
-    async prompt(text: string, onDelta: (delta: string) => void): Promise<string> {
-      let final = "";
-      const unsubscribe = session.subscribe((event) => {
-        if (
-          event.type === "message_update" &&
-          event.assistantMessageEvent.type === "text_delta"
-        ) {
-          final += event.assistantMessageEvent.delta;
-          onDelta(event.assistantMessageEvent.delta);
-        }
-      });
+    setSink(next: typeof sink): void {
+      Object.keys(sink).forEach((k) => delete sink[k as keyof typeof sink]);
+      Object.assign(sink, next);
+    },
+    async chat(text: string): Promise<void> {
+      if (agentBusy) {
+        // Mid-turn: steer the active run (pi applies it after the current
+        // tool batch). Queued follow-ups land via the same event stream.
+        await session.steer(text);
+        return;
+      }
+      agentBusy = true;
+      streaming = true;
       try {
         await session.prompt(text);
       } finally {
-        unsubscribe();
+        streaming = false;
+        agentBusy = false;
       }
-      return final;
     },
+    isStreaming: () => streaming,
   };
 }
 
-export async function chat(text: string, onDelta: (delta: string) => void): Promise<string> {
+let agentBusy = false;
+let streaming = false;
+
+/** Wire the live event sink (the active WSS connection). */
+export async function setSink(
+  sink: {
+    onDelta?: (delta: string) => void;
+    onToolStart?: (callId: string, tool: string, args: unknown) => void;
+    onToolEnd?: (callId: string, tool: string, result: unknown, isError: boolean) => void;
+    onAssistantFinal?: (text: string) => void;
+    onApprovalRequest?: (req: { type: "approval_request"; callId: string; tool: string; input: unknown; at?: string }) => void;
+    onSettled?: () => void;
+  },
+): Promise<void> {
+  if (!ready) throw new Error("agent not initialized");
+  (await ready).setSink(sink);
+}
+
+/** Send a user turn: prompts when idle, steers when mid-run. */
+export async function chat(text: string): Promise<void> {
   if (!ready) throw new Error("agent not initialized — unlock with an inference key first");
-  const agent = await ready;
-  return agent.prompt(text, onDelta);
+  await (await ready).chat(text);
 }

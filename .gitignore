@@ -4,3 +4,4 @@ dist/
 data/
 *.tsbuildinfo
 .DS_Store
+.playwright-mcp/
