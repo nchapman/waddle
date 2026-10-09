@@ -96,7 +96,6 @@ app.get("/probe", async () => {
 // GET (session-gated) for the client's sleep/periodic shelf-run; POST
 // (session-gated, fresh-log-only) restores a machine before anything
 // boots. The client is a pipe — it never opens the blob.
-app.addContentTypeParser("application/gzip", { parseAs: "buffer" }, (_req, body, done) => done(null, body));
 app.addContentTypeParser("application/octet-stream", { parseAs: "buffer" }, (_req, body, done) => done(null, body));
 app.post("/unlock", async (request, reply) => {
   const { secret, nonce, inferenceKey, bb } = (request.body ?? {}) as UnlockRequest & {

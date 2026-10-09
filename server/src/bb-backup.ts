@@ -237,8 +237,8 @@ export async function pushMachineBackup(
   // never become "latest" while the shelf holds real generations (older
   // gens still exist, but discovery takes the newest). A virgin machine on
   // an empty shelf is exempt: someone has to shelve gen 0. Sized on the
-  // log, not the tarball — a fully-populated machine gzips under 64 KiB
-  // once Chromium's component payload is excluded.
+  // log, not the tarball — a fully-populated machine compresses under
+  // 64 KiB once Chromium's component payload is excluded.
   let logBytes = 0;
   try {
     logBytes = statSync(join(DATA_DIR, "log", "events.jsonl")).size;
