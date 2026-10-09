@@ -72,3 +72,28 @@ waddletest2@betterbase.dev, waddle v0.0.37 + concierge v0.2.3.
   renewal-token design lands (PLAN.md).
 - The concierge /health version string reads 0.2.1 (constant not bumped
   with the image tag); cosmetic.
+
+## Incident + fix: the gate that raced its own unlock (v0.0.38 → v0.0.39)
+
+**The bug** (found live on prod, 2026-10-09 20:43): the activity clock
+initialized at BOOT, but the gate only checks the lock state — so an
+enclave that sat locked longer than the idle window (prod deploys take
+minutes) was reaped the moment its first unlock flipped `unlocked`,
+mid-restore, before any WebSocket existed. Signature: a shelf whose
+chain head is an empty gen holding one `sleep "idle 120s"` event
+timestamped DURING the unlock — the final checkpoint clobbered the
+live gen-22 machine (content survives behind it in the bb store;
+anchor 1c3bf4d6, recovery parked). Compounding it: the idle default
+was 120 s (a dev convenience that shipped), making the race certain.
+
+**The fix** (v0.0.39, regression-proven):
+- `lastActivity` starts null — the clock begins at first client
+  contact (unlock stamp / WS connect / sink events), never at boot.
+- `restoring` guard: the gate never fires while an unlock (bb grant +
+  shelf restore + handshake) is in flight.
+- Idle default 600 s; prod config sets `WADDLE_IDLE_MS: "600000"`
+  explicitly.
+- Regression script: `locked-idle-regression.mjs` (boot → 150 s
+  locked-idle → unlock → must survive to idle-from-unlock, then sleep
+  gracefully). Green on v0.0.39 (unlock 20:56:01 → sleep 20:58:09,
+  event delivered to the silent client, exit 0).

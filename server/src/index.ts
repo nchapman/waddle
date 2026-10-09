@@ -178,6 +178,10 @@ app.post("/unlock", async (request, reply) => {
   try {
     const { token, enrolled } = lock.unlock(secret, nonce);
     if (!log) log = new EventLog(lock.logKey, lock.storage);
+    // The clock starts the moment the machine wakes to a client — never
+    // sooner (boot), never mid-restore (restoring guard below).
+    restoring = true;
+    touch();
     // The machine-shelf grant (if the client is signed in to betterbase):
     // unwrap the epoch key in memory, and on a fresh enclave restore the
     // whole machine from the shelf BEFORE this unlock returns — the
@@ -256,9 +260,11 @@ app.post("/unlock", async (request, reply) => {
     // on first use; a persisted pi session file (same scratch as this log)
     // is resumed natively at boot — no digest needed on this path.
     if (inferenceKey) initAgent(inferenceKey);
+    restoring = false;
     const res: UnlockResponse = { token, enrolled };
     return res;
   } catch (e) {
+    restoring = false;
     const err = e as { statusCode?: number; message: string };
     return reply.code(err.statusCode ?? 500).send({ error: err.message });
   }
@@ -301,7 +307,7 @@ let streaming = false;
 // absence of clients: a silently-open tab is an idle machine. The
 // platform's restart policy is `no` (config default), so the instance
 // stops — and billing with it. The concierge wakes it.
-const IDLE_MS = Number(process.env.WADDLE_IDLE_MS ?? 120_000);
+const IDLE_MS = Number(process.env.WADDLE_IDLE_MS ?? 600_000); // 10 min: a dev override shortens it
 const sockets = new Set<import("ws").WebSocket>();
 
 // The Eyes: browser frames + navigation status are broadcast-only (never
@@ -316,13 +322,22 @@ setBrowserEvents({
     for (const s of sockets) if (s.readyState === 1) s.send(evt);
   },
 });
-let lastActivity = Date.now();
-/** Any observable work — user message, tool call, assistant output —
- *  counts as activity and re-arms the concierge's stop row. */
+// The activity clock starts at first client contact, NOT at boot: an
+// enclave can sit locked for minutes (deploys are slow) before its first
+// unlock, and a clock ticking from boot would reap the machine seconds
+// into that unlock — mid-restore, before any WebSocket exists (v0.0.38
+// shipped exactly that bug: the gate fired mid-unlock and shelf-clobbered
+// a live machine with an empty checkpoint).
+let lastActivity: number | null = null;
+/** Any observable work — unlock, user message, tool call, assistant
+ *  output — counts as activity and re-arms the concierge's stop row. */
 function touch(): void {
   lastActivity = Date.now();
   renewIdleStop();
 }
+// Never sleep while an unlock (bb grant + shelf restore + handshake) is
+// in flight — the gate has no business racing the machine's own boot.
+let restoring = false;
 let sleeping = false;
 let refusing = false; // sleep gate is holding the machine alive (no wake cover)
 
@@ -425,7 +440,11 @@ setInterval(() => {
 }, 10 * 60_000);
 
 setInterval(() => {
-  if (sleeping || !lock.unlocked || firing) return; // a scheduled run in flight is activity
+  if (sleeping || restoring || !lock.unlocked || firing) return; // a scheduled run in flight is activity
+  // No client contact yet this boot: nothing to be idle FROM. A locked
+  // machine (or a wake-boot whose run never started) is the concierge
+  // stop row's problem, not the gate's.
+  if (lastActivity === null) return;
   if (Date.now() - lastActivity > IDLE_MS) {
     void sleep(`idle ${Math.round(IDLE_MS / 1000)}s (no activity)`);
   }

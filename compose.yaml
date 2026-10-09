@@ -8,7 +8,7 @@
 # (`cd ../betterbase-dev && just dev`) when the shelf is in play.
 services:
   waddle:
-    image: ghcr.io/nchapman/waddle@sha256:7e230fe71fa3fa2ccdab6daecfd6cbcb29deff62fe06407f8b0dfe723b6c03e4
+    image: ghcr.io/nchapman/waddle@sha256:d9314fae297096be53f4ee3e42d34db4da23ba6f7e80468e45a907ca75bd3d9f
     platform: linux/amd64
     container_name: waddle # stable name for the concierge's docker start/stop
     ports:
