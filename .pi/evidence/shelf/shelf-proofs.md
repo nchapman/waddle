@@ -141,3 +141,14 @@ HKDF(unlock secret, "bb-dek"), body AES-256-GCM, AAD `bb-file:${id}`):
 Post-surgery: push → prune (keeps 3 gens) → wipe → restore gen 14,
 cookie `creation_utc 13435961005614428` byte-identical, restored tree
 contains zero component dirs.
+
+## v0.0.28 — zstd slots (2026-10-09)
+
+Pack: plain tar | zstd -3 (explicit CLI, never tar's --zstd — macOS
+bsdtar accepts the flag without libzstd and emits broken streams).
+Restore: magic-sniffed (zstd 28 b5 2f fd / gzip 1f 8b), gzip decodes
+in-process via node:zlib, untar from a temp file (bsdtar can't pipe
+zstd via stdin). 46.7 KiB vs 54.7 KiB gzip for the same machine.
+Proof: gen 17 pushed as zstd, wipe → unlock → restore gen 17, cookie
+`creation_utc 13435961005614428` byte-identical; gzip-legacy restore
+covered by test. Live smoke v0.0.28 chat round-trip.
