@@ -114,7 +114,8 @@ export async function pullHandoff(): Promise<{
     log("GET /handoff", { status: res.status });
     if (!res.ok) return null;
     const row = (await res.json()) as { secret?: string; inferenceKey?: string; conciergeBearer?: string };
-    return typeof row.secret === "string" && row.secret ? row : null;
+    if (typeof row.secret !== "string" || !row.secret) return null;
+    return { secret: row.secret, inferenceKey: row.inferenceKey, conciergeBearer: row.conciergeBearer };
   } catch (e) {
     log("GET /handoff failed", { err: String(e) });
     return null;
