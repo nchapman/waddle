@@ -206,3 +206,48 @@ Build notes (concierge grows a tiny scheduler, still metadata-only):
 - Scheduled tasks still can't read the user's shelf unattended (the
   escrow problem is unchanged — pool solves return latency, not
   unattended data access).
+
+## 2026-10-09 23:15 UTC — the full pool ceremony, live (concierge v0.3.2→v0.3.4)
+
+End state proven: primary stopped → client page load auto-falls-back to
+/assign → warm standby-6 → v0.0.41 measurement verifies, TOFU pin holds
+(no fingerprint screen) → unlock with stored secret, blank inference key →
+full shelf restored (entire conversation archive) → live chat answered
+through the standby. The 77s boot hides behind the pool; the user-visible
+path is ~10s verify + ~7s unlock/restore.
+
+Three live-caught findings shaped v0.3.3/v0.3.4:
+
+1. **Per-instance --variable breaks measurement (v0.3.2, standby-1).**
+   tinfoil create --variable changes the code measurement → the client
+   refused ("Code measurement mismatch") against the signed release —
+   the security model working exactly as designed. v0.3.3: standbys run
+   the exact committed config, no variables. Per-machine identity is an
+   open design item; interim bounds on a claimed machine are the
+   concierge-side grace row (default 12h, STANDBY_CLAIM_GRACE_MS).
+
+2. **Tagless deploy = version skew (v0.3.3, caught by standby-3).**
+   The CLI verified standby-3 clean against v0.0.41, but a browser load
+   fell through to /wake, whose deploy was tagless → the primary booted
+   its SAVED v0.0.40 → client expects latest (v0.0.41) → correct refusal.
+   v0.3.4: /wake and zombie-recovery deploy with --tag, defaulting to
+   STANDBY_CONFIG_TAG (CONCIERGE_DEPLOY_TAG overrides). Live-proven:
+   /wake booted the primary at v0.0.41 and the pin re-pinned cleanly.
+
+3. **Concierge restart churn double-boots.** Each concierge restart
+   orphans in-flight replacement boots (memory-only tables): v0.3.3→v0.3.4
+   left standbys 2 and 4 untracked and burning. Name recycling works
+   (standby-1 was reborn after deletion, tracked by the fresh concierge).
+   Cost: one extra boot per restart-with-pending-standby; cleaned by hand
+   tonight; a future adopt-live-standbys heuristic would close it.
+
+Also live-proven tonight: assign-404 → /wake fallback in the browser
+(standby not yet warm at page-load — tick lag), locked-boot stop backstop
+rows appearing on every standby boot ("waddle" shared-identity collision,
+harmless as designed: the row stops an already-stopped primary), and
+instance-provided inference through a pool machine (blank key field,
+agent answered — and correctly cannot see its own host identity or key).
+
+Standing cost note: the pool's steady state is one warm machine, always.
+WARM_POOL_SIZE is measured config — changing it re-measures the
+concierge. Overnight economics are a user decision, not a code one.
