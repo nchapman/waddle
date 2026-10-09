@@ -263,13 +263,16 @@ app.get("/assign", async (req, reply) => {
   if (!(await verifyExternal(token))) return reply.code(401).send({ error: "unauthorized" });
   const got = pool.assign();
   if (!got) return reply.code(404).send({ error: "no warm standby — use /wake" });
-  // A claim is bounded presence, not ownership: REPLACE the machine's
-  // boot-time stop row with a grace row. If the user unlocks, renewIdleStop
-  // re-arms it from activity like any machine; if they abandon the claim
-  // (closed tab at the lock screen), the machine dies within grace — the
-  // next scan adopts the stopped blank and the TTL reclaims the slot. No
-  // path leaves a claimed machine billing for HARD_STOP_MS.
-  table.setStop(got.name, envInt("STANDBY_CLAIM_GRACE_MS", 15 * 60_000, 30_000));
+/** A claim is bounded presence, not ownership: REPLACE the machine's
+ *  boot-time stop row with a grace row (keyed by the machine's REAL name —
+ *  concierge-side, the only correct-identity rows a standby has: machines
+ *  self-report the config's shared identity and cannot know their own).
+ *  If the user unlocks, the machine's own renewals keep it alive; if they
+ *  abandon the claim, the machine dies within grace. Long by default: a
+ *  claimed machine's own idle-sleep flare mis-targets the shared identity
+ *  (open design item), so grace — not a flare — is what finally bounds an
+ *  abandoned claim. */
+  table.setStop(got.name, envInt("STANDBY_CLAIM_GRACE_MS", 12 * 3600_000, 60_000));
   void pool.tick().catch(() => undefined); // top the pool back up promptly
   return got;
 });
@@ -336,13 +339,16 @@ const pool: Pool | null = POOL_CAPABLE
       {
         boot: async (name) => {
           poolNames.add(name); // burn the name even on failure — a colliding
-          // create must not wedge nextName on the same index forever
+          // create must not wedge nextName on the same index forever.
+          // NO --variable flags: env changes the MEASUREMENT (proven live
+          // — the client correctly refused a standby whose per-instance
+          // variables broke the signed-release match). Pool machines run
+          // the exact committed config; per-machine identity is an open
+          // design item (see evidence).
           const args = [
             "container", "create", name,
             "--repo", STANDBY_CONFIG_REPO,
             "--tag", STANDBY_CONFIG_TAG,
-            "--variable", `WADDLE_INSTANCE=${name}`,
-            "--variable", `WADDLE_IDLE_MS=${STANDBY_IDLE_MS}`,
             "--no-wait",
           ];
           for (const s of STANDBY_SECRETS) args.push("--secret", s);
