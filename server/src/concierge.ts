@@ -82,3 +82,41 @@ export function renewIdleStop(): void {
 export async function deathFlare(): Promise<void> {
   await writeTimer({ action: "stop", dueMs: 5_000 });
 }
+
+/** Wake-autonomy escrow: park the boot credential in the concierge's
+ *  MEMORY (never on this machine's ephemeral disk). The concierge
+ *  releases it only to a machine it booted for a fired wake row; a
+ *  concierge restart in between just means the pull 404s and the boot
+ *  falls through to the normal locked ceremony — autonomy degrades,
+ *  nothing breaks. */
+export async function armHandoff(
+  cred: { secret: string; inferenceKey?: string; conciergeBearer?: string },
+  bearer: string,
+): Promise<boolean> {
+  const r = await post<{ ok: boolean }>("/handoff", { ...cred }, bearer);
+  return r?.ok === true;
+}
+
+/** The wake-boot side of the escrow: ask the concierge for the
+ *  credential. Auth is the env shared secret — a locked boot has no
+ *  session token, exactly like the locked-boot backstop handshake. */
+export async function pullHandoff(): Promise<{
+  secret: string;
+  inferenceKey?: string;
+  conciergeBearer?: string;
+} | null> {
+  if (!CONCIERGE_URL) return null;
+  try {
+    const res = await fetch(`${CONCIERGE_URL}/handoff?instance=${encodeURIComponent(INSTANCE)}`, {
+      headers: { authorization: `Bearer ${process.env.CONCIERGE_SHARED_SECRET ?? ""}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    log("GET /handoff", { status: res.status });
+    if (!res.ok) return null;
+    const row = (await res.json()) as { secret?: string; inferenceKey?: string; conciergeBearer?: string };
+    return typeof row.secret === "string" && row.secret ? row : null;
+  } catch (e) {
+    log("GET /handoff failed", { err: String(e) });
+    return null;
+  }
+}

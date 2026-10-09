@@ -29,6 +29,7 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createTable } from "./table.js";
+import { createHandoffStore } from "./handoff.js";
 import { createPool, envInt, standbyNameRe, type Pool } from "./pool.js";
 
 const exec = promisify(execFile);
@@ -200,11 +201,20 @@ const table = createTable(
       .catch((e) => app.log.warn({ instance, err: String(e) }, "stop row fired but failed"));
   },
   (instance, jobId) => {
+    // A schedule-boot is the ONLY thing that may release a wake handoff
+    // (memory-only escrow — see handoff.ts). Record the fire first: the
+    // booted machine pulls the credential seconds after it comes up.
+    handoff.markWakeFired(instance);
     void ensureInstance(instance)
       .then((detail) => app.log.info({ instance, jobId, detail }, "wake row fired"))
       .catch((e) => app.log.warn({ instance, jobId, err: String(e) }, "wake row fired but failed"));
   },
 );
+
+/** Wake-autonomy escrow: the user's boot credential in memory between
+ * sessions. Released only to machines this concierge booted for a fired
+ * wake row — standbys and user-wakes boot locked, by design. */
+const handoff = createHandoffStore({ ttlMs: envInt("WAKE_HANDOFF_TTL_MS", 7 * 24 * 3600_000, 60_000) });
 
 // ── Auth ─────────────────────────────────────────────────────────────────
 
@@ -332,8 +342,47 @@ app.post<{ Body: { instance?: string } }>("/wake", async (req, reply) => {
   }
 });
 
-/** Operator/debug: the table, no secrets. */
-app.get("/status", async () => ({ now: Date.now(), instances: table.snapshot() }));
+/** Operator/debug: the table, no secrets. Handoff presence (never the
+ * credential) rides along so autonomy state is observable. */
+app.get("/status", async () => ({
+  now: Date.now(),
+  instances: table.snapshot().map((e) => ({ ...e, wake_handoff: handoff.status(e.instance) })),
+}));
+
+/** Arm the wake handoff: the unlocking machine parks its boot credential
+ * here (memory-only) so a later schedule-boot can run unattended. Auth is
+ * the same external tier as /handshake — the fresh bb JWT or the shared
+ * secret — because this fires seconds after a successful unlock. */
+app.post<{
+  Body: { instance?: string; secret?: string; inferenceKey?: string; conciergeBearer?: string; ttl_ms?: number };
+}>("/handoff", async (req, reply) => {
+  const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+  const { instance, secret, inferenceKey, conciergeBearer, ttl_ms } = req.body ?? {};
+  if (!allowedInstance(instance)) return reply.code(403).send({ error: "instance not allowed" });
+  if (!(await verifyExternal(token))) return reply.code(401).send({ error: "unauthorized" });
+  if (typeof secret !== "string" || !secret) return reply.code(400).send({ error: "secret required" });
+  const res = handoff.arm(instance, { secret, inferenceKey, conciergeBearer }, ttl_ms);
+  app.log.info({ instance, expires_in_ms: res.expires_in_ms }, "wake handoff armed (memory-only)");
+  return { ok: true, ...res };
+});
+
+/** Pull the wake handoff: a just-booted locked machine asks for its
+ * credential. The fire-gate is the whole security story — a boot that the
+ * concierge did not wake for a schedule gets 404 and stays a normal
+ * locked ceremony. */
+app.get<{ Querystring: { instance?: string } }>("/handoff", async (req, reply) => {
+  const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+  const instance = req.query?.instance;
+  if (!allowedInstance(instance)) return reply.code(403).send({ error: "instance not allowed" });
+  if (!(await verifyExternal(token))) return reply.code(401).send({ error: "unauthorized" });
+  const res = handoff.release(instance);
+  if ("notFound" in res) {
+    app.log.info({ instance, reason: res.reason }, "wake handoff pull denied");
+    return reply.code(404).send({ error: `no handoff (${res.reason})` });
+  }
+  app.log.info({ instance, armed_ms_ago: res.armed_ms_ago }, "wake handoff released to schedule-boot");
+  return { secret: res.secret, inferenceKey: res.inferenceKey, conciergeBearer: res.conciergeBearer };
+});
 
 // ── The pool (module semantics in pool.ts; platform verbs here) ───────
 

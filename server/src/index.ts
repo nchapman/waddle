@@ -18,7 +18,7 @@ import { setBrowserEvents, browserLive, captureNow, userInput, releaseUserContro
 // debug GET /archive is gone — machine bytes never travel unsealed)
 import { setBbGrant, clearBbGrant, bbGrantActive, pushMachineBackup, pullMachineBackup, pruneOldGens } from "./bb-backup.js";
 import { createSchedule, listSchedules, cancelSchedule, markRun, dueSchedules, dueSoon, activeSchedules, nextDueMs, type Schedule } from "./schedules.js";
-import { handshakeConcierge, conciergeActive, renewIdleStop, deathFlare, writeTimer } from "./concierge.js";
+import { handshakeConcierge, conciergeActive, renewIdleStop, deathFlare, writeTimer, armHandoff, pullHandoff } from "./concierge.js";
 import { autonomyEnabled, armWakeCredential, readWakeCredential, clearWakeCredential } from "./wakeboot.js";
 
 /** Reject after ms — bounds restore/final-backup so nothing hangs the boot or the exit. */
@@ -246,6 +246,8 @@ app.post("/unlock", async (request, reply) => {
     if (bearer) renewIdleStop();
     // Wake autonomy: remember how to boot alone, so the concierge's
     // wake-timers find a machine that can actually run its schedule.
+    // The file arm covers dev (mounted DATA_DIR); the concierge handoff
+    // is the real one — memory-only escrow, nothing at rest anywhere.
     if (autonomyEnabled()) {
       // Best-effort: a failed arm (read-only storage, full disk) must never
       // fail an unlock that already succeeded.
@@ -253,6 +255,12 @@ app.post("/unlock", async (request, reply) => {
         armWakeCredential({ secret, inferenceKey, conciergeBearer: bearer });
       } catch (e) {
         app.log.warn({ err: String(e) }, "wake credential arm failed — autonomy off this session");
+      }
+      const escrowBearer = bearer ?? process.env.CONCIERGE_SHARED_SECRET;
+      if (escrowBearer) {
+        void armHandoff({ secret, inferenceKey, conciergeBearer: bearer }, escrowBearer).then((ok) => {
+          if (!ok) app.log.warn("wake handoff arm failed — unattended runs degrade until next unlock");
+        });
       }
     }
     // The inference key rides the same attested, EHBP-encrypted unlock —
@@ -614,11 +622,12 @@ app.get("/ws", { websocket: true }, (socket, request) => {
 });
 
 // Wake autonomy: a boot triggered by a concierge wake-timer finds the
-// machine locked with no keys — the due work couldn't run. When armed,
-// replay the unlock locally and hand the machine to the due-ticker. A
-// rejected credential clears itself; the boot stays a normal locked one.
+// machine locked with no keys — the due work couldn't run. The credential
+// comes from the concierge's memory escrow (released only to a
+// schedule-boot); the file arm is the dev path. A rejected or absent
+// credential just leaves a normal locked boot.
 if (autonomyEnabled() && !lock.unlocked) {
-  const cred = readWakeCredential();
+  const cred = readWakeCredential() ?? (await pullHandoff());
   if (cred) {
     try {
       lock.unlock(cred.secret, randomUUID());
@@ -626,11 +635,18 @@ if (autonomyEnabled() && !lock.unlocked) {
       if (cred.inferenceKey) initAgent(cred.inferenceKey);
       log.append({ type: "message", role: "user", text: "[system] autonomous boot — unlocked from wake credential", at: new Date().toISOString() });
       app.log.info("autonomous boot: unlocked from wake credential");
-      if (cred.conciergeBearer) {
-        void handshakeConcierge(cred.conciergeBearer).then((ok) => {
-          if (ok) renewIdleStop();
-          app.log.info({ ok }, "autonomous concierge handshake");
-        });
+      // The armed bearer may be a stale bb JWT by now — fall back to the
+      // env shared secret so the machine can still idle-stop (a machine
+      // that can't handshake can't die, and burns forever).
+      const bootBearer = cred.conciergeBearer ?? process.env.CONCIERGE_SHARED_SECRET;
+      const via = bootBearer === cred.conciergeBearer ? "armed" : "shared-secret";
+      const ok = bootBearer ? await handshakeConcierge(bootBearer).then((r) => r).catch(() => false) : false;
+      if (!ok && process.env.CONCIERGE_SHARED_SECRET) {
+        await handshakeConcierge(process.env.CONCIERGE_SHARED_SECRET).catch(() => undefined);
+      }
+      if (conciergeActive()) {
+        renewIdleStop();
+        app.log.info({ via }, "autonomous concierge handshake");
       }
     } catch (e) {
       clearWakeCredential();

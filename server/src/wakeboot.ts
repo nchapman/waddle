@@ -9,6 +9,8 @@
  * Threat-model placement: the file lives in DATA_DIR — the same store the
  * log is sealed in and the shelf encrypts wholesale. Dev compose mounts it
  * as a plain volume (your own machine); prod rides the encrypted shelf.
+ * In prod the real escrow is the concierge handoff (memory-only, see
+ * concierge.ts) — the file is read only as a dev fallback at boot.
  * A stale credential (rotated secret) fails the normal unlock path and is
  * cleared — the boot falls through to the regular locked ceremony, so it
  * can never brick the machine.
