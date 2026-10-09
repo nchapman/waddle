@@ -14,7 +14,9 @@
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { gunzipSync } from "node:zlib";
+import { mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { DATA_DIR } from "./state.js";
 
@@ -105,14 +107,20 @@ export function machineFingerprint(): string {
 
 /** Pack the working directory into one gzip tarball. */
 export function createArchive(): Archive {
-  // One retry: files can vanish between listing and read (Chromium
-  // singleton churn); a second pass over the survivors is stable.
+  // Plain tar (no compression flags — tar's zstd support varies by
+  // build), piped through the zstd CLI. One retry: files can vanish
+  // between listing and read (Chromium singleton churn); a second pass
+  // over the survivors is stable.
   for (let attempt = 0; ; attempt++) {
-    const res = spawnSync(
+    const raw = spawnSync(
       "tar",
-      ["-czf", "-", ...EXCLUDES.flatMap((e) => ["--exclude", e]), "-C", DATA_DIR, "."],
+      ["-cf", "-", ...EXCLUDES.flatMap((e) => ["--exclude", e]), "-C", DATA_DIR, "."],
       { maxBuffer: 1 << 30 },
     );
+    const res =
+      raw.status === 0 && raw.stdout
+        ? spawnSync("zstd", ["-q", "-3", "-"], { input: raw.stdout, maxBuffer: 1 << 30 })
+        : raw;
     if (res.status === 0 && res.stdout) {
       const body = res.stdout;
       return {
@@ -134,10 +142,35 @@ export function createArchive(): Archive {
  * the sealed log already holds history) — the wipe is the point: the
  * machine comes back exactly as it went down.
  */
+/** Slots are zstd'd tar; slots written before that switch are gzip'd
+ * tar (walk-down can land on either). Decompress by magic bytes — zstd
+ * through the CLI, gzip in-process — leaving a plain tar stream. */
+function detarBody(body: Buffer): Buffer {
+  const zstd = body.length > 4 && body[0] === 0x28 && body[1] === 0xb5 && body[2] === 0x2f && body[3] === 0xfd;
+  const gzip = body.length > 2 && body[0] === 0x1f && body[1] === 0x8b;
+  if (!zstd && !gzip) throw new Error("restore: not a valid zstd or gzip tarball");
+  if (gzip) return gunzipSync(body);
+  const dec = spawnSync("zstd", ["-dcq", "-"], { input: body, maxBuffer: 1 << 30 });
+  if (dec.status !== 0 || !dec.stdout) {
+    throw new Error(`restore: zstd decode failed: ${dec.stderr?.toString().slice(0, 200)}`);
+  }
+  return dec.stdout;
+}
+
 export function restoreArchive(body: Buffer): { files: number } {
-  const list = spawnSync("tar", ["-tzf", "-"], { input: body, maxBuffer: 1 << 28 });
+  const slotPath = join(tmpdir(), `waddle-slot-${process.pid}-${Date.now()}`);
+  writeFileSync(slotPath, detarBody(body));
+  try {
+    return restoreFrom(slotPath);
+  } finally {
+    rmSync(slotPath, { force: true });
+  }
+}
+
+function restoreFrom(slotPath: string): { files: number } {
+  const list = spawnSync("tar", ["-tf", slotPath], { maxBuffer: 1 << 28 });
   if (list.status !== 0 || !list.stdout) {
-    throw new Error("restore: not a valid gzip tarball");
+    throw new Error("restore: not a valid tarball");
   }
   const names = list.stdout.toString().split("\n").map((l) => l.trim()).filter(Boolean);
   for (const raw of names) {
@@ -155,8 +188,7 @@ export function restoreArchive(body: Buffer): { files: number } {
   rmSync(staging, { recursive: true, force: true });
   mkdirSync(staging, { recursive: true });
   try {
-    const untar = spawnSync("tar", ["-xzf", "-", "-C", staging], {
-      input: body,
+    const untar = spawnSync("tar", ["-xf", slotPath, "-C", staging], {
       maxBuffer: 1 << 28,
     });
     if (untar.status !== 0) {

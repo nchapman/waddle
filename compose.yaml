@@ -5,7 +5,7 @@
 # (`cd ../betterbase-dev && just dev`); nothing here needs it yet.
 services:
   waddle:
-    image: ghcr.io/nchapman/waddle@sha256:ed9f0b5a3a45db2e1b091de0af8f46a0a0d8c58f77b1e06eac76ae0096ca3d1b
+    image: waddle-server:shelf
     platform: linux/amd64
     container_name: waddle # stable name for the concierge's docker start/stop
     ports:

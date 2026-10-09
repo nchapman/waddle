@@ -25,8 +25,9 @@ RUN pnpm --filter @waddle/sdk build \
 FROM node:24-slim
 ENV NODE_ENV=production
 # Runtime half of the browser stack: the browser binary + fonts (no build tools).
+# zstd: GNU tar shells out to the binary for --zstd (the shelf's slot codec).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends chromium xvfb fonts-liberation fonts-dejavu-core \
+ && apt-get install -y --no-install-recommends chromium xvfb fonts-liberation fonts-dejavu-core zstd \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /deploy ./

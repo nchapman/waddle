@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { gzipSync } from "node:zlib";
+import { gzipSync, gunzipSync } from "node:zlib";
 import { mkdirSync, mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,6 +34,9 @@ test("archive packs the working dir, excludes caches, restores exactly", () => {
   const a = createArchive();
   assert.ok(a.size > 0);
   assert.match(a.digest, /^[0-9a-f]{64}$/);
+  // New slots are zstd (magic 28 b5 2f fd) — smaller and far faster to
+  // build than the gzip slots they replace.
+  assert.ok(a.body.subarray(0, 4).equals(Buffer.from([0x28, 0xb5, 0x2f, 0xfd])));
 
   const listing = spawnList(a.body);
   assert.ok(listing.some((l) => l.includes("log/events.jsonl")));
@@ -61,9 +64,22 @@ test("restore refuses archives with path traversal", () => {
   assert.throws(() => restoreArchive(absolute), /unsafe path/);
 });
 
+test("pre-zstd gzip slots still restore (magic-sniffed)", () => {
+  // Every slot on the shelf before the zstd switch is gzip; walk-down
+  // must be able to land on one and restore it byte-exactly.
+  const legacy = gzipTarWithEntry("log/events.jsonl", Buffer.from("gzip-history\n"));
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  const { files } = restoreArchive(legacy);
+  assert.equal(files, 1);
+  assert.equal(readFileSync(join(dir, "log", "events.jsonl"), "utf8"), "gzip-history\n");
+});
+
 test("restore refuses non-tarballs", () => {
   assert.throws(() => restoreArchive(Buffer.from("not a tarball")), /not a valid/);
 });
+
+
 
 test("fingerprint ignores excluded churn — the gate tracks archived state", () => {
   seed(dir);
@@ -79,8 +95,18 @@ test("fingerprint ignores excluded churn — the gate tracks archived state", ()
 });
 
 function spawnList(body: Buffer): string[] {
-  const res = spawnSync("tar", ["-tzf", "-"], { input: body, maxBuffer: 1 << 28 });
-  return res.stdout ? res.stdout.toString().split("\n") : [];
+  const zstd = body.subarray(0, 4).equals(Buffer.from([0x28, 0xb5, 0x2f, 0xfd]));
+  const dec = zstd
+    ? spawnSync("zstd", ["-dcq", "-"], { input: body, maxBuffer: 1 << 28 })
+    : { stdout: gunzipSync(body) };
+  const path = join(tmpdir(), `waddle-list-${process.pid}-${Date.now()}`);
+  writeFileSync(path, dec.stdout);
+  try {
+    const res = spawnSync("tar", ["-tf", path], { maxBuffer: 1 << 28 });
+    return res.stdout ? res.stdout.toString().split("\n") : [];
+  } finally {
+    rmSync(path, { force: true });
+  }
 }
 
 /** Hand-build a one-entry tar.gz with an arbitrary (possibly hostile) entry
