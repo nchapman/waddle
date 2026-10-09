@@ -152,3 +152,65 @@ zstd via stdin). 46.7 KiB vs 54.7 KiB gzip for the same machine.
 Proof: gen 17 pushed as zstd, wipe → unlock → restore gen 17, cookie
 `creation_utc 13435961005614428` byte-identical; gzip-legacy restore
 covered by test. Live smoke v0.0.28 chat round-trip.
+
+---
+
+## LIVE PROD PROOF — v0.0.32 (2026-10-09)
+
+The full cycle on the live tinfoil enclave
+(`waddle.ddg-waddle.containers.tinfoil.dev`) against PROD betterbase
+(`accounts.betterbase.dev` / `sync.betterbase.dev`), account
+`waddletest1@betterbase.dev` (space `879bff47-ea1c-577d-9ac8-1cb6f289b724`):
+
+1. Unlock (stored secret) → grant armed (per-space anchor
+   `b47a6b6c-cdde-556f-a8e6-18d1055a75db`, derived, not the old fixed id)
+2. Marker message sent; agent replied + wrote a file
+3. Sleep → final shelf push (zstd slot + manifest under `waddle-shelf-v1:` ids)
+4. **Destroy**: `tinfoil container stop && deploy` — fresh volume, zero history
+5. Unlock → **`machine restored from shelf gen=8 events=26`** (from
+   `/debug/log`, the session-gated ring buffer shipped in v0.0.31) —
+   marker message, replies, tool calls all present in `/state`
+
+Bugs this flushed out (each verified fixed on the live enclave):
+
+- **Anchor RecordIdCollision** (multi-user killer): sync record ids are
+  global per deployment; the old fixed anchor id `4f6a8c0e…` got a
+  *permanent* `bad_request` push rejection for every account after the
+  first (`push_error_result` maps `RecordIdCollision` → bad_request).
+  Fixed by deriving the anchor uuid from the space id
+  (`machineAnchorId()`, RFC 4122 v5 shape). Commit `eeb10ed`.
+- **EROFS on tinfoil**: the enclave mounts `/tmp` read-only; restore
+  staged its slot at `os.tmpdir()` and died instantly — live machines
+  silently booted fresh while docker/compose restored fine (writable
+  `/tmp`). Fixed by staging under `DATA_DIR/tmp`. Commit `9a61ce8`.
+  Found via `/debug/log` (tinfoil exposes no logs/exec — the ring buffer
+  is the observability bridge; keep it).
+- **Registry tag cache**: tinfoil's node cached v0.0.30's first
+  arm64-only manifest for the tag; later amd64 pushes under the same tag
+  still failed with `no matching manifest for linux/amd64/v3`. Building
+  with `--platform linux/amd64` *and* pushing under a fresh tag per
+  release dodges the cache.
+
+Local parity note: the same image run via compose restores fine against
+prod (gen 4/16 events seen during debugging) — compose can't reproduce
+the EROFS class of bug; only the live enclave can.
+
+## MULTI-USER PROOF — v0.0.32 live (2026-10-09, immediately after)
+
+`waddletest2@betterbase.dev` (space `b7d64543-fe27-5774-a174-a85aeee93a8f`)
+on the same enclave, same browser, **fresh unlock secret**:
+
+1. Signed out waddletest1, signed in waddletest2 via prod OAuth (PKCE,
+   consent "Authorize waddle") — own space, own anchor
+   `1c3bf4d6-3b1a-5ee6-a536-1cb68e5e2316` (per-space derivation working)
+2. Enrolled a new secret (`generate secret & unlock`) — fresh machine,
+   **empty greeting**: no trace of waddletest1's history or shelf
+3. Initial backup pushed (anchor synced server-side on first try — the
+   RecordIdCollision class is gone)
+4. Marker `SHELF-PROOF-D` sent → sleep → **destroy** (stop + deploy,
+   fresh volume) → unlock → `machine restored from shelf gen=1 events=3`,
+   marker D back in the UI
+
+Cross-visibility: none — spaces, anchors, secrets, shelves are fully
+disjoint per user. The old fixed anchor id would have permanently
+rejected this second account (`bad_request` / RecordIdCollision).
