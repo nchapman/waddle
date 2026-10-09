@@ -19,8 +19,21 @@ export interface BbGrantPayload {
 }
 
 /** The anchor record the files API requires uploads to reference —
- *  created once by ensureMachineAnchor(); a fixed id, never updated. */
-export const MACHINES_ANCHOR_ID = "4f6a8c0e-1b2d-4e3f-9a5b-7c8d0e1f2a3b";
+ *  created once by ensureMachineAnchor(), never updated.
+ *
+ *  DERIVED PER SPACE, never a fixed constant: sync record ids are global
+ *  per deployment, and a second account pushing the same fixed id gets a
+ *  permanent RecordIdCollision (bad_request) — the shelf would never
+ *  anchor for anyone but the first-ever user. */
+export async function machineAnchorId(spaceId: string): Promise<string> {
+  const h = new Uint8Array(
+    await crypto.subtle.digest("SHA-1", new TextEncoder().encode(`waddle-shelf-v1:anchor:${spaceId}`)),
+  );
+  h[6] = ((h[6] ?? 0) & 0x0f) | 0x50; // RFC 4122 v5 shape (name-based sha1)
+  h[8] = ((h[8] ?? 0) & 0x3f) | 0x80;
+  const x = Array.from(h, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20, 32)}`;
+}
 
 /** The sync base URL the enclave should push to — resolved once, cached.
  *  Dev override (VITE_BETTERBASE_SYNC_URL_ENCLAVE) points the compose
@@ -69,7 +82,7 @@ export async function buildBbGrant(
       token,
       spaceId: personalSpaceId,
       epoch: session.getEpoch() ?? 1,
-      anchorId: MACHINES_ANCHOR_ID,
+      anchorId: await machineAnchorId(personalSpaceId),
     };
   } catch (e) {
     console.warn("bb grant build failed — backups disabled this session", e);

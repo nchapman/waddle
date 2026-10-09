@@ -16,8 +16,5 @@ export const machines = collection("machines")
   })
   .build();
 
-/** Fixed anchor record id — the files API's X-Record-ID target. */
-export const MACHINES_ANCHOR_ID = "4f6a8c0e-1b2d-4e3f-9a5b-7c8d0e1f2a3b";
-
 /** Stable collection list for the sync provider (never re-created per render). */
 export const COLLECTIONS = [machines];

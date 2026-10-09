@@ -309,7 +309,7 @@ export function App() {
         setBbStore(store);
         // The files API requires uploads to reference a real record — make
         // sure the anchor row exists (created once, never updated).
-        void ensureMachineAnchor(store);
+        void ensureMachineAnchor(store, spaceId);
         return store;
       })
       .catch((e) => {

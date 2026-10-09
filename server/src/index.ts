@@ -29,7 +29,19 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 const PORT = Number(process.env.PORT ?? 8080);
 const VERSION = "0.0.1";
 
-const app = fastify({ logger: true });
+// Ring buffer of recent log lines — tinfoil gives us no logs/exec, so the
+// session-gated /debug/log endpoint is the only window into a live enclave.
+const logRing: string[] = [];
+const RING_MAX = 400;
+const tee = {
+  write: (line: string) => {
+    process.stdout.write(line);
+    logRing.push(line.trimEnd());
+    if (logRing.length > RING_MAX) logRing.shift();
+  },
+};
+
+const app = fastify({ logger: { level: "info", stream: tee } });
 await app.register(websocket);
 
 // Browser clients talk to us cross-origin (dev: Vite on :5173; prod: the client host).
@@ -114,10 +126,12 @@ app.post("/unlock", async (request, reply) => {
     if (bb) {
       try {
         await setBbGrant(secret, bb);
+        app.log.info({ endpoint: bb.endpoint, space: bb.spaceId, epoch: bb.epoch, anchor: bb.anchorId, tokenLen: bb.token?.length ?? 0 }, "[dbg] bb grant armed");
       } catch (e) {
         app.log.warn({ err: String(e) }, "bb grant rejected — backups disabled this session");
         clearBbGrant();
       }
+      app.log.info({ active: bbGrantActive(), fresh: (log?.all ?? []).every((e) => e.type === "sleep"), events: (log?.all ?? []).length }, "[dbg] restore gate");
       if (bbGrantActive() && (log?.all ?? []).every((e) => e.type === "sleep")) {
         try {
           // Freshness is re-checked inside the pull right before the tree
@@ -163,6 +177,11 @@ app.post("/unlock", async (request, reply) => {
     const err = e as { statusCode?: number; message: string };
     return reply.code(err.statusCode ?? 500).send({ error: err.message });
   }
+});
+
+app.get("/debug/log", async (request, reply) => {
+  if (!requireSession(request)) return reply.code(401).send({ error: "locked" });
+  return { lines: logRing };
 });
 
 app.get("/state", async (request, reply) => {

@@ -9,7 +9,8 @@
  */
 import { createDatabase, type Database } from "betterbase/db";
 import { FileStore, lazyWorkerFileStorage } from "betterbase/sync";
-import { machines, MACHINES_ANCHOR_ID } from "./bb-collections.js";
+import { machines } from "./bb-collections.js";
+import { machineAnchorId } from "./bb-grant.js";
 
 // v3: records are out of the data path entirely (files only). v1's single
 // snapshot record carried a 4.2MB text blob whose CRDT re-merge wedged the
@@ -46,12 +47,14 @@ export async function openAccountStore(personalSpaceId: string): Promise<Account
   return { db, fileStore, dbName };
 }
 
-/** Ensure the file-upload anchor record exists (created once, never updated). */
-export async function ensureMachineAnchor(store: AccountStore): Promise<void> {
+/** Ensure the file-upload anchor record exists (created once, never updated).
+ *  Per-space id — see machineAnchorId for why it must never be a constant. */
+export async function ensureMachineAnchor(store: AccountStore, spaceId: string): Promise<void> {
   try {
-    const existing = await store.db.get(machines, MACHINES_ANCHOR_ID);
+    const anchorId = await machineAnchorId(spaceId);
+    const existing = await store.db.get(machines, anchorId);
     if (existing) return;
-    await store.db.put(machines, { id: MACHINES_ANCHOR_ID, label: "waddle machine" });
+    await store.db.put(machines, { id: anchorId, label: "waddle machine" });
   } catch (e) {
     console.warn("machine anchor ensure failed", e);
   }
