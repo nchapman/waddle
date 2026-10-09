@@ -35,12 +35,15 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 function applyQuietSink() {
   setSink({
     onToolStart: (callId, tool, args) => {
+      touch(); // work in flight is activity, watched or not
       log?.append({ type: "tool_start", callId, tool, args, at: new Date().toISOString() });
     },
     onToolEnd: (callId, tool, result, isError) => {
+      touch();
       log?.append({ type: "tool_end", callId, tool, result, isError, at: new Date().toISOString() });
     },
     onAssistantFinal: (text) => {
+      touch();
       log?.append({ type: "message", role: "assistant", text, at: new Date().toISOString() });
     },
   });
@@ -292,8 +295,10 @@ app.get("/session", async (request, reply) => {
 let streaming = false;
 
 // ── Sleep: the idle gate ────────────────────────────────────────────────
-// Unlocked + zero attached clients + idle past the gate → checkpoint (the
-// log is already sealed per-event) → broadcast → graceful exit. The
+// Unlocked + idle past the gate → checkpoint (the log is already sealed
+// per-event) → broadcast → graceful exit. Idleness is the absence of
+// ACTIVITY — user messages, tool calls, assistant output — not the
+// absence of clients: a silently-open tab is an idle machine. The
 // platform's restart policy is `no` (config default), so the instance
 // stops — and billing with it. The concierge wakes it.
 const IDLE_MS = Number(process.env.WADDLE_IDLE_MS ?? 120_000);
@@ -312,6 +317,12 @@ setBrowserEvents({
   },
 });
 let lastActivity = Date.now();
+/** Any observable work — user message, tool call, assistant output —
+ *  counts as activity and re-arms the concierge's stop row. */
+function touch(): void {
+  lastActivity = Date.now();
+  renewIdleStop();
+}
 let sleeping = false;
 let refusing = false; // sleep gate is holding the machine alive (no wake cover)
 
@@ -415,8 +426,8 @@ setInterval(() => {
 
 setInterval(() => {
   if (sleeping || !lock.unlocked || firing) return; // a scheduled run in flight is activity
-  if (sockets.size === 0 && Date.now() - lastActivity > IDLE_MS) {
-    void sleep(`idle ${Math.round(IDLE_MS / 1000)}s with no clients`);
+  if (Date.now() - lastActivity > IDLE_MS) {
+    void sleep(`idle ${Math.round(IDLE_MS / 1000)}s (no activity)`);
   }
 }, 10_000).unref();
 
@@ -455,26 +466,34 @@ app.get("/ws", { websocket: true }, (socket, request) => {
     // only the live wire is gone. Deltas drop, finals and tools persist.
     setSink({
       onToolStart: (callId, tool, args) => {
+        touch(); // a mid-turn disconnect still has work in flight
         log?.append({ type: "tool_start", callId, tool, args, at: new Date().toISOString() });
       },
       onToolEnd: (callId, tool, result, isError) => {
+        touch();
         log?.append({ type: "tool_end", callId, tool, result, isError, at: new Date().toISOString() });
       },
       onAssistantFinal: (text) => {
+        touch();
         log?.append({ type: "message", role: "assistant", text, at: new Date().toISOString() });
       },
     });
     denyAllPending(); // no client: the gate denies, the turn never hangs
   });
-  lastActivity = Date.now();
+  touch();
   setSink({
-    onDelta: (d) => send({ type: "delta", messageId: "live", text: d }),
+    onDelta: (d) => {
+      touch(); // streaming tokens are work too — a long turn must not be reaped
+      send({ type: "delta", messageId: "live", text: d });
+    },
     onToolStart: (callId, tool, args) => {
+      touch();
       const evt = { type: "tool_start", callId, tool, args, at: new Date().toISOString() } as const;
       log?.append(evt);
       send(evt);
     },
     onToolEnd: (callId, tool, result, isError) => {
+      touch();
       const evt = { type: "tool_end", callId, tool, result, isError, at: new Date().toISOString() } as const;
       log?.append(evt);
       send(evt);
@@ -482,6 +501,7 @@ app.get("/ws", { websocket: true }, (socket, request) => {
     onApprovalRequest: (req) => send(req),
     onSettled: () => send({ type: "run_settled", at: new Date().toISOString() }),
     onAssistantFinal: (text) => {
+      touch();
       const evt = { type: "message", role: "assistant", text, at: new Date().toISOString() } as const;
       log?.append({ ...evt });
       send(evt);
@@ -493,7 +513,7 @@ app.get("/ws", { websocket: true }, (socket, request) => {
   send({ type: "replay_done", count: backlog.length });
 
   socket.on("message", async (raw: unknown) => {
-    lastActivity = Date.now();
+    touch();
     if (conciergeActive()) renewIdleStop(); // activity = debounce the stop row
     const intent = JSON.parse(String(raw)) as { type?: string; text?: string };
     if (intent.type === "sleep_now") {
