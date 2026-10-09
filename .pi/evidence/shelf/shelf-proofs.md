@@ -1,4 +1,17 @@
-# The Shelf — whole-machine backup — proofs (v0.0.25 → v0.0.26)
+# The Shelf — whole-machine backup — proofs (v0.0.25 → v0.0.27)
+
+> v0.0.27 update: audited slot contents by decrypting them (the unlock
+> secret derives the DEK-unwrap key; blobs + wrapped DEKs live in the dev
+> sync's postgres/fs). A 34 MiB hands-era slot vs a 295 KiB fresh one:
+> 96% of the big slot was Chromium component payload (TTS wasm 22.8 MiB,
+> component_crx_cache 38 MiB, omnibox model 7.7 MiB, metrics 4 MiB, CRL
+> sets…) — zero user state. The archive now excludes component packages,
+> shader caches, predictor/telemetry DBs, blob storage, tab-session
+> scratch; a lived-in machine shelves at ~54 KiB. The empty-machine guard
+> gates on the sealed event log (not tarball size, which the excludes
+> pushed under the old 64 KiB floor) and now also stops a failed-restore
+> boot with gen -1 from clobbering latest. Proof: wipe → unlock restores
+> gen 14, cookie byte-identical, no component dirs in the restored tree.
 
 > v0.0.26 update: betterbase sync `bf55fe7` made the files API honest
 > (409 on conflicting PUT, byte-identical retries idempotent, DELETE +
@@ -113,3 +126,18 @@ stand-in) → `up` → unlock:
 - Live (tinfoil cloud) shelf is dormant until the hosted sync runs
   the #8 fix and the live client is signed in with a files-scoped
   session; dev stack is fully proven above.
+
+## v0.0.27 slot audit (2026-10-09)
+
+Decrypted slot contents (wrapped DEK from sync postgres, DEK unwrap via
+HKDF(unlock secret, "bb-dek"), body AES-256-GCM, AAD `bb-file:${id}`):
+
+| slot | gzip | raw | what it was |
+|---|---|---|---|
+| hands-era (b9a1e4d2) | 33.2 MiB | ~82 MiB | component_crx_cache 38 MiB, WasmTtsEngine 22.8 MiB, OnDeviceHeadSuggestModel 7.7 MiB, BrowserMetrics 4 MiB, ActorSafetyLists 2.6 MiB, hyphen-data 1.7 MiB, ZxcvbnData 1.6 MiB, CertificateRevocation 1.3 MiB; **user state ~3 MiB** |
+| fresh-era (dd60282d) | 295 KiB | 2.8 MiB | Dawn shader caches 1 MiB, Dictionaries 441 KiB, History 160 KiB, Web Data 154 KiB, logins/autofill, log+sessions |
+| surgical (e3fd10a2) | 54 KiB | ~0.9 MiB | History, Web Data, logins, Trust Tokens, nssdb, sessions 15 KiB, log 7 KiB — state only |
+
+Post-surgery: push → prune (keeps 3 gens) → wipe → restore gen 14,
+cookie `creation_utc 13435961005614428` byte-identical, restored tree
+contains zero component dirs.
