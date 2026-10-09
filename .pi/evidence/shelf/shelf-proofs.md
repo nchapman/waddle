@@ -1,4 +1,15 @@
-# The Shelf — whole-machine backup — proofs (v0.0.25)
+# The Shelf — whole-machine backup — proofs (v0.0.25 → v0.0.26)
+
+> v0.0.26 update: betterbase sync `bf55fe7` made the files API honest
+> (409 on conflicting PUT, byte-identical retries idempotent, DELETE +
+> tombstones, quotas, body limit raised — GH #8/#9). The shelf now heals
+> on 409 by resyncing its generation counter, prunes heavy slots to a
+> 3-generation window through the DELETE route (manifests stay as an
+> append-only discovery log), doubles over that log to the high-water
+> generation, and restores walk down past pruned slots. Proven on the
+> dev stack running their code: restore gen 8 from a pruned shelf onto a
+> wiped volume, cookie jar byte-identical (`creation_utc` match), prune
+> tombstoning exactly the six slots behind the window.
 
 Architecture: the enclave is the source of truth for its own backups. It
 tars its entire working directory (sealed log, pi sessions, workspace,
