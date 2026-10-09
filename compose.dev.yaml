@@ -1,0 +1,21 @@
+# Dev overlay for the wake/stop E2E loop: local build + concierge wiring.
+#   just up-dev   (compose -f compose.yaml -f compose.dev.yaml up --build)
+# Pair with the host-side concierge (`just concierge`) — the agent inside
+# handshakes to it at unlock, the stop-timer ends billing on idle, and
+# wake-timers `docker start waddle` for booked work.
+services:
+  waddle:
+    image: waddle:dev
+    build:
+      context: .
+    environment:
+      # The agent's pen: host-side concierge via the docker-host bridge.
+      CONCIERGE_URL: http://host.docker.internal:8091
+      WADDLE_INSTANCE: waddle
+      # Wake autonomy + tight loop for E2E: idle after 2 min quiet; the
+      # stop backstop arms at idle+30s (concierge.ts) so the checkpoint-exit
+      # always wins the race; wake-boots self-unlock so work actually runs.
+      WADDLE_WAKE_AUTONOMY: "1"
+      CONCIERGE_SHARED_SECRET: devsecret
+      WADDLE_IDLE_MS: "120000"
+      WADDLE_BROWSER_ALLOWLIST: example.com,news.ycombinator.com,en.wikipedia.org,tinfoil.sh,localhost,host.docker.internal

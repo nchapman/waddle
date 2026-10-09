@@ -172,7 +172,48 @@ export function App() {
   // storm's fuel. Cache it, refetch only when the row count moved.
   const jsonlCacheRef = useRef<{ len: number; jsonl: string | null }>({ len: -1, jsonl: null });
   const pushBlockedUntilRef = useRef(0);
+  const autoWokeRef = useRef(false);
   if (!transportRef.current) transportRef.current = new WaddleChatTransport();
+
+  /** Wake through the concierge: POST the verb, poll the enclave, re-run
+   *  the unlock flow when it answers. Shared by the manual button and the
+   *  load-time auto-wake (once per page load). Auth prefers the betterbase
+   *  session token (the TEE'd concierge verifies it); dev falls back to
+   *  the shared-secret env. */
+  async function wakeCore(note: string) {
+    setState({ phase: "asleep", waking: true, note });
+    const bbToken = await bb.session?.getToken().catch(() => null);
+    const auth = bbToken ?? CONCIERGE_TOKEN;
+    try {
+      const res = await fetch(`${CONCIERGE_URL}/wake`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${auth}` },
+        body: JSON.stringify({ instance: "waddle" }),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: `concierge refused (${res.status}) ${body.slice(0, 120)}` } : st));
+        return;
+      }
+    } catch {
+      setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: "concierge unreachable — is it running?" } : st));
+      return;
+    }
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        const res = await fetch(`${ENCLAVE_URL}/health`, { signal: AbortSignal.timeout(4000) });
+        if (res.ok) {
+          void run();
+          return;
+        }
+      } catch {
+        /* still booting */
+      }
+      setState((st) => (st.phase === "asleep" ? { ...st, note: `waiting for the enclave… (${i + 1})` } : st));
+    }
+    setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: "gave up waiting — try again" } : st));
+  }
 
   const run = useCallback(async () => {
     setState({ phase: "verifying" });
@@ -192,8 +233,26 @@ export function App() {
       const health = (await res.json()) as { locked: boolean };
       setState({ phase: "attested", result, locked: health.locked });
     } catch (e) {
+      // Auto-wake only on genuine unreachability: a network-level probe of
+      // /health. Attestation/config failures with a live enclave go to the
+      // error screen — waking can't help those (and a spurious /wake would
+      // stop-and-redeploy a healthy machine via zombie recovery).
+      if (!DEV && !autoWokeRef.current) {
+        let unreachable = false;
+        try {
+          await fetch(`${ENCLAVE_URL}/health`, { signal: AbortSignal.timeout(2500) });
+        } catch {
+          unreachable = true;
+        }
+        if (unreachable) {
+          autoWokeRef.current = true;
+          void wakeCore("auto-wake: enclave unreachable on load");
+          return;
+        }
+      }
       setState({ phase: "error", message: e instanceof Error ? e.message : String(e) });
     }
+    // eslint-disable-next-line -- wakeCore is a hoisted function declaration
   }, []);
 
   useEffect(() => {
@@ -276,14 +335,8 @@ export function App() {
       if (event.type === "error") return { ...s, error: event.message };
       if (event.type === "sleep") {
         connRef.current?.close();
-        // Relay the platform-level stop through the concierge (the enclave
-        // holds no lifecycle credentials by design — the operator service
-        // holds the scoped key; we see who stopped what, never content).
-        void fetch(`${CONCIERGE_URL}/stop`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${CONCIERGE_TOKEN}` },
-          body: JSON.stringify({ instance: "waddle" }),
-        }).catch(() => undefined);
+        // No /stop relay: the enclave's death flare owns the platform stop
+        // (timer table on the concierge) — the client just renders asleep.
         return { phase: "asleep", waking: false, note: event.reason };
       }
       return s;
@@ -424,33 +477,7 @@ export function App() {
     setState((s) => (s.phase === "chat" ? { ...s, browserHeld: false } : s));
   }, []);
 
-  const wake = useCallback(async () => {
-    setState({ phase: "asleep", waking: true, note: "concierge booting the instance…" });
-    try {
-      await fetch(`${CONCIERGE_URL}/wake`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${CONCIERGE_TOKEN}` },
-        body: JSON.stringify({ instance: "waddle" }),
-      });
-    } catch {
-      setState((st) => (st.phase === "asleep" ? { ...st, note: "concierge unreachable — is it running?" } : st));
-      return;
-    }
-    for (let i = 0; i < 60; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      try {
-        const res = await fetch(`${ENCLAVE_URL}/health`, { signal: AbortSignal.timeout(4000) });
-        if (res.ok) {
-          void run();
-          return;
-        }
-      } catch {
-        /* still booting */
-      }
-      setState((st) => (st.phase === "asleep" ? { ...st, note: `waiting for the enclave… (${i + 1})` } : st));
-    }
-    setState((st) => (st.phase === "asleep" ? { ...st, note: "gave up waiting — try again" } : st));
-  }, [run]);
+  const wake = useCallback((note = "concierge booting the instance…") => void wakeCore(note), []);
 
   // History seed for the runtime: computed once when the backlog finishes.
   // Identity must stay stable afterward — a fresh array per render makes the

@@ -1,8 +1,11 @@
-# Local parity: the same image Tinfoil measures, run hot.
+# Compose parity: the same image Tinfoil measures, run hot.
+#   just up          — pinned prod digest (the live enclave, byte-for-byte)
+#   just up-dev      — local build (compose.dev.yaml) + concierge wiring,
+#                      for the wake/stop E2E loop
 # The concierge stays operator-side (host node process, docker backend —
 # the seam the design promises, not a code fork), exactly like its
 # tinfoil-backend sibling. betterbase-dev runs next door
-# (`cd ../betterbase-dev && just dev`); nothing here needs it yet.
+# (`cd ../betterbase-dev && just dev`) when the shelf is in play.
 services:
   waddle:
     image: ghcr.io/nchapman/waddle@sha256:f25e9bbf4aca63ba3adf32ccccd68501857f09eb3bb92a523fb9deba32a91c4c

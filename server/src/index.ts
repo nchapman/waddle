@@ -17,6 +17,9 @@ import { setBrowserEvents, browserLive, captureNow, userInput, releaseUserContro
 // (createArchive/restoreArchive live behind bb-backup.ts now; the old
 // debug GET /archive is gone — machine bytes never travel unsealed)
 import { setBbGrant, clearBbGrant, bbGrantActive, pushMachineBackup, pullMachineBackup, pruneOldGens } from "./bb-backup.js";
+import { createSchedule, listSchedules, cancelSchedule, markRun, dueSchedules, dueSoon, activeSchedules, nextDueMs, type Schedule } from "./schedules.js";
+import { handshakeConcierge, conciergeActive, renewIdleStop, deathFlare, writeTimer } from "./concierge.js";
+import { autonomyEnabled, armWakeCredential, readWakeCredential, clearWakeCredential } from "./wakeboot.js";
 
 /** Reject after ms — bounds restore/final-backup so nothing hangs the boot or the exit. */
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
@@ -25,6 +28,55 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
     p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
   });
 }
+
+// Quiet sink: no client attached — the sealed log is the truth, finals and
+// tools persist, deltas drop. Shared by mid-turn disconnects and scheduled
+// work firing with nobody watching.
+function applyQuietSink() {
+  setSink({
+    onToolStart: (callId, tool, args) => {
+      log?.append({ type: "tool_start", callId, tool, args, at: new Date().toISOString() });
+    },
+    onToolEnd: (callId, tool, result, isError) => {
+      log?.append({ type: "tool_end", callId, tool, result, isError, at: new Date().toISOString() });
+    },
+    onAssistantFinal: (text) => {
+      log?.append({ type: "message", role: "assistant", text, at: new Date().toISOString() });
+    },
+  });
+}
+
+// Scheduled work: fires whether or not anyone is watching. markRun first
+// (recurring realigns, one-shot exhausts), then the prompt rides the normal
+// chat path — tools, approvals (auto-denied with no client), and the log
+// records the story; the next shelf push carries it.
+let firing = false;
+async function fireSchedule(s: Schedule): Promise<void> {
+  app.log.info({ id: s.id, title: s.title }, "schedule firing");
+  markRun(s.id);
+  log?.append({ type: "message", role: "user", text: `[scheduled: ${s.title}] ${s.prompt}`, at: new Date().toISOString() });
+  if (sockets.size === 0) applyQuietSink();
+  try {
+    await chat(`[scheduled task "${s.title}"] ${s.prompt}`);
+  } catch (e) {
+    app.log.warn({ err: String(e), id: s.id }, "scheduled run failed");
+    log?.append({ type: "message", role: "assistant", text: `scheduled run failed: ${e instanceof Error ? e.message : String(e)}`, at: new Date().toISOString() });
+  }
+}
+
+setInterval(() => {
+  if (sleeping || refusing || !lock.unlocked || firing) return;
+  const due = dueSchedules();
+  if (due.length === 0 || !agentReady()) return;
+  firing = true;
+  void (async () => {
+    try {
+      for (const s of due) await fireSchedule(s);
+    } finally {
+      firing = false; // a stuck-true latch would kill the ticker AND the sleep gate
+    }
+  })();
+}, 10_000).unref();
 
 const PORT = Number(process.env.PORT ?? 8080);
 const VERSION = "0.0.1";
@@ -171,6 +223,27 @@ app.post("/unlock", async (request, reply) => {
         void first();
       }
     }
+    // Timer-table handshake: the bb grant token is fresh right now — the
+    // one moment the agent can authenticate to the concierge with it
+    // (session tokens thereafter). Dev falls back to the shared secret.
+    const bearer = bb?.token ?? process.env.CONCIERGE_SHARED_SECRET;
+    if (bearer) {
+      void handshakeConcierge(bearer).then((ok) => {
+        if (ok) renewIdleStop();
+        app.log.info({ ok }, "concierge handshake");
+      });
+    }
+    // Wake autonomy: remember how to boot alone, so the concierge's
+    // wake-timers find a machine that can actually run its schedule.
+    if (autonomyEnabled()) {
+      // Best-effort: a failed arm (read-only storage, full disk) must never
+      // fail an unlock that already succeeded.
+      try {
+        armWakeCredential({ secret, inferenceKey, conciergeBearer: bearer });
+      } catch (e) {
+        app.log.warn({ err: String(e) }, "wake credential arm failed — autonomy off this session");
+      }
+    }
     // The inference key rides the same attested, EHBP-encrypted unlock —
     // memory-only, never on disk, never in config. The agent boots lazily
     // on first use; a persisted pi session file (same scratch as this log)
@@ -236,9 +309,36 @@ setBrowserEvents({
 });
 let lastActivity = Date.now();
 let sleeping = false;
+let refusing = false; // sleep gate is holding the machine alive (no wake cover)
 
 async function sleep(reason: string): Promise<never> {
   if (sleeping) await new Promise(() => {}); // already going down
+  // Refusal: booked work with near dues needs wake rows; without a live
+  // concierge (or without wake autonomy — a wake-boot that can't unlock
+  // just burns compute until the sweep reaps it), dying = missing the run.
+  // Stay alive instead; the gate re-proposes, WADDLE_STAYALIVE=0 forces
+  // sleep anyway.
+  if ((!conciergeActive() || !autonomyEnabled()) && process.env.WADDLE_STAYALIVE !== "0") {
+    const soon = dueSoon(Number(process.env.WADDLE_STAYALIVE_HORIZON_MS ?? 3600_000));
+    if (soon.length > 0) {
+      const titles = soon.map((s) => s.title).join(", ");
+      // One notice per refusal stretch — the idle gate re-enters every 10 s.
+      if (!refusing) {
+        refusing = true;
+        app.log.warn({ reason, soon: soon.length }, "sleep refused — schedules pending, no wake cover; staying alive");
+        log?.append({ type: "message", role: "assistant", text: `[system] sleep refused: ${soon.length} schedule(s) due soon (${titles}) with no wake cover — staying alive.`, at: new Date().toISOString() });
+        for (const peer of sockets) {
+          try {
+            peer.send(JSON.stringify({ type: "message", role: "assistant", text: `[system] not sleeping: scheduled work pending (${titles}) but nothing can wake me.`, at: new Date().toISOString() }));
+          } catch {
+            /* peer already gone */
+          }
+        }
+      }
+      await new Promise(() => {}); // hold: alive until cover returns or STAYALIVE=0
+    }
+  }
+  refusing = false;
   sleeping = true;
   app.log.info({ reason }, "sleep gate fired");
   log?.append({ type: "sleep", reason, at: new Date().toISOString() });
@@ -279,6 +379,23 @@ async function sleep(reason: string): Promise<never> {
       ).catch(() => undefined);
     }
   }
+  // The death flare: our own checkpoint-exit is done; this is the
+  // platform-level stop that ends billing + the zombie Running state.
+  // Wake rows for every active schedule so the concierge reboots us for
+  // the next occurrence. Refusal (no concierge + schedules due soon)
+  // already ran above — this path is safe to fire-and-forget.
+  // Wake rows are pointless without wake autonomy — a wake-boot that
+  // stays locked burns compute until the sweep reaps it, and the refusal
+  // branch above already refused to die into near dues in that case.
+  if (conciergeActive() && autonomyEnabled()) {
+    await deathFlare();
+    for (const s of activeSchedules()) {
+      const d = nextDueMs(s);
+      // Floor at 1 s: due_ms 0 is the concierge's cancel verb, and an
+      // overdue row must fire immediately, not vanish.
+      if (d !== null) await writeTimer({ action: "wake", dueMs: Math.max(1_000, d - Date.now()), jobId: s.id });
+    }
+  }
   setTimeout(() => process.exit(0), 500).unref();
   await app.close().catch(() => process.exit(0));
   process.exit(0);
@@ -293,7 +410,7 @@ setInterval(() => {
 }, 10 * 60_000);
 
 setInterval(() => {
-  if (sleeping || !lock.unlocked) return;
+  if (sleeping || !lock.unlocked || firing) return; // a scheduled run in flight is activity
   if (sockets.size === 0 && Date.now() - lastActivity > IDLE_MS) {
     void sleep(`idle ${Math.round(IDLE_MS / 1000)}s with no clients`);
   }
@@ -373,6 +490,7 @@ app.get("/ws", { websocket: true }, (socket, request) => {
 
   socket.on("message", async (raw: unknown) => {
     lastActivity = Date.now();
+    if (conciergeActive()) renewIdleStop(); // activity = debounce the stop row
     const intent = JSON.parse(String(raw)) as { type?: string; text?: string };
     if (intent.type === "sleep_now") {
       send({ type: "sleep_proposed", reason: "user requested" });
@@ -451,5 +569,31 @@ app.get("/ws", { websocket: true }, (socket, request) => {
     }
   });
 });
+
+// Wake autonomy: a boot triggered by a concierge wake-timer finds the
+// machine locked with no keys — the due work couldn't run. When armed,
+// replay the unlock locally and hand the machine to the due-ticker. A
+// rejected credential clears itself; the boot stays a normal locked one.
+if (autonomyEnabled() && !lock.unlocked) {
+  const cred = readWakeCredential();
+  if (cred) {
+    try {
+      lock.unlock(cred.secret, randomUUID());
+      if (!log) log = new EventLog(lock.logKey, lock.storage);
+      if (cred.inferenceKey) initAgent(cred.inferenceKey);
+      log.append({ type: "message", role: "user", text: "[system] autonomous boot — unlocked from wake credential", at: new Date().toISOString() });
+      app.log.info("autonomous boot: unlocked from wake credential");
+      if (cred.conciergeBearer) {
+        void handshakeConcierge(cred.conciergeBearer).then((ok) => {
+          if (ok) renewIdleStop();
+          app.log.info({ ok }, "autonomous concierge handshake");
+        });
+      }
+    } catch (e) {
+      clearWakeCredential();
+      app.log.warn({ err: String(e) }, "wake credential rejected — cleared, booting locked");
+    }
+  }
+}
 
 await app.listen({ port: PORT, host: "0.0.0.0" });

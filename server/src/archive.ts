@@ -19,6 +19,10 @@ import { join, relative } from "node:path";
 import { DATA_DIR } from "./state.js";
 
 const EXCLUDES = [
+  // The wake credential is machine-local by design: it must never ride
+  // the shelf — the sealed log and transcripts already travel there, and
+  // this file is the one plaintext key material DATA_DIR ever holds.
+  "wake-credential.json",
   "browser/*/Cache",
   "browser/*/Code Cache",
   "browser/*/GPUCache",

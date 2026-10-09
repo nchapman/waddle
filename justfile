@@ -17,5 +17,13 @@ check:
 up:
     docker compose up --build
 
+# Dev variant: local build + concierge wiring (see compose.dev.yaml)
+up-dev:
+    docker compose -f compose.yaml -f compose.dev.yaml up --build
+
+# Host-side concierge for the dev E2E loop (memory-only, docker backend)
+concierge:
+    cd concierge && CONCIERGE_BACKEND=docker CONCIERGE_TOKEN=devsecret CONCIERGE_PORT=8091 pnpm dev
+
 down:
     docker compose down
