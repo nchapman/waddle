@@ -13,29 +13,42 @@ process.env.DATA_DIR = dir;
 const bb = await import("./bb-backup.js");
 type BbGrant = import("./bb-backup.js").BbGrant;
 
-// A tiny in-memory betterbase files server mimicking the real semantics:
-// PUTs are immutable (write-once per id — a repeat PUT is a silent no-op,
-// exactly PutMode::Create), HEAD probes existence, GETs serve bytes with
-// the X-Wrapped-DEK header.
-const shelf = new Map<string, { body: Uint8Array; wrapped: string }>();
+// A tiny in-memory betterbase files server mimicking the real semantics
+// (sync bf55fe7): PUTs are create-only — different bytes under a live id
+// → 409, byte-identical retries → idempotent 204; DELETE tombstones the
+// id (GET/HEAD then 404, re-upload resurrects); HEAD probes existence.
+const shelf = new Map<string, { body: Uint8Array; wrapped: string; deleted?: boolean }>();
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
   const u = url.toString();
   const id = u.split("/files/")[1] ?? "";
   if (init?.method === "PUT") {
-    if (!shelf.has(id)) {
-      shelf.set(id, {
-        body: new Uint8Array(await new Response(init.body).arrayBuffer()),
-        wrapped: String((init.headers as Record<string, string>)["X-Wrapped-DEK"]),
-      });
+    const hit = shelf.get(id);
+    if (hit && !hit.deleted) {
+      const incoming = new Uint8Array(await new Response(init.body).arrayBuffer());
+      if (Buffer.compare(Buffer.from(incoming), Buffer.from(hit.body)) === 0) {
+        return new Response(null, { status: 204 });
+      }
+      return new Response(JSON.stringify({ error: "file already exists with different content — use a new file id" }), { status: 409 });
     }
+    shelf.set(id, {
+      body: new Uint8Array(await new Response(init.body).arrayBuffer()),
+      wrapped: String((init.headers as Record<string, string>)["X-Wrapped-DEK"]),
+    });
     return new Response(null, { status: 201 });
   }
+  if (init?.method === "DELETE") {
+    const hit = shelf.get(id);
+    if (!hit || hit.deleted) return new Response(null, { status: 404 });
+    hit.deleted = true;
+    return new Response(null, { status: 204 });
+  }
   if (init?.method === "HEAD") {
-    return new Response(null, { status: shelf.has(id) ? 200 : 404 });
+    const hit = shelf.get(id);
+    return new Response(null, { status: hit && !hit.deleted ? 200 : 404 });
   }
   const hit = shelf.get(id);
-  if (!hit) return new Response(null, { status: 404 });
+  if (!hit || hit.deleted) return new Response(null, { status: 404 });
   return new Response(hit.body as unknown as BodyInit, { status: 200, headers: { "X-Wrapped-DEK": hit.wrapped } });
 }) as typeof fetch;
 
@@ -110,6 +123,71 @@ test("grant unwrap + push + pull round-trips through the files API shape", async
   assert.equal(r4.gen, 1);
 });
 
+test("pruning keeps the manifest log and kills only old slots; restore walks down", async () => {
+  const secret = Buffer.from(webcrypto.getRandomValues(new Uint8Array(64))).toString("base64");
+  const space = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  await bb.setBbGrant(secret, { ...(await clientGrant(secret)), spaceId: space });
+  mkdirSync(join(dir, "log"), { recursive: true });
+  writeFileSync(join(dir, "log", "events.jsonl"), "v0\n");
+  const noise = (n: number) => {
+    mkdirSync(join(dir, "workspace"), { recursive: true });
+    const b = new Uint8Array(1 << 17);
+    for (let i = 0; i < b.length; i += 65536) {
+      webcrypto.getRandomValues(b.subarray(i, Math.min(i + 65536, b.length)));
+    }
+    b[0] = n; // per-generation variation
+    writeFileSync(join(dir, "workspace", "state.bin"), b);
+  };
+  // Four generations: after gen 3 lands, gen 0's slot is pruned (log stays).
+  for (let gen = 0; gen <= 3; gen++) {
+    writeFileSync(join(dir, "log", "events.jsonl"), `v${gen}\n`);
+    noise(gen);
+    const r = await bb.pushMachineBackup();
+    assert.equal(r.gen, gen);
+    await bb.pruneOldGens(gen); // deterministic in the test (fire-and-forget in prod)
+  }
+  // The manifest log is anchored and contiguous; only old slots die.
+  assert.ok(shelf.get(bb.shelfManifestId(space, 0)) && !shelf.get(bb.shelfManifestId(space, 0))!.deleted, "gen 0 manifest live");
+  const deletedIds = [...shelf.entries()].filter(([, v]) => v.deleted).map(([k]) => k);
+  assert.equal(deletedIds.length, 1, "exactly gen 0's slot is tombstoned");
+  assert.ok(!shelf.get(bb.shelfManifestId(space, 3))!.deleted, "gen 3 manifest live");
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  const restored = await bb.pullMachineBackup();
+  assert.ok(restored);
+  assert.equal(restored.gen, 3);
+  assert.equal(readFileSync(join(dir, "log", "events.jsonl"), "utf8"), "v3\n");
+});
+
+test("manifest conflict (409) heals by re-probing the shelf generation", async () => {
+  const secret = Buffer.from(webcrypto.getRandomValues(new Uint8Array(64))).toString("base64");
+  const space = "11111111-2222-3333-4444-555566667777";
+  await bb.setBbGrant(secret, { ...(await clientGrant(secret)), spaceId: space });
+  mkdirSync(join(dir, "log"), { recursive: true });
+  writeFileSync(join(dir, "log", "events.jsonl"), "gen0\n");
+  const noise = new Uint8Array(1 << 17);
+  for (let i = 0; i < noise.length; i += 65536) {
+    webcrypto.getRandomValues(noise.subarray(i, Math.min(i + 65536, noise.length)));
+  }
+  mkdirSync(join(dir, "workspace"), { recursive: true });
+  writeFileSync(join(dir, "workspace", "state.bin"), noise);
+  await bb.pushMachineBackup(); // gen 0
+  // Simulate divergence: the shelf already holds a gen-1 manifest our
+  // counter doesn't know about (a half-landed push from a previous life).
+  shelf.set(bb.shelfManifestId(space, 1), {
+    body: new Uint8Array(Buffer.from("stranger-bytes")),
+    wrapped: Buffer.from("w".repeat(44)).toString("base64"),
+  });
+  writeFileSync(join(dir, "log", "events.jsonl"), "gen0\nchanged\n");
+  writeFileSync(join(dir, "workspace", "state.bin"), noise.subarray(0, (1 << 17) - 1));
+  const r = await bb.pushMachineBackup();
+  // The 409 is caught, the shelf is re-probed (latest = 1), and the push
+  // lands as gen 2 instead of silently clobbering or looping.
+  assert.equal(r.pushed, true);
+  assert.equal(r.gen, 2);
+  assert.ok(shelf.has(bb.shelfManifestId(space, 2)));
+});
+
 test("a wrong secret cannot unwrap another secret's DEKs", async () => {
   const owner = Buffer.from(webcrypto.getRandomValues(new Uint8Array(64))).toString("base64");
   const other = Buffer.from(webcrypto.getRandomValues(new Uint8Array(64))).toString("base64");
@@ -119,10 +197,12 @@ test("a wrong secret cannot unwrap another secret's DEKs", async () => {
   mkdirSync(join(dir, "log"), { recursive: true });
   writeFileSync(join(dir, "log", "events.jsonl"), "owner-state\n");
   await bb.pushMachineBackup();
-  // Re-arm with the wrong secret: pulls fail to open (DEKs wrapped under
-  // the owner's derived key), so another secret's machine stays shut.
+  // Re-arm with the wrong secret: every generation's manifest fails to
+  // open (DEKs wrapped under the owner's key) — the walk-down treats them
+  // as unreadable and the pull restores nothing. Another secret's machine
+  // stays shut: no rejection, no bytes, no leak.
   await bb.setBbGrant(other, await clientGrant(other));
-  await assert.rejects(bb.pullMachineBackup());
+  assert.equal(await bb.pullMachineBackup(), null);
 });
 
 test("empty shelf pulls nothing", async () => {

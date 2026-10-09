@@ -8,7 +8,8 @@
  * with a wrapped-DEK header in betterbase's wire shape ([epoch:4 BE][40
  * bytes] — the sync server parses only the epoch). On a fresh boot the
  * enclave pulls the file back and restores itself before the unlock
- * response returns; the client never moves bytes.
+ * response returns; the client never moves bytes. Old generations are
+ * pruned through the files DELETE route (keep KEEP_GENS), best-effort.
  *
  * Keys: the DEK is wrapped under HKDF(unlock secret, "bb-dek") — the same
  * user secret that seals the event log. The machine blob is therefore
@@ -38,12 +39,15 @@ export interface BbGrant {
   anchorId: string;
 }
 
-// Generational slots (v2): betterbase files are immutable (PutMode::Create —
-// a repeat PUT is a silent no-op), so every checkpoint goes to a FRESH
-// deterministic file id derived from its generation number, and the
-// manifest of that generation names the slot's id. Restore probes
-// generations upward until a miss. Old generations are left in place
-// (no delete route in the files API); bounded by change-gated pushes.
+// Generational slots (v3): betterbase files are immutable (create-only;
+// a conflicting PUT is an honest 409, byte-identical retries idempotent).
+// Every checkpoint appends one manifest (deterministic id, ~200 B — the
+// manifests form an immutable, never-pruned, contiguous log) naming a
+// nonce-randomized slot id that carries the tarball. Discovery doubling-
+// searches that log for the high-water generation. Heavy slots are pruned
+// to a KEEP_GENS window through the files DELETE route (best-effort:
+// servers without it just accumulate bytes, quota-bounded).
+export const KEEP_GENS = 3;
 export const shelfSlotId = (spaceId: string, gen: number, nonce = ""): string =>
   fileUuid("slot", spaceId, `${gen}:${nonce}`);
 export const shelfManifestId = (spaceId: string, gen: number): string =>
@@ -127,6 +131,14 @@ async function unwrapDek(wrapped: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await subtle.exportKey("raw", dekKey));
 }
 
+/** PUT failed because the id already holds different bytes. Carries the
+ *  status so callers can distinguish conflict from transport failure. */
+class FileConflictError extends Error {
+  constructor(fileId: string) {
+    super(`bb put ${fileId}: 409 file already exists with different content`);
+  }
+}
+
 /** Seal bytes under a fresh DEK and PUT them as a betterbase file. */
 async function putFile(fileId: string, bytes: Buffer): Promise<void> {
   const g = state!.grant;
@@ -144,6 +156,7 @@ async function putFile(fileId: string, bytes: Buffer): Promise<void> {
       },
       body: new Uint8Array(body),
     });
+    if (res.status === 409) throw new FileConflictError(fileId);
     if (res.status !== 201 && res.status !== 204) {
       throw new Error(`bb put ${fileId}: ${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}`);
     }
@@ -184,6 +197,23 @@ async function headFile(fileId: string): Promise<boolean> {
   throw new Error(`bb head ${fileId}: ${res.status}`);
 }
 
+/** Best-effort delete (tombstone + grace sweep server-side). Older sync
+ *  servers without the route answer 404/405 — pruning then simply no-ops
+ *  and old generations accumulate until the space quota says stop. */
+async function deleteFile(fileId: string): Promise<boolean> {
+  const g = state!.grant;
+  try {
+    const res = await fetch(`${g.endpoint}/spaces/${g.spaceId}/files/${fileId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${g.token}` },
+      signal: AbortSignal.timeout(30_000),
+    });
+    return res.status === 204 || res.status === 200 || res.status === 404;
+  } catch {
+    return false;
+  }
+}
+
 export interface PushResult {
   pushed: boolean;
   gen: number;
@@ -209,36 +239,86 @@ export async function pushMachineBackup(
   // Slot first, manifest second: a manifest never names a missing slot;
   // a crash between the two leaves an orphan slot, which is harmless.
   // The slot id carries a random nonce: a retry after a half-failed push
-  // must not re-PUT an immutable id with different bytes (a silent no-op
-  // that would strand the new digest). Only the manifest id — which the
-  // discovery walk needs to be deterministic — is gen-derived.
-  const gen = state.gen + 1;
-  const nonce = randomBytes(8).toString("hex");
-  const slotId = shelfSlotId(state.grant.spaceId, gen, nonce);
-  const manifest = JSON.stringify({ gen, slotId, digest: fp, size: a.size });
-  await putFile(slotId, a.body);
-  await putFile(shelfManifestId(state.grant.spaceId, gen), Buffer.from(manifest));
-  state.lastPushedDigest = fp;
-  state.gen = gen;
-  return { pushed: true, gen, digest: fp };
+  // must not re-PUT an immutable id with different bytes. Only the
+  // manifest id — which discovery needs deterministic — is gen-derived.
+  // A 409 on the manifest means our counter diverged from the shelf
+  // (e.g. a retry after a half-landed push): re-probe, take the next
+  // generation, and try once more — the honest conflict signal replaced
+  // the old silent no-op that used to strand checkpoints.
+  for (let attempt = 0; ; attempt++) {
+    const gen = state.gen + 1;
+    const nonce = randomBytes(8).toString("hex");
+    const slotId = shelfSlotId(state.grant.spaceId, gen, nonce);
+    const manifest = JSON.stringify({ gen, slotId, digest: fp, size: a.size });
+    try {
+      await putFile(slotId, a.body);
+      await putFile(shelfManifestId(state.grant.spaceId, gen), Buffer.from(manifest));
+    } catch (e) {
+      if (e instanceof FileConflictError && attempt === 0) {
+        state.gen = await latestShelfGen();
+        continue;
+      }
+      throw e;
+    }
+    state.lastPushedDigest = fp;
+    state.gen = gen;
+    void pruneOldGens(gen, log).catch(() => undefined);
+    return { pushed: true, gen, digest: fp };
+  }
 }
 
 /** Pull + restore the machine from the shelf. Caller re-inits the sealed
  *  log from disk and reads the true event count. */
-// Generations are contiguous (never deleted), so the latest one is the
-// last hit before the first miss — a linear walk, capped for sanity.
-// A single HEAD is ~1 RTT; the walk runs once per fresh boot and once
-// per grant arming.
-const MAX_PROBE = 4096;
+// Discovery bounds. Manifests are never pruned, so the log is contiguous
+// from gen 0 — a doubling search (probe powers of two to the first miss,
+// then binary-search the boundary) finds the high-water generation in
+// O(log MAX_GEN) HEADs.
+const MAX_GEN = 1 << 16;
 
 /** The shelf's high-water generation (-1 = empty shelf). */
 async function latestShelfGen(): Promise<number> {
-  let latest = -1;
-  for (let gen = 0; gen < MAX_PROBE; gen++) {
-    if (!(await headFile(shelfManifestId(state!.grant.spaceId, gen)))) break;
-    latest = gen;
+  const m = (gen: number) => headFile(shelfManifestId(state!.grant.spaceId, gen));
+  if (!(await m(0))) return -1;
+  let lo = 0; // highest known-live gen
+  let hi = 1; // lowest known-dead gen
+  while (hi < MAX_GEN && (await m(hi))) {
+    lo = hi;
+    hi *= 2;
   }
-  return latest;
+  hi = Math.min(hi, MAX_GEN - 1);
+  while (lo + 1 < hi) {
+    const mid = (lo + hi) >> 1;
+    if (await m(mid)) lo = mid;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/** Read + open one generation's manifest (null when missing). */
+async function readManifest(gen: number): Promise<{ gen: number; slotId: string; digest: string } | null> {
+  const raw = await getFile(shelfManifestId(state!.grant.spaceId, gen));
+  if (!raw) return null;
+  return JSON.parse(raw.toString("utf8")) as { gen: number; slotId: string; digest: string };
+}
+
+/** Prune heavy slots older than KEEP_GENS behind `gen`. Manifests stay —
+ *  they are the discovery log (tiny, immutable, contiguous); only the
+ *  multi-MB tarballs die. The slot id rides in the (sealed) manifest, so
+ *  each prune is one GET + one DELETE. Best-effort and bounded per push;
+ *  failures never fail the push. */
+export async function pruneOldGens(
+  gen: number,
+  log?: (info: Record<string, unknown>) => void,
+): Promise<void> {
+  const oldest = gen - KEEP_GENS;
+  if (oldest < 0) return;
+  let pruned = 0;
+  for (let g = oldest; g >= 0 && pruned < 8; g--) {
+    const manifest = await readManifest(g).catch(() => null);
+    if (!manifest) continue; // never landed
+    if (await deleteFile(manifest.slotId)) pruned++;
+  }
+  if (pruned > 0) log?.({ pruned, behind: gen });
 }
 
 export async function pullMachineBackup(
@@ -250,15 +330,18 @@ export async function pullMachineBackup(
   if (!state) return null;
   const latest = await latestShelfGen();
   if (latest < 0) return null;
-  const manifestRaw = await getFile(shelfManifestId(state.grant.spaceId, latest));
-  if (!manifestRaw) return null;
-  const manifest = JSON.parse(manifestRaw.toString("utf8")) as {
-    gen: number;
-    slotId: string;
-    digest: string;
-  };
-  const tar = await getFile(manifest.slotId);
-  if (!tar) return null;
+  // A prune that died between its two DELETEs can leave a live manifest
+  // naming a tombstoned slot — walk down a few generations to a
+  // complete pair rather than giving up on the machine.
+  let manifest: { gen: number; slotId: string; digest: string } | null = null;
+  let tar: Buffer | null = null;
+  for (let g = latest, hops = 0; g >= 0 && hops < KEEP_GENS; g--, hops++) {
+    manifest = await readManifest(g).catch(() => null);
+    if (!manifest) continue;
+    tar = await getFile(manifest.slotId).catch(() => null);
+    if (tar) break;
+  }
+  if (!manifest || !tar) return null;
   if (stillFresh && !stillFresh()) return null;
   restoreArchive(tar);
   state.lastPushedDigest = manifest.digest; // don't re-push what we just pulled

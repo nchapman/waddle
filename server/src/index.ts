@@ -16,7 +16,7 @@ import { resolveApproval, denyAllPending, setOutcomeEmitter } from "./approvals.
 import { setBrowserEvents, browserLive, captureNow, userInput, releaseUserControl, setControlNotifier, stopBrowser } from "./browser.js";
 // (createArchive/restoreArchive live behind bb-backup.ts now; the old
 // debug GET /archive is gone — machine bytes never travel unsealed)
-import { setBbGrant, clearBbGrant, bbGrantActive, pushMachineBackup, pullMachineBackup } from "./bb-backup.js";
+import { setBbGrant, clearBbGrant, bbGrantActive, pushMachineBackup, pullMachineBackup, pruneOldGens } from "./bb-backup.js";
 
 /** Reject after ms — bounds restore/final-backup so nothing hangs the boot or the exit. */
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
@@ -236,10 +236,25 @@ async function sleep(reason: string): Promise<never> {
     await withTimeout(stopBrowser(), 10_000, "browser stop timeout").catch((e) =>
       app.log.warn({ err: String(e) }, "browser stop failed"),
     );
-    await withTimeout(pushMachineBackup(), 30_000, "final backup timeout").then(
-      (r) => app.log.info({ pushed: r.pushed, fp: r.digest.slice(0, 12) }, "final backup done"),
-      (e) => app.log.warn({ err: String(e) }, "final backup failed"),
+    const final = await withTimeout(pushMachineBackup(), 30_000, "final backup timeout").then(
+      (r) => {
+        app.log.info({ pushed: r.pushed, fp: r.digest.slice(0, 12) }, "final backup done");
+        return r;
+      },
+      (e) => {
+        app.log.warn({ err: String(e) }, "final backup failed");
+        return undefined;
+      },
     );
+    // Pruning is fire-and-forget on the periodic path, but the sleep exit
+    // must wait for it — the process dies 500 ms from now.
+    if (final?.pushed) {
+      await withTimeout(
+        pruneOldGens(final.gen, (i) => app.log.info(i, "shelf prune")),
+        15_000,
+        "shelf prune timeout",
+      ).catch(() => undefined);
+    }
   }
   setTimeout(() => process.exit(0), 500).unref();
   await app.close().catch(() => process.exit(0));
