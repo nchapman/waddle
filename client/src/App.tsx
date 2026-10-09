@@ -38,6 +38,10 @@ const ENCLAVE_URL =
 const CONFIG_REPO = import.meta.env.VITE_CONFIG_REPO ?? "nchapman/waddle-config";
 const CONCIERGE_URL = import.meta.env.VITE_CONCIERGE_URL ?? "http://localhost:5390";
 const CONCIERGE_TOKEN = import.meta.env.VITE_CONCIERGE_TOKEN ?? "waddle-dev";
+/** The machine this session talks to: the primary, or a warm standby
+ *  handed out by the concierge's pool (same config repo → same
+ *  measurement → the TOFU pin travels with it). */
+let activeEnclave = ENCLAVE_URL;
 
 interface ChatMessage {
   role: "user" | "assistant" | "tool";
@@ -182,6 +186,7 @@ export function App() {
    *  the shared-secret env. */
   async function wakeCore(note: string) {
     setState({ phase: "asleep", waking: true, note });
+    activeEnclave = ENCLAVE_URL; // the wake path always targets the primary
     const bbToken = await bb.session?.getToken().catch(() => null);
     const auth = bbToken ?? CONCIERGE_TOKEN;
     try {
@@ -202,7 +207,7 @@ export function App() {
     for (let i = 0; i < 60; i++) {
       await new Promise((r) => setTimeout(r, 2000));
       try {
-        const res = await fetch(`${ENCLAVE_URL}/health`, { signal: AbortSignal.timeout(4000) });
+        const res = await fetch(`${activeEnclave}/health`, { signal: AbortSignal.timeout(4000) });
         if (res.ok) {
           void run();
           return;
@@ -219,17 +224,17 @@ export function App() {
     setState({ phase: "verifying" });
     try {
       if (DEV) {
-        const res = await fetch(`${ENCLAVE_URL}/health`);
+        const res = await fetch(`${activeEnclave}/health`);
         const health = (await res.json()) as { locked: boolean };
         setState({ phase: "attested", result: DEV_RESULT, locked: health.locked });
         return;
       }
-      const result = await verifyEnclave(ENCLAVE_URL, CONFIG_REPO);
+      const result = await verifyEnclave(activeEnclave, CONFIG_REPO);
       if (result.pinConflict) {
         setState({ phase: "blocked", result });
         return;
       }
-      const res = await result.client.fetch(`${ENCLAVE_URL}/health`);
+      const res = await result.client.fetch(`${activeEnclave}/health`);
       const health = (await res.json()) as { locked: boolean };
       setState({ phase: "attested", result, locked: health.locked });
     } catch (e) {
@@ -237,6 +242,17 @@ export function App() {
       // /health. Attestation/config failures with a live enclave go to the
       // error screen — waking can't help those (and a spurious /wake would
       // stop-and-redeploy a healthy machine via zombie recovery).
+      if (!DEV) {
+        // A standby that fails verification must not strand the session:
+        // fall back to the primary wake path (which resets activeEnclave).
+        // Checked BEFORE the autoWokeRef gate — the assign path already
+        // consumed it, but a bad standby still deserves the fallback.
+        if (activeEnclave !== ENCLAVE_URL) {
+          autoWokeRef.current = true;
+          void wakeCore("standby failed verification — waking the primary");
+          return;
+        }
+      }
       if (!DEV && !autoWokeRef.current) {
         let unreachable = false;
         try {
@@ -246,6 +262,30 @@ export function App() {
         }
         if (unreachable) {
           autoWokeRef.current = true;
+          // Pool first: a warm standby means ~7s to live (attest + unlock)
+          // instead of a ~75s deploy. Same measured config → the pin holds.
+          const bbToken = await bb.session?.getToken().catch(() => null);
+          try {
+            const res = await fetch(`${CONCIERGE_URL}/assign`, {
+              headers: { Authorization: `Bearer ${bbToken ?? CONCIERGE_TOKEN}` },
+              signal: AbortSignal.timeout(5000),
+            });
+            if (res.ok) {
+              const m = (await res.json().catch(() => null)) as { name?: string; url?: string } | null;
+              // Zone-bind the handed-out URL: the standby must live in the
+              // same operator domain as the primary — the TOFU pin travels
+              // by measurement, so it cannot catch a host switch.
+              const zone = `.${new URL(ENCLAVE_URL).hostname.split(".").slice(1).join(".")}`;
+              const host = m && typeof m.url === "string" ? new URL(m.url).hostname : "";
+              if (host.endsWith(zone)) {
+                activeEnclave = m!.url!;
+                void run(); // verify the standby; its unlock flow continues there
+                return;
+              }
+            }
+          } catch {
+            /* concierge unreachable — fall through to the wake path */
+          }
           void wakeCore("auto-wake: enclave unreachable on load");
           return;
         }
@@ -405,12 +445,12 @@ export function App() {
           bb.personalSpaceId,
           await resolveSyncEndpoint(),
         );
-        await unlock(result.client, ENCLAVE_URL, keyInput || undefined, grant ?? undefined);
-        await getState(result.client, ENCLAVE_URL);
+        await unlock(result.client, activeEnclave, keyInput || undefined, grant ?? undefined);
+        await getState(result.client, activeEnclave);
         const transport = transportRef.current!;
         transport.setAppTap((e) => onServerEvent(e));
         const conn = connectChat(
-          ENCLAVE_URL,
+          activeEnclave,
           getToken() ?? "",
           (event) => transport.dispatch(event),
           () => {
@@ -423,7 +463,7 @@ export function App() {
         // Fresh boot (scratch wiped): hydrate from the user's betterbase
         // store first, relay the rows into the enclave's sealed log, and
         // seed the surface. Device snapshot is the signed-out fallback.
-        const state2 = await getState(result.client, ENCLAVE_URL);
+        const state2 = await getState(result.client, activeEnclave);
         // Sleep wipes the scratch: a post-wake log may hold only bookkeeping
         // (the sleep marker). Only history-bearing rows count for seeding.
         const historyEvents = state2.events.filter((e) => e.type !== "sleep");

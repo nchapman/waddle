@@ -29,6 +29,7 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createTable } from "./table.js";
+import { createPool, envInt, standbyNameRe, isUnclaimed, type Pool } from "./pool.js";
 
 const exec = promisify(execFile);
 
@@ -55,6 +56,30 @@ const jwks = JWKS_URL ? createRemoteJWKSet(new URL(JWKS_URL)) : null;
 if (jwks && !AUDIENCE) {
   console.warn("[concierge] CONCIERGE_AUDIENCE is empty: JWTs are verified for signature/issuer only. Pin the betterbase audience before trusting this in prod.");
 }
+
+// ── Warm-standby pool (tinfoil backend only) ───────────────────────────
+const POOL_SIZE = envInt("WARM_POOL_SIZE", 0, 0);
+const STANDBY_TTL_MS = envInt("STANDBY_TTL_MS", 3_600_000, 1_000);
+const STANDBY_PREFIX = process.env.STANDBY_PREFIX ?? "waddle-standby-";
+const STANDBY_CONFIG_REPO = process.env.STANDBY_CONFIG_REPO ?? "";
+const STANDBY_CONFIG_TAG = process.env.STANDBY_CONFIG_TAG ?? "";
+const STANDBY_SECRETS = (process.env.STANDBY_SECRETS ?? "CONCIERGE_SHARED_SECRET,TINFOIL_API_KEY")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+/** Standby idle gate: longer than the pool TTL so the POOL owns unclaimed
+ *  standbys (TTL reap), not the machine's own locked-boot backstop — a
+ *  10.5-min self-destruct would churn every slot ~6x the budget. Once
+ *  claimed + unlocked, activity renews past it like any machine. */
+const STANDBY_IDLE_MS = envInt("STANDBY_IDLE_MS", STANDBY_TTL_MS + 15 * 60_000, 60_000);
+/** https://<instance>.<INSTANCE_DOMAIN_BASE> — URLs + health probes. */
+const DOMAIN_BASE = process.env.INSTANCE_DOMAIN_BASE ?? "";
+const POOL_CAPABLE = BACKEND === "tinfoil" && !!STANDBY_CONFIG_REPO && !!STANDBY_CONFIG_TAG && !!DOMAIN_BASE;
+if (POOL_SIZE > 0 && !POOL_CAPABLE) {
+  console.warn("[concierge] WARM_POOL_SIZE set but pool needs BACKEND=tinfoil, STANDBY_CONFIG_REPO, STANDBY_CONFIG_TAG, INSTANCE_DOMAIN_BASE — pool stays off");
+}
+const POOL_ENABLED = POOL_SIZE > 0 && POOL_CAPABLE;
+const STANDBY_NAME_RE = standbyNameRe(STANDBY_PREFIX);
 
 // ── Platform verbs (backends are ~25 lines each by design) ───────────────
 
@@ -122,6 +147,32 @@ async function listInstances(): Promise<string[]> {
     .flatMap((n) => (typeof n === "string" && n && !n.startsWith("NAME") ? [n] : []));
 }
 
+/** Plain health probe — no attestation needed for "is it up" (the
+ *  client's SecureClient does the real verification). */
+async function instanceHealth(instance: string): Promise<{ locked?: boolean } | null> {
+  if (!DOMAIN_BASE) return null;
+  try {
+    const res = await fetch(`https://${instance}.${DOMAIN_BASE}/health`, { signal: AbortSignal.timeout(4_000) });
+    return res.ok ? ((await res.json()) as { locked?: boolean }) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function instanceHealthy(instance: string): Promise<boolean> {
+  return (await instanceHealth(instance)) !== null;
+}
+
+/** Health-first start: a machine that already answers (dozing, live, or
+ *  a warm standby the wake row targeted) needs nothing — the old path
+ *  would have run the zombie stop-deploy dance on a healthy machine. */
+async function ensureInstance(instance: string): Promise<string> {
+  if (BACKEND === "tinfoil" && (await instanceHealthy(instance))) {
+    return `already running: ${instance}`;
+  }
+  return startInstance(instance);
+}
+
 // ── The table (semantics live in table.ts; platform verbs fire here) ─────
 
 const app = fastify({ logger: true });
@@ -133,7 +184,7 @@ const table = createTable(
       .catch((e) => app.log.warn({ instance, err: String(e) }, "stop row fired but failed"));
   },
   (instance, jobId) => {
-    void startInstance(instance)
+    void ensureInstance(instance)
       .then((detail) => app.log.info({ instance, jobId, detail }, "wake row fired"))
       .catch((e) => app.log.warn({ instance, jobId, err: String(e) }, "wake row fired but failed"));
   },
@@ -156,7 +207,12 @@ async function verifyExternal(token: string | undefined): Promise<boolean> {
 }
 
 function allowedInstance(instance: string | undefined): instance is string {
-  return typeof instance === "string" && ALLOWED.has(instance);
+  if (typeof instance !== "string") return false;
+  if (ALLOWED.has(instance)) return true;
+  // Standby namespace: strict shape AND a name this process created or
+  // adopted — a bare prefix match would let any token holder mint rows
+  // against operator-invisible instances (and grow the table unbounded).
+  return POOL_ENABLED && STANDBY_NAME_RE.test(instance) && poolNames.has(instance);
 }
 
 /** Session tokens: handshake-minted, instance-scoped, memory-only. */
@@ -181,7 +237,35 @@ await app.register(cors, {
   origin: (process.env.CONCIERGE_ALLOWED_ORIGINS ?? "http://localhost:5173").split(","),
 });
 
-app.get("/health", async () => ({ service: "waddle-concierge", version: "0.2.1", backend: BACKEND, rows: table.countRows() }));
+app.get("/health", async () => ({
+  service: "waddle-concierge",
+  version: "0.3.0",
+  backend: BACKEND,
+  rows: table.countRows(),
+  // Counts only — standby NAMES authorize the standby namespace in
+  // allowedInstance, so they are not published unauthenticated.
+  pool: pool ? { size: POOL_SIZE, ttl_ms: STANDBY_TTL_MS, tracked: pool.tracked().length } : { size: 0 },
+}));
+
+/** Assign a warm standby: URL handout, nothing more — the user's secret
+ *  is what makes the machine theirs. The replacement boot hides behind
+ *  the user's session (pool tick). */
+app.get("/assign", async (req, reply) => {
+  if (!POOL_ENABLED || !pool) return reply.code(404).send({ error: "pool disabled" });
+  const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+  if (!(await verifyExternal(token))) return reply.code(401).send({ error: "unauthorized" });
+  const got = pool.assign();
+  if (!got) return reply.code(404).send({ error: "no warm standby — use /wake" });
+  // A claim is bounded presence, not ownership: REPLACE the machine's
+  // boot-time stop row with a grace row. If the user unlocks, renewIdleStop
+  // re-arms it from activity like any machine; if they abandon the claim
+  // (closed tab at the lock screen), the machine dies within grace — the
+  // next scan adopts the stopped blank and the TTL reclaims the slot. No
+  // path leaves a claimed machine billing for HARD_STOP_MS.
+  table.setStop(got.name, envInt("STANDBY_CLAIM_GRACE_MS", 15 * 60_000, 30_000));
+  void pool.tick().catch(() => undefined); // top the pool back up promptly
+  return got;
+});
 
 /** Handshake: betterbase JWT (or dev secret) → session token. Once per
  *  agent boot; re-running replaces the token (idempotent). */
@@ -222,7 +306,7 @@ app.post<{ Body: { instance?: string } }>("/wake", async (req, reply) => {
   // A user present means the machine should live: clear any pending stop.
   table.userWake(instance);
   try {
-    const detail = await startInstance(instance);
+    const detail = await ensureInstance(instance);
     return reply.code(202).send({ status: "waking", detail });
   } catch (err) {
     return reply.code(502).send({ error: err instanceof Error ? err.message : String(err) });
@@ -231,6 +315,82 @@ app.post<{ Body: { instance?: string } }>("/wake", async (req, reply) => {
 
 /** Operator/debug: the table, no secrets. */
 app.get("/status", async () => ({ now: Date.now(), instances: table.snapshot() }));
+
+// ── The pool (module semantics in pool.ts; platform verbs here) ───────
+
+/** Names the pool must never collide with: seeded from the platform
+ *  (our memory is wiped on reboot — leftover standbys exist) and grown as
+ *  we create. Also the authority for the standby namespace —
+ *  allowedInstance accepts only names it contains. */
+const poolNames = new Set<string>();
+const pool: Pool | null = POOL_CAPABLE
+  ? createPool(
+      { size: POOL_ENABLED ? POOL_SIZE : 0, ttlMs: STANDBY_TTL_MS },
+      {
+        boot: async (name) => {
+          poolNames.add(name); // burn the name even on failure — a colliding
+          // create must not wedge nextName on the same index forever
+          const args = [
+            "container", "create", name,
+            "--repo", STANDBY_CONFIG_REPO,
+            "--tag", STANDBY_CONFIG_TAG,
+            "--variable", `WADDLE_INSTANCE=${name}`,
+            "--variable", `WADDLE_IDLE_MS=${STANDBY_IDLE_MS}`,
+            "--no-wait",
+          ];
+          for (const s of STANDBY_SECRETS) args.push("--secret", s);
+          await exec("tinfoil", args, { timeout: 30_000 });
+        },
+        destroy: async (name) => {
+          await restInstance(name);
+          await exec("tinfoil", ["container", "delete", name], { timeout: 60_000 }).catch(() => undefined);
+        },
+        health: instanceHealthy,
+        urlFor: (name) => `https://${name}.${DOMAIN_BASE}`,
+        nextName: () => {
+          for (let i = 1; ; i++) {
+            const n = `${STANDBY_PREFIX}${i}`;
+            if (!poolNames.has(n)) return n;
+          }
+        },
+        now: () => Date.now(),
+        log: (msg, fields) => app.log.info(fields ?? {}, msg),
+      },
+    )
+  : null;
+if (pool) {
+  /** Leftover scan: adopt UNCLAIMED standbys found on the platform (a
+   *  concierge restart must never orphan a billing machine — nor adopt a
+   *  machine a user already claimed: locked = blank, unlocked = live
+   *  session that the pool must not touch). Runs at boot and
+   *  periodically — a failed scan retries instead of waiting for the
+   *  next process restart. */
+  const scanLeftovers = () =>
+    listInstances()
+      .then(async (names) => {
+        const leftovers: string[] = [];
+        for (const n of names) {
+          if (!STANDBY_NAME_RE.test(n) || poolNames.has(n)) continue;
+          poolNames.add(n);
+          const h = await instanceHealth(n);
+          if (h === null || isUnclaimed(h)) {
+            // stopped/dead or still-locked (blank): pool property — adopt
+            leftovers.push(n);
+          } else {
+            app.log.info({ name: n }, "pool: leftover is claimed (unlocked) — left alone");
+          }
+        }
+        if (leftovers.length > 0) pool.adopt(leftovers);
+        app.log.info({ adopted: leftovers.length }, "pool: platform standby scan");
+        void pool.tick();
+      })
+      .catch((e) => app.log.warn({ err: String(e) }, "pool scan failed — retrying next interval"));
+  void scanLeftovers();
+  setInterval(() => void scanLeftovers(), envInt("POOL_SCAN_MS", 5 * 60_000, 10_000)).unref();
+  if (POOL_ENABLED) {
+    setInterval(() => void pool.tick().catch((e) => app.log.warn({ err: String(e) }, "pool tick failed")), envInt("POOL_TICK_MS", 30_000, 1_000)).unref();
+  }
+}
 
 // ── Backstop sweep: managed instances gone quiet get stopped ─────────────
 // Covers missed death-flares and our own post-reboot amnesia. Scoped to

@@ -639,4 +639,20 @@ if (autonomyEnabled() && !lock.unlocked) {
   }
 }
 
+// A boot that stays locked (wake row fired, but no credential survived the
+// fresh volume — or nobody came) must not burn compute forever: handshake
+// with the shared secret already in env and arm the stop backstop, so the
+// concierge reaps it one idle-window after boot. Unlock renews past it; a
+// user arriving late just triggers the normal wake path again.
+// (No conciergeActive() here — that reads the session token, which a locked
+// boot cannot have yet. The env presence IS the wiring check.)
+if (!lock.unlocked && process.env.CONCIERGE_SHARED_SECRET && process.env.CONCIERGE_URL) {
+  void handshakeConcierge(process.env.CONCIERGE_SHARED_SECRET).then((ok) => {
+    if (ok) {
+      renewIdleStop();
+      app.log.info("locked boot: stop backstop armed — reaped if nobody unlocks");
+    }
+  });
+}
+
 await app.listen({ port: PORT, host: "0.0.0.0" });
