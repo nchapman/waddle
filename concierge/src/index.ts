@@ -83,6 +83,11 @@ const STANDBY_NAME_RE = standbyNameRe(STANDBY_PREFIX);
 
 // ── Platform verbs (backends are ~25 lines each by design) ───────────────
 
+/** The tag every deploy boots — the pool's tag by default, so /wake and
+ * standby creates can never skew from what the client verifies (latest
+ * release of the config repo). */
+const DEPLOY_TAG = process.env.CONCIERGE_DEPLOY_TAG ?? (POOL_CAPABLE ? STANDBY_CONFIG_TAG : "");
+
 async function startInstance(instance: string): Promise<string> {
   if (BACKEND === "docker") {
     await exec("docker", ["start", instance]);
@@ -90,9 +95,13 @@ async function startInstance(instance: string): Promise<string> {
   }
   // tinfoil: deploy boots a stopped instance with its measured config.
   // Needs the CLI on PATH + TINFOIL_ADMIN_KEY in env (container build
-  // concern — see the Dockerfile).
+  // concern — see the Dockerfile). Deploy WITH the configured tag: a
+  // tagless deploy re-boots the instance's SAVED tag — version skew the
+  // client's latest-release verification correctly refuses.
+  const deployArgs = (instance: string) =>
+    DEPLOY_TAG ? ["container", "deploy", instance, "--tag", DEPLOY_TAG] : ["container", "deploy", instance];
   try {
-    const { stdout } = await exec("tinfoil", ["container", "deploy", instance], { timeout: 120_000 });
+    const { stdout } = await exec("tinfoil", deployArgs(instance), { timeout: 120_000 });
     return stdout.trim().split("\n").slice(-3).join(" | ");
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -104,7 +113,7 @@ async function startInstance(instance: string): Promise<string> {
       for (let i = 0; i < 30; i++) {
         await new Promise((r) => setTimeout(r, 2_000));
         try {
-          const { stdout } = await exec("tinfoil", ["container", "deploy", instance], { timeout: 120_000 });
+          const { stdout } = await exec("tinfoil", deployArgs(instance), { timeout: 120_000 });
           return "(zombie recovered) " + stdout.trim().split("\n").slice(-2).join(" | ");
         } catch (retry) {
           const m = retry instanceof Error ? retry.message : String(retry);
