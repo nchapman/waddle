@@ -89,16 +89,11 @@ test("grant unwrap + push + pull round-trips through the files API shape", async
   assert.equal(r2.gen, 0);
 
   // A changed machine shelves a NEW generation under a fresh id (files
-  // are immutable — rewriting the same id would be a silent no-op). The
-  // tree must be non-trivial: a fresh-boot machine (shelf already holding
-  // real state) never clobbers "latest" with an empty generation.
+  // are immutable — rewriting the same id would be a silent no-op). No
+  // bulk needed: the event log alone is the gate, so even a machine that
+  // gzips to a few KiB shelves (the old size heuristic would have
+  // mistaken it for a failed-restore boot).
   writeFileSync(join(dir, "log", "events.jsonl"), "sealed\nmore\n");
-  mkdirSync(join(dir, "workspace"), { recursive: true });
-  const noise = new Uint8Array(1 << 17);
-  for (let i = 0; i < noise.length; i += 65536) {
-    webcrypto.getRandomValues(noise.subarray(i, Math.min(i + 65536, noise.length)));
-  }
-  writeFileSync(join(dir, "workspace", "state.bin"), noise);
   const before = shelf.size;
   const r3 = await bb.pushMachineBackup();
   assert.equal(r3.pushed, true);
@@ -115,12 +110,39 @@ test("grant unwrap + push + pull round-trips through the files API shape", async
   assert.ok(restored);
   assert.equal(restored.gen, 1);
   assert.equal(readFileSync(join(dir, "log", "events.jsonl"), "utf8"), "sealed\nmore\n");
-  assert.equal(statSync(join(dir, "workspace", "state.bin")).size, 1 << 17);
   // tar preserves mtimes on extract, so the restored tree fingerprints
   // identically to what was pushed — the gate correctly skips.
   const r4 = await bb.pushMachineBackup();
   assert.equal(r4.pushed, false);
   assert.equal(r4.gen, 1);
+});
+
+test("a log-less machine never becomes latest on a populated shelf", async () => {
+  const secret = Buffer.from(webcrypto.getRandomValues(new Uint8Array(64))).toString("base64");
+  const space = "77777777-8888-9999-0000-111111111111";
+  await bb.setBbGrant(secret, { ...(await clientGrant(secret)), spaceId: space });
+  mkdirSync(join(dir, "log"), { recursive: true });
+  writeFileSync(join(dir, "log", "events.jsonl"), "history\n");
+  const r1 = await bb.pushMachineBackup();
+  assert.equal(r1.pushed, true);
+  assert.equal(r1.gen, 0);
+
+  // Failed-restore boot: the volume came back empty (log gone), the
+  // fingerprint changed, but the shelf still holds real state — pushing
+  // would make an empty generation "latest" and starve the next cold
+  // boot of its history.
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  const r2 = await bb.pushMachineBackup();
+  assert.equal(r2.pushed, false);
+
+  // A virgin machine on an EMPTY shelf still shelves itself — someone
+  // has to create gen 0.
+  const fresh = "aaaaaaa2-bbbb-cccc-dddd-eeeeeeeeeeee";
+  await bb.setBbGrant(secret, { ...(await clientGrant(secret)), spaceId: fresh });
+  const r3 = await bb.pushMachineBackup();
+  assert.equal(r3.pushed, true);
+  assert.equal(r3.gen, 0);
 });
 
 test("pruning keeps the manifest log and kills only old slots; restore walks down", async () => {

@@ -21,8 +21,11 @@
  */
 import { webcrypto } from "node:crypto";
 import { createHash, randomBytes } from "node:crypto";
+import { statSync } from "node:fs";
+import { join } from "node:path";
 import { derive, seal, open } from "./keys.js";
 import { createArchive, restoreArchive, machineFingerprint } from "./archive.js";
+import { DATA_DIR } from "./state.js";
 
 const subtle = webcrypto.subtle;
 
@@ -229,11 +232,20 @@ export async function pushMachineBackup(
   const fp = machineFingerprint();
   log?.({ fp: fp.slice(0, 12), last: state.lastPushedDigest?.slice(0, 12) ?? null, size: a.size });
   if (fp === state.lastPushedDigest) return { pushed: false, gen: state.gen, digest: fp };
-  // A failed restore boots a fresh, near-empty machine — shelving it would
-  // make "latest" an empty generation and starve the next cold boot of the
-  // real state (older gens still exist but nothing walks back to them).
-  // First run (gen -1) is exempt: an empty machine must shelf itself once.
-  if (state.gen >= 0 && a.size < 1 << 16) {
+  // A failed restore boots a fresh machine whose event log is empty — the
+  // sealed history is the irreplaceable state, so a log-less machine must
+  // never become "latest" while the shelf holds real generations (older
+  // gens still exist, but discovery takes the newest). A virgin machine on
+  // an empty shelf is exempt: someone has to shelve gen 0. Sized on the
+  // log, not the tarball — a fully-populated machine gzips under 64 KiB
+  // once Chromium's component payload is excluded.
+  let logBytes = 0;
+  try {
+    logBytes = statSync(join(DATA_DIR, "log", "events.jsonl")).size;
+  } catch {
+    logBytes = 0;
+  }
+  if (logBytes === 0 && (state.gen >= 0 || (await latestShelfGen()) >= 0)) {
     return { pushed: false, gen: state.gen, digest: fp };
   }
   // Slot first, manifest second: a manifest never names a missing slot;
