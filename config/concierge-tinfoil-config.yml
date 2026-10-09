@@ -1,0 +1,34 @@
+cvm-version: 0.14.7
+cpus: 2
+memory: 2048
+
+containers:
+  - name: "waddle-concierge"
+    image: "ghcr.io/nchapman/waddle-concierge@sha256:99808d31fae275a2117254539d2f8408d7e13bed8c06da5955e9c4c84610142b"
+    networks: [control]
+    env:
+      - CONCIERGE_PORT: "8081"
+      - CONCIERGE_BACKEND: "tinfoil"
+      - CONCIERGE_ALLOWED_INSTANCES: "waddle"
+      - CONCIERGE_ALLOWED_ORIGINS: "http://localhost:5173"
+      - NODE_ENV: "production"
+    secrets:
+      - TINFOIL_ADMIN_KEY
+      - CONCIERGE_TOKEN
+
+networks:
+  control:
+    egress: allowlist
+    allow:
+      - api.tinfoil.sh   # the only verb surface: container deploy/stop/list
+
+shim:
+  upstream-port: 8081
+  paths:
+    - /health
+    - /status
+    - /handshake
+    - /timer
+    - /wake
+  origins:
+    - http://localhost:5173

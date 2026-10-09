@@ -226,13 +226,17 @@ app.post("/unlock", async (request, reply) => {
     // Timer-table handshake: the bb grant token is fresh right now — the
     // one moment the agent can authenticate to the concierge with it
     // (session tokens thereafter). Dev falls back to the shared secret.
-    const bearer = bb?.token ?? process.env.CONCIERGE_SHARED_SECRET;
-    if (bearer) {
-      void handshakeConcierge(bearer).then((ok) => {
-        if (ok) renewIdleStop();
-        app.log.info({ ok }, "concierge handshake");
-      });
-    }
+    // Handshake: prefer the fresh bb JWT (JWKS-verified concierges); fall
+    // back to the shared secret (tonight's concierge has no JWKS). Whatever
+    // worked is what a wake-boot should re-try, so resolve it first.
+    const sharedSecret = process.env.CONCIERGE_SHARED_SECRET;
+    const bearer = await (async () => {
+      if (bb?.token && (await handshakeConcierge(bb.token))) return bb.token;
+      if (sharedSecret && (await handshakeConcierge(sharedSecret))) return sharedSecret;
+      return undefined;
+    })();
+    app.log.info({ ok: bearer !== null, via: bearer === bb?.token ? "jwt" : bearer ? "shared-secret" : "none" }, "concierge handshake");
+    if (bearer) renewIdleStop();
     // Wake autonomy: remember how to boot alone, so the concierge's
     // wake-timers find a machine that can actually run its schedule.
     if (autonomyEnabled()) {
