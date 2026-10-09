@@ -343,7 +343,11 @@ const pool: Pool | null = POOL_CAPABLE
         },
         destroy: async (name) => {
           await restInstance(name);
-          await exec("tinfoil", ["container", "delete", name], { timeout: 60_000 }).catch(() => undefined);
+          await exec("tinfoil", ["container", "delete", name], { timeout: 60_000 });
+          // The machine is gone: free the name. Recycling keeps the standby
+          // namespace tiny (standby-1, standby-2…) so the operator's egress
+          // allowlist can name every possible probe host exactly.
+          poolNames.delete(name);
         },
         health: instanceHealthy,
         urlFor: (name) => `https://${name}.${DOMAIN_BASE}`,
