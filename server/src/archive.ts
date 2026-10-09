@@ -15,7 +15,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { DATA_DIR } from "./state.js";
 
@@ -155,7 +154,12 @@ function detarBody(body: Buffer): Buffer {
 }
 
 export function restoreArchive(body: Buffer): { files: number } {
-  const slotPath = join(tmpdir(), `waddle-slot-${process.pid}-${Date.now()}`);
+  // The slot lands in DATA_DIR, never os.tmpdir(): tinfoil mounts /tmp
+  // read-only, and a restore that can't stage its slot dies with EROFS
+  // (docker/compose never catches this — /tmp is writable there).
+  const tmpRoot = join(DATA_DIR, "tmp");
+  mkdirSync(tmpRoot, { recursive: true });
+  const slotPath = join(tmpRoot, `waddle-slot-${process.pid}-${Date.now()}`);
   writeFileSync(slotPath, detarBody(body));
   try {
     return restoreFrom(slotPath);
