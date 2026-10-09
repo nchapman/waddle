@@ -29,7 +29,7 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createTable } from "./table.js";
-import { createPool, envInt, standbyNameRe, isUnclaimed, type Pool } from "./pool.js";
+import { createPool, envInt, standbyNameRe, type Pool } from "./pool.js";
 
 const exec = promisify(execFile);
 
@@ -147,28 +147,35 @@ async function listInstances(): Promise<string[]> {
     .flatMap((n) => (typeof n === "string" && n && !n.startsWith("NAME") ? [n] : []));
 }
 
-/** Plain health probe — no attestation needed for "is it up" (the
- *  client's SecureClient does the real verification). */
-async function instanceHealth(instance: string): Promise<{ locked?: boolean } | null> {
-  if (!DOMAIN_BASE) return null;
-  try {
-    const res = await fetch(`https://${instance}.${DOMAIN_BASE}/health`, { signal: AbortSignal.timeout(4_000) });
-    return res.ok ? ((await res.json()) as { locked?: boolean }) : null;
-  } catch {
-    return null;
+/** Platform status by instance name, memoized briefly — the pool and the
+ *  leftover scan share one `container list` per tick. Health of a standby
+ *  = "Running" (the control plane is the only egress the concierge needs
+ *  — probing machine URLs would require allowlisting hostnames that don't
+ *  exist until the machines do, and the allowlist pins IPs at boot). */
+let statusCache: { at: number; map: Map<string, string> } | null = null;
+async function instanceStatuses(): Promise<Map<string, string>> {
+  if (statusCache && Date.now() - statusCache.at < 10_000) return statusCache.map;
+  const { stdout } = await exec("tinfoil", ["container", "list"], { timeout: 60_000 });
+  const map = new Map<string, string>();
+  for (const line of stdout.split("\n").slice(1)) {
+    const cols = line.trim().split(/\s+/);
+    if (cols.length >= 2 && cols[0] && cols[0] !== "NAME") map.set(cols[0]!, cols[1]!);
   }
+  statusCache = { at: Date.now(), map };
+  return map;
 }
 
-async function instanceHealthy(instance: string): Promise<boolean> {
-  return (await instanceHealth(instance)) !== null;
-}
-
-/** Health-first start: a machine that already answers (dozing, live, or
- *  a warm standby the wake row targeted) needs nothing — the old path
- *  would have run the zombie stop-deploy dance on a healthy machine. */
+/** Health-first start: a machine the platform reports Running (dozing,
+ *  live, or a warm standby the wake row targeted) needs nothing — the old
+ *  path would have run the zombie stop-deploy dance on a healthy machine. */
 async function ensureInstance(instance: string): Promise<string> {
-  if (BACKEND === "tinfoil" && (await instanceHealthy(instance))) {
-    return `already running: ${instance}`;
+  if (BACKEND === "tinfoil") {
+    try {
+      const st = (await instanceStatuses()).get(instance);
+      if (st === "Running") return `already running: ${instance}`;
+    } catch {
+      /* status unknown — fall through to the deploy path */
+    }
   }
   return startInstance(instance);
 }
@@ -349,7 +356,7 @@ const pool: Pool | null = POOL_CAPABLE
           // allowlist can name every possible probe host exactly.
           poolNames.delete(name);
         },
-        health: instanceHealthy,
+        health: async (name) => (await instanceStatuses().catch(() => new Map())).get(name) === "Running",
         urlFor: (name) => `https://${name}.${DOMAIN_BASE}`,
         nextName: () => {
           for (let i = 1; ; i++) {
@@ -363,26 +370,23 @@ const pool: Pool | null = POOL_CAPABLE
     )
   : null;
 if (pool) {
-  /** Leftover scan: adopt UNCLAIMED standbys found on the platform (a
-   *  concierge restart must never orphan a billing machine — nor adopt a
-   *  machine a user already claimed: locked = blank, unlocked = live
-   *  session that the pool must not touch). Runs at boot and
+  /** Leftover scan after a reboot (our memory is wiped): adopt ONLY
+   *  machines the platform reports Stopped — a stopped standby is
+   *  provably session-less (state lives on the shelf; the claimant's
+   *  client will simply be assigned another machine). Running ones are
+   *  never touched: unknown claim status, and only their own gates,
+   *  grace rows, and the hard sweep own them. Runs at boot and
    *  periodically — a failed scan retries instead of waiting for the
    *  next process restart. */
   const scanLeftovers = () =>
-    listInstances()
-      .then(async (names) => {
+    instanceStatuses()
+      .then(async (statuses) => {
         const leftovers: string[] = [];
-        for (const n of names) {
+        for (const [n, st] of statuses) {
           if (!STANDBY_NAME_RE.test(n) || poolNames.has(n)) continue;
           poolNames.add(n);
-          const h = await instanceHealth(n);
-          if (h === null || isUnclaimed(h)) {
-            // stopped/dead or still-locked (blank): pool property — adopt
-            leftovers.push(n);
-          } else {
-            app.log.info({ name: n }, "pool: leftover is claimed (unlocked) — left alone");
-          }
+          if (st === "Stopped") leftovers.push(n);
+          else app.log.info({ name: n, status: st }, "pool: leftover is live — left alone");
         }
         if (leftovers.length > 0) pool.adopt(leftovers);
         app.log.info({ adopted: leftovers.length }, "pool: platform standby scan");

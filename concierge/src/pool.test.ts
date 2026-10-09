@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createPool, envInt, standbyNameRe, isUnclaimed, type PoolDeps } from "./pool.js";
+import { createPool, envInt, standbyNameRe, type PoolDeps } from "./pool.js";
 
 interface Harness {
   deps: PoolDeps;
@@ -182,9 +182,4 @@ describe("warm-standby pool", () => {
     assert.ok(!weird.test("preXfix-1"));
   });
 
-  it("isUnclaimed: only a locked machine is pool property", () => {
-    assert.equal(isUnclaimed({ locked: true }), true, "locked = blank standby");
-    assert.equal(isUnclaimed({ locked: false }), false, "unlocked = someone's session");
-    assert.equal(isUnclaimed(null), false, "no answer = not adoptable by this predicate");
-  });
 });

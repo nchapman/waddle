@@ -56,13 +56,6 @@ export interface Pool {
   tracked(): PoolMachine[];
 }
 
-/** A leftover standby is adoptable ONLY while still locked (blank). One
- *  reporting locked:false was claimed by a user — the pool must never
- *  re-assign or reap a machine that is somebody's session. */
-export function isUnclaimed(health: { locked?: boolean } | null): boolean {
-  return health?.locked === true;
-}
-
 /** Parse an int env var with a floor; malformed values fall back to the
  *  default — a NaN interval would hot-loop and a NaN TTL would silently
  *  disable the budget cap the pool exists to enforce. (In pool.ts so the
