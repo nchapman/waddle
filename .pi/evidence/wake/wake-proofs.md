@@ -169,3 +169,40 @@ re-measure (the secrets list is part of the measurement), so the TOFU
 re-pin on v0.0.40 was expected. Remaining proof: the unattended
 ceremony (schedule, sleep, wake row fires, task runs with no unlock,
 re-sleep).
+
+## Warm-standby pool: design validated (2026-10-09 21:52)
+
+The multi-user shape: concierge + N warm standbys (blank, locked,
+env-inferred, zero user state). A user arrival gets a standby ASSIGNED
+(URL handout); their secret makes it theirs (unlock + shelf restore);
+a replacement standby boots in the background. TTL drops unclaimed
+warm machines. Proven live, end to end, with zero pool code:
+
+- `tinfoil container create waddle-standby-1 --repo nchapman/waddle-config
+  --tag v0.0.40` — second instance from the same config, 77s to live.
+- Client repointed at it: TOFU pin HELD (same config = same measurement,
+  no re-pin) — attestation travels across instances.
+- Unlock on the standby restored the user's full state (gen 38, 29
+  events — including an earlier session's chat) from a machine that
+  booted blank 56s earlier; handshake ok; initial push ok.
+- Latency: page load to live chat ~17s (10s attest+unlock-screen, 7s
+  unlock+restore) vs ~87s via the deploy path. The 77s replacement
+  boot hides behind the user's session.
+
+Build notes (concierge grows a tiny scheduler, still metadata-only):
+- machines table {name, state: warm|serving|stopped, claimed_at, ttl};
+  /assign endpoint; TTL sweeper; background replacement boots;
+  health-first wake (a wake row finding a live machine no-ops instead
+  of the zombie stop-deploy dance).
+- Env knobs, per request: WARM_POOL_SIZE (default 1),
+  STANDBY_TTL_MINUTES (default 60), STANDBY_CREATE_TIMEOUT_S.
+- Per-instance WADDLE_INSTANCE (tinfoil create --variable) — pool
+  machines must not handshake under a colliding instance name (the
+  experiment's standby handshook as "waddle" and clobbered the real
+  machine's stop row; harmless tonight, a real bug in a pool).
+- Doze (single-user warm window) is subsumed: a pool of one. Doze is
+  cheaper at k=1 user; the pool amortizes 1/k machines per user as k
+  grows.
+- Scheduled tasks still can't read the user's shelf unattended (the
+  escrow problem is unchanged — pool solves return latency, not
+  unattended data access).
