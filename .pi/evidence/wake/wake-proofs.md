@@ -97,3 +97,75 @@ was 120 s (a dev convenience that shipped), making the race certain.
   locked-idle → unlock → must survive to idle-from-unlock, then sleep
   gracefully). Green on v0.0.39 (unlock 20:56:01 → sleep 20:58:09,
   event delivered to the silent client, exit 0).
+
+## Wake latency, measured (2026-10-09, v0.0.39/v0.0.40)
+
+Page-load → chat-ready, resource-timed from the browser:
+
+| phase | t | cost |
+|---|---|---|
+| probe fails, auto-wake POST /wake | +2.2s | — |
+| **tinfoil container deploy (via concierge)** | +2.2→76.2s | **74s** |
+| first health poll OK | +78.2s | ~2s cadence |
+| attestation → unlock screen | ~+80s | ~2s |
+| unlock (bb grant + shelf restore + handshake) | +127.1s | **6.7s** |
+
+The platform deploy is 85–90% of the whole path (three samples: 42s
+human-timed, 73s CLI-timed, 74s concierge-timed — concierge adds ~1s,
+deploy cost is platform-side). Client-side sequencing (probe, poll
+cadence, serialized attestation) is ~6s total — polish, not the lever.
+Real levers: warm window (doze state, hold the exit N min), scheduled
+pre-wake rows, or a standby instance (doubles idle spend). Also proven
+tonight: the manual 💤 sleep button (click 21:22:19 → Stopped 21:23:06,
+graceful checkpoint + flare), and a second user's uncoordinated wake.
+
+## Instance-provided inference (v0.0.40)
+
+TINFOIL_API_KEY moved from client-delivered-at-unlock to a tinfoil org
+secret in the config's secrets list — the server already read
+process.env.TINFOIL_API_KEY (initAgent just sets it), so zero code
+changed. Proven live: unlock with an EMPTY key field on v0.0.40 →
+agent answers ("17×23 → 391") on the boot-time env key. This is what
+makes unattended wake-boots possible: a scheduled task can now think
+without any human unlocking. The client field remains as an optional
+override (BYOK) — blank means instance-provided. Note: config changes
+re-measure (secrets list is part of the measurement) → TOFU re-pin on
+v0.0.40 was expected. Remaining proof: the unattended ceremony
+(schedule → sleep → wake row → task runs, no unlock, re-sleep).
+
+## Wake latency, measured (2026-10-09, v0.0.39/v0.0.40)
+
+Page-load to chat-ready, resource-timed from the browser:
+
+| phase | t | cost |
+|---|---|---|
+| probe fails, auto-wake POST /wake | +2.2s | - |
+| tinfoil container deploy (via concierge) | +2.2 to 76.2s | 74s |
+| first health poll OK | +78.2s | ~2s cadence |
+| attestation to unlock screen | ~+80s | ~2s |
+| unlock (bb grant + shelf restore + handshake) | +127.1s | 6.7s |
+
+The platform deploy is 85-90% of the whole path (three samples: 42s
+human-timed, 73s CLI-timed, 74s concierge-timed — the concierge adds
+~1s; deploy cost is platform-side). Client-side sequencing (probe,
+poll cadence, serialized attestation) is ~6s total — polish, not the
+lever. Real levers: warm window (doze state, hold the exit N min),
+scheduled pre-wake rows, or a standby instance (doubles idle spend).
+Also proven tonight: the manual sleep button (click 21:22:19 to
+Stopped 21:23:06, graceful checkpoint + flare) and a second user's
+uncoordinated wake+unlock.
+
+## Instance-provided inference (v0.0.40)
+
+TINFOIL_API_KEY moved from client-delivered-at-unlock to a tinfoil org
+secret in the config secrets list — the server already read
+process.env.TINFOIL_API_KEY (initAgent just sets it), so zero code
+changed. Proven live: unlock with an EMPTY key field on v0.0.40, agent
+answers (17x23 -> 391) on the boot-time env key. This is what makes
+unattended wake-boots possible: a scheduled task can now think without
+any human unlocking. The client field remains as an optional override
+(BYOK) — blank means instance-provided. Note: config changes
+re-measure (the secrets list is part of the measurement), so the TOFU
+re-pin on v0.0.40 was expected. Remaining proof: the unattended
+ceremony (schedule, sleep, wake row fires, task runs with no unlock,
+re-sleep).

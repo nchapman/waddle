@@ -4,7 +4,7 @@ memory: 8192
 
 containers:
   - name: "waddle"
-    image: "ghcr.io/nchapman/waddle@sha256:7e230fe71fa3fa2ccdab6daecfd6cbcb29deff62fe06407f8b0dfe723b6c03e4"
+    image: "ghcr.io/nchapman/waddle@sha256:d9314fae297096be53f4ee3e42d34db4da23ba6f7e80468e45a907ca75bd3d9f"
     networks: [outbound]
     env:
       - PORT: "8080"
@@ -12,8 +12,10 @@ containers:
       - CONCIERGE_URL: "https://waddle-concierge.ddg-waddle.containers.tinfoil.dev"
       - WADDLE_INSTANCE: "waddle"
       - WADDLE_WAKE_AUTONOMY: "1"
+      - WADDLE_IDLE_MS: "600000"
     secrets:
       - CONCIERGE_SHARED_SECRET
+      - TINFOIL_API_KEY
 
 networks:
   outbound:
