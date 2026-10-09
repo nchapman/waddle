@@ -31,12 +31,17 @@ const VERSION = "0.0.1";
 
 // Ring buffer of recent log lines — tinfoil gives us no logs/exec, so the
 // session-gated /debug/log endpoint is the only window into a live enclave.
+// Secrets never enter the ring: the default request serializer logs full
+// URLs, and the client carries its session bearer in the /ws query string —
+// ring lines are expected to be copied into bug reports and screenshots.
 const logRing: string[] = [];
 const RING_MAX = 400;
+const REDACT_TOKEN = /([?&\s]token=)[^"&\s]+/g;
+const REDACT_AUTH = /([Aa]uthorization"?:? ?"?Bearer )[^"\s]+/g;
 const tee = {
   write: (line: string) => {
     process.stdout.write(line);
-    logRing.push(line.trimEnd());
+    logRing.push(line.replace(REDACT_TOKEN, "$1<redacted>").replace(REDACT_AUTH, "$1<redacted>").trimEnd());
     if (logRing.length > RING_MAX) logRing.shift();
   },
 };

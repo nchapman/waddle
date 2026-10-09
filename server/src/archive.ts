@@ -160,8 +160,10 @@ export function restoreArchive(body: Buffer): { files: number } {
   const tmpRoot = join(DATA_DIR, "tmp");
   mkdirSync(tmpRoot, { recursive: true });
   const slotPath = join(tmpRoot, `waddle-slot-${process.pid}-${Date.now()}`);
-  writeFileSync(slotPath, detarBody(body));
   try {
+    // Inside the try: a failed/partial write must never leak a partial
+    // tarball onto the persistent volume.
+    writeFileSync(slotPath, detarBody(body));
     return restoreFrom(slotPath);
   } finally {
     rmSync(slotPath, { force: true });
