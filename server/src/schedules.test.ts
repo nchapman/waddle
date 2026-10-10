@@ -7,8 +7,11 @@ import { join } from "node:path";
 // schedules.ts reads DATA_DIR at import (from state.js) — set env first.
 const DIR = mkdtempSync(join(tmpdir(), "waddle-sched-"));
 process.env.DATA_DIR = DIR;
-const { createSchedule, listSchedules, cancelSchedule, nextDueMs, dueSchedules, dueSoon, markRun, activeSchedules } =
-  await import("./schedules.js");
+import type { Schedule } from "./schedules.js";
+const {
+  createSchedule, listSchedules, cancelSchedule, nextDueMs, dueSchedules,
+  dueSoon, markRun, activeSchedules, replaceAllSchedules, seedSchedules,
+} = await import("./schedules.js");
 
 test.after(() => rmSync(DIR, { recursive: true, force: true }));
 
@@ -75,4 +78,19 @@ test("persistence round-trips through the file (shelved with the machine)", () =
   createSchedule({ title: "persist", prompt: "p", at: "2027-01-01T00:00:00Z" });
   const raw = JSON.parse(readFileSync(join(DIR, "schedules.json"), "utf8")) as Array<{ title: string }>;
   assert.ok(raw.some((s) => s.title === "persist"));
+});
+
+test("seedSchedules merges by id (credential rows are fresher) and adds new rows", () => {
+  const a = createSchedule({ title: "keep", prompt: "p", at: "2030-01-01T00:00:00Z" });
+  const stale = { ...a, lastRun: "2020-01-01T00:00:00Z", enabled: false }; // the credential's truth
+  seedSchedules([stale, { id: "new-1", title: "chained", prompt: "p2", enabled: true, createdAt: "2030-01-01T00:00:00Z", everyMs: 3_600_000 } as Schedule]);
+  const all = listSchedules();
+  assert.equal(all.find((x) => x.id === a.id)?.enabled, false, "credential row replaced the local copy");
+  assert.ok(all.some((x) => x.id === "new-1"), "postbox-only row added (agent chaining survives)");
+});
+
+test("replaceAllSchedules overwrites wholesale (the postbox merge writer)", () => {
+  replaceAllSchedules([{ id: "only", title: "t", prompt: "p", enabled: false, createdAt: "2030-01-01T00:00:00Z" } as Schedule]);
+  assert.deepEqual(listSchedules().map((x) => x.id), ["only"]);
+  assert.equal(listSchedules()[0]?.enabled, false, "done-marker written as-is");
 });

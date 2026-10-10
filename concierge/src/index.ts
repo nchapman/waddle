@@ -189,7 +189,10 @@ async function ensureInstance(instance: string): Promise<string> {
 
 // ── The table (semantics live in table.ts; platform verbs fire here) ─────
 
-const app = fastify({ logger: true });
+// bodyLimit 8MiB: the postbox carries one autonomous run's sealed tail
+// (capped at 200 events client-side); the default 1MiB would reject a
+// sizeable run's mail at the gateway.
+const app = fastify({ logger: true, bodyLimit: 8 * 1024 * 1024 });
 
 const table = createTable(
   (instance) => {
@@ -425,7 +428,9 @@ app.post<{
     app.log.info({ instance }, "wake handoff disarmed");
     return { ok: true, cleared: true };
   }
-  if (!credential || typeof credential !== "object") return reply.code(400).send({ error: "credential payload required" });
+  if (!credential || typeof credential !== "object" || Object.keys(credential).length === 0) {
+    return reply.code(400).send({ error: "credential payload required (non-empty)" });
+  }
   const res = handoff.arm(instance, credential, ttl_ms);
   app.log.info({ instance, expires_in_ms: res.expires_in_ms, keys: Object.keys(credential) }, "wake handoff armed (memory-only)");
   return { ok: true, ...res };
@@ -457,10 +462,13 @@ app.post<{ Body: { instance?: string } }>("/handoff/pull", async (req, reply) =>
  *  open. External-tier auth is fine — a forged row is undecryptable
  *  junk, not a credential. */
 app.post<{ Body: { instance?: string; blob?: string; clear?: boolean } }>("/handoff/post", async (req, reply) => {
-  const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
-  const { instance, blob, clear } = req.body ?? {};
-  if (!allowedInstance(instance)) return reply.code(403).send({ error: "instance not allowed" });
-  if (!(await verifyExternal(token))) return reply.code(401).send({ error: "unauthorized" });
+  // SESSION tier (like /timer): both writers — the autonomous machine at
+  // re-sleep and the unlocking machine at collection — handshook first.
+  // A bearer confusion here (session token sent to an external-tier
+  // endpoint) once 401'd AND killed the sender's session (review finding).
+  const instance = await authorize(req);
+  if (!instance) return reply.code(401).send({ error: "unauthorized" });
+  const { blob, clear } = req.body ?? {};
   reply.header("cache-control", "no-store");
   if (clear) {
     postbox.clear(instance);
@@ -475,10 +483,8 @@ app.post<{ Body: { instance?: string; blob?: string; clear?: boolean } }>("/hand
 /** Pull the postbox: the machine at the next unlock (which can derive the
  *  seal key) collects and clears the mail. One delivery. */
 app.post<{ Body: { instance?: string } }>("/handoff/post/pull", async (req, reply) => {
-  const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
-  const instance = req.body?.instance;
-  if (!allowedInstance(instance)) return reply.code(403).send({ error: "instance not allowed" });
-  if (!(await verifyExternal(token))) return reply.code(401).send({ error: "unauthorized" });
+  const instance = await authorize(req); // session tier — see /handoff/post
+  if (!instance) return reply.code(401).send({ error: "unauthorized" });
   reply.header("cache-control", "no-store");
   const blob = postbox.pull(instance);
   if (blob === null) return reply.code(404).send({ error: "no mail" });

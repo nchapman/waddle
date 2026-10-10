@@ -485,9 +485,20 @@ async function sleep(reason: string): Promise<never> {
     // marked rows stop the duplicate re-fire.
     if (autonomous && armAutonomyKey && log) {
       try {
-        const blob = sealPostbox(armAutonomyKey, INSTANCE, { events: log.all, schedules: listSchedules() });
+        // Tail-cap: a scheduled run is one turn (tens of events), but a
+        // pathological transcript must not blow the gateway body limit.
+        // If it ever truncates, the mail says so — honest, never silent.
+        const MAX_EVENTS = 200;
+        let events = log.all;
+        if (events.length > MAX_EVENTS) {
+          events = [
+            { type: "message", role: "user", text: `[system] postbox truncated — ${events.length - MAX_EVENTS} of ${events.length} events dropped (tail kept)`, at: new Date().toISOString() },
+            ...events.slice(-MAX_EVENTS),
+          ];
+        }
+        const blob = sealPostbox(armAutonomyKey, INSTANCE, { events, schedules: listSchedules() });
         const ok = await postPostbox(blob);
-        if (ok) app.log.info({ events: log.all.length, bytes: blob.length }, "postbox posted (sealed) at autonomous sleep");
+        if (ok) app.log.info({ events: events.length, bytes: blob.length }, "postbox posted (sealed) at autonomous sleep");
         else app.log.warn("postbox post failed — unattended output degrades to re-fire delivery");
       } catch (e) {
         app.log.warn({ err: String(e) }, "postbox post failed — unattended output degrades to re-fire delivery");
@@ -740,7 +751,7 @@ if (autonomyEnabled() && !lock.unlocked) {
       // never consulted or clobbered. Inference is instance-provided
       // (env TINFOIL_API_KEY) — no key material rides the credential.
       const aut = lock.unlockAutonomous(cred.autonomyKey);
-      log = new EventLog(aut.logKey, lock.storage);
+      log = new EventLog(aut.logKey, lock.storage, "events.autonomous.jsonl");
       // Seed the due work: every deploy is a fresh volume, so the schedule
       // table travels inside the credential.
       if (cred.schedules) seedSchedules(cred.schedules as Schedule[]);

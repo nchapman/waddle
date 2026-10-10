@@ -43,6 +43,12 @@ describe("wake handoff store", () => {
     assert.equal((s.release("waddle") as { reason?: string }).reason, "absent");
   });
 
+  it("rejects empty credential bags (an arm must carry real payload)", () => {
+    const { s } = store();
+    assert.throws(() => s.arm("waddle", {}));
+    assert.throws(() => s.arm("waddle", undefined as unknown as Record<string, unknown>));
+  });
+
   it("clamps ttl overrides into [60s, max]", () => {
     const { s } = store({ ttlMs: 600_000 });
     assert.equal(s.arm("a", CRED, 1).expires_in_ms, 60_000);

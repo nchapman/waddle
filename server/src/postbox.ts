@@ -41,12 +41,15 @@ export function openPostbox(autonomyKeyB64: string, instance: string, blobB64: s
   return JSON.parse(open(key, Buffer.from(blobB64, "base64"), AAD(instance)).toString()) as PostboxPayload;
 }
 
-/** Merge schedule tables: postbox rows are newer truth (they carry the
- *  unattended run's done-markers and recurring realignments) — they
- *  replace by id; local rows not mentioned survive untouched. */
+/** Merge schedule tables as an id-UNION: postbox rows are newer truth
+ *  (done-markers, realignments) and replace by id; postbox-only rows —
+ *  schedules the unattended run CREATED (agent chaining) — are added;
+ *  local rows not mentioned survive untouched. (A replace-only merge
+ *  dropped chained creations and resurrected unattended cancellations.) */
 export function mergeSchedules(local: Schedule[], postbox: Schedule[]): Schedule[] {
-  const byId = new Map(postbox.map((s) => [s.id, s]));
-  return local.map((s) => byId.get(s.id) ?? s);
+  const byId = new Map(local.map((s) => [s.id, s]));
+  for (const s of postbox) byId.set(s.id, s); // postbox wins per id
+  return [...byId.values()];
 }
 
 /** Rows worth escrowing: enabled schedules only, serialized plainly — the
