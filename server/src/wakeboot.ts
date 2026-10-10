@@ -1,32 +1,31 @@
 /**
  * Wake autonomy: a boot credential for unattended scheduled runs.
  *
- * A wake-booted machine starts locked with no inference key — but the
- * concierge rebooted it precisely because work is due. When the user
- * opted in (WADDLE_WAKE_AUTONOMY=1), unlock arms a credential that the
- * next boot consumes to self-unlock: run the due work, checkpoint, die.
+ * A wake-booted machine starts locked with no keys — but the concierge
+ * rebooted it precisely because work is due. When the user opted in
+ * (WADDLE_WAKE_AUTONOMY=1), unlock arms a credential that the next boot
+ * consumes to self-unlock: run the due work, post the results, die.
  *
- * Threat-model placement: the file lives in DATA_DIR — the same store the
- * log is sealed in and the shelf encrypts wholesale. Dev compose mounts it
- * as a plain volume (your own machine); prod rides the encrypted shelf.
- * In prod the real escrow is the concierge handoff (memory-only, see
- * concierge.ts) — the file is read only as a dev fallback at boot.
- * A stale credential (rotated secret) fails the normal unlock path and is
- * cleared — the boot falls through to the regular locked ceremony, so it
- * can never brick the machine.
+ * The credential is SCHEDULE-SCOPED: an autonomy subkey derived from the
+ * master (never the master itself), plus the due schedule rows — every
+ * deploy is a fresh volume, so the work travels with the key. The escrow
+ * of record is the concierge handoff (memory-only); this file is the dev
+ * fallback (mounted DATA_DIR) and is read only at boot. A stale
+ * credential (rotated secret) just yields a useless subkey session — the
+ * user unlock path is untouched — and is cleared on first user unlock.
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { Schedule } from "./schedules.js";
 
 const DATA_DIR = process.env.DATA_DIR ?? "/tmp/waddle-data";
 const WAKE_FILE = join(DATA_DIR, "wake-credential.json");
 
 export interface WakeCredential {
-  secret: string;
-  inferenceKey?: string;
-  /** Best bearer we had at arm time: bb grant token (short TTL) or the dev
-   *  shared secret. Absent/stale = work still runs, death flare doesn't. */
-  conciergeBearer?: string;
+  /** HKDF(master,"autonomy") — unlocks the machine for scheduled work only. */
+  autonomyKey: string;
+  /** The due work: schedule rows to seed the ticker on a blank volume. */
+  schedules?: Schedule[];
 }
 
 export function autonomyEnabled(): boolean {
@@ -42,7 +41,7 @@ export function readWakeCredential(): WakeCredential | null {
   if (!existsSync(WAKE_FILE)) return null;
   try {
     const cred = JSON.parse(readFileSync(WAKE_FILE, "utf8")) as WakeCredential;
-    return typeof cred.secret === "string" && cred.secret ? cred : null;
+    return typeof cred.autonomyKey === "string" && cred.autonomyKey ? cred : null;
   } catch {
     return null;
   }

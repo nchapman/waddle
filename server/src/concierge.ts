@@ -84,24 +84,29 @@ export async function deathFlare(): Promise<void> {
 }
 
 /** Wake-autonomy escrow: park the boot credential in the concierge's
- *  MEMORY (never on this machine's ephemeral disk). TTL is the NEXT due
- *  schedule + margin (SME review): the escrow exists to serve a schedule,
- *  so it stands exactly as long — not 7 days. Re-armed at every unlock
- *  AND at the sleep gate, so recurring schedules stay covered without a
- *  long-lived row. */
-export async function armHandoff(cred: { secret: string; inferenceKey?: string }, bearer: string, ttlMs?: number): Promise<boolean> {
-  const r = await post<{ ok: boolean }>("/handoff", { ...cred, ttl_ms: ttlMs }, bearer);
+ *  MEMORY (never on this machine's ephemeral disk). The credential is an
+ *  opaque bag — today `{ autonomyKey, schedules[] }`: a schedule-scoped
+ *  derived key (never the master) plus the due work itself. TTL is the
+ *  NEXT due schedule + margin (SME review): the escrow exists to serve a
+ *  schedule, so it stands exactly as long — not 7 days. Re-armed at every
+ *  unlock AND at the sleep gate, so recurring schedules stay covered
+ *  without a long-lived row. */
+export async function armHandoff(credential: Record<string, unknown>, bearer: string, ttlMs?: number): Promise<boolean> {
+  const r = await post<{ ok: boolean }>("/handoff", { credential, ttl_ms: ttlMs }, bearer);
   return r?.ok === true;
+}
+
+export interface PulledCredential {
+  autonomyKey?: string;
+  schedules?: Array<Record<string, unknown>>;
+  [k: string]: unknown;
 }
 
 /** The wake-boot side of the escrow: ask the concierge for the
  *  credential. POST (no caching, no URL-borne secrets). Auth is the env
  *  shared secret — a locked boot has no session token, exactly like the
  *  locked-boot backstop handshake. */
-export async function pullHandoff(): Promise<{
-  secret: string;
-  inferenceKey?: string;
-} | null> {
+export async function pullHandoff(): Promise<PulledCredential | null> {
   if (!CONCIERGE_URL) return null;
   try {
     const res = await fetch(`${CONCIERGE_URL}/handoff/pull`, {
@@ -112,11 +117,28 @@ export async function pullHandoff(): Promise<{
     });
     log("POST /handoff/pull", { status: res.status });
     if (!res.ok) return null;
-    const row = (await res.json()) as { secret?: string; inferenceKey?: string };
-    if (typeof row.secret !== "string" || !row.secret) return null;
-    return { secret: row.secret, inferenceKey: row.inferenceKey };
+    const row = (await res.json()) as { credential?: PulledCredential };
+    if (!row.credential || typeof row.credential !== "object") return null;
+    return row.credential;
   } catch (e) {
     log("POST /handoff/pull failed", { err: String(e) });
     return null;
   }
+}
+
+/** Post return mail at the autonomous re-sleep: a blob sealed under
+ *  HKDF(autonomyKey, "postbox") — events + schedule table. Session-tier
+ *  auth like every table write. */
+export async function postPostbox(blob: string): Promise<boolean> {
+  if (!sessionToken) return false;
+  const r = await post<{ ok: boolean }>("/handoff/post", { blob }, sessionToken);
+  return r?.ok === true;
+}
+
+/** Collect + clear the mail at unlock. Returns the sealed blob or null
+ *  (no mail / unreachable — both normal). */
+export async function pullPostbox(): Promise<string | null> {
+  if (!sessionToken) return null;
+  const r = await post<{ blob?: string }>("/handoff/post/pull", {}, sessionToken);
+  return typeof r?.blob === "string" && r.blob ? r.blob : null;
 }

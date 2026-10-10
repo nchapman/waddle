@@ -151,3 +151,19 @@ export function markRun(id: string): void {
 export function activeSchedules(): Schedule[] {
   return readAll().filter((s) => s.enabled);
 }
+
+/** Replace the whole table (the postbox merge path: incoming rows are
+ *  newer truth — done-markers from the unattended run). */
+export function replaceAllSchedules(schedules: Schedule[]): void {
+  writeAll(schedules);
+}
+
+/** Seed rows from the wake credential (a fresh volume has no table).
+ *  Merge by id — a dev volume may already hold the rows. */
+export function seedSchedules(incoming: Schedule[]): void {
+  if (incoming.length === 0) return;
+  const all = readAll();
+  const byId = new Map(all.map((s) => [s.id, s]));
+  for (const row of incoming) byId.set(row.id, row); // credential rows are fresher
+  writeAll([...byId.values()]);
+}

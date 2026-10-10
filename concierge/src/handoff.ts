@@ -17,12 +17,15 @@
  * fired wake row. Nothing at rest, anywhere, ever.
  */
 
-export interface HandoffCredential {
-  secret: string;
-  inferenceKey?: string;
-}
+/** The escrowed payload is an opaque bag — the concierge never
+ *  interprets key material. Today the machine arms
+ *  `{ autonomyKey, schedules[] }`: a schedule-scoped derived key (never
+ *  the master secret) plus the due work itself (every deploy is a fresh
+ *  volume, so the credential carries what the boot must run). */
+export type HandoffCredential = Record<string, unknown>;
 
-interface HandoffRow extends HandoffCredential {
+interface HandoffRow {
+  cred: HandoffCredential;
   armedAt: number;
   expiresAt: number;
 }
@@ -51,8 +54,9 @@ export function createHandoffStore(opts: HandoffOptions = {}) {
   const firedAt = new Map<string, number>();
 
   function arm(instance: string, cred: HandoffCredential, ttlOverrideMs?: number): { expires_in_ms: number } {
+    if (!cred || typeof cred !== "object" || Object.keys(cred).length === 0) throw new Error("credential payload required");
     const ttl = typeof ttlOverrideMs === "number" ? Math.min(Math.max(ttlOverrideMs, 60_000), ttlMs) : ttlMs;
-    rows.set(instance, { ...cred, armedAt: now(), expiresAt: now() + ttl });
+    rows.set(instance, { cred, armedAt: now(), expiresAt: now() + ttl });
     return { expires_in_ms: ttl };
   }
 
@@ -77,8 +81,9 @@ export function createHandoffStore(opts: HandoffOptions = {}) {
     return fired !== undefined && now() - fired <= releaseWindowMs;
   }
 
-  /** One-shot release: gated on a recent fire and a live row. */
-  function release(instance: string): (HandoffCredential & { armed_ms_ago: number }) | { notFound: true; reason: "no-fire" | "window" | "expired" | "absent" } {
+  /** One-shot release: gated on a recent fire and a live row. Returns the
+   *  whole opaque payload — the concierge never looks inside it. */
+  function release(instance: string): { cred: HandoffCredential; armed_ms_ago: number } | { notFound: true; reason: "no-fire" | "window" | "expired" | "absent" } {
     const fired = firedAt.get(instance);
     if (fired === undefined || now() - fired > releaseWindowMs) {
       const row0 = rows.get(instance);
@@ -92,7 +97,7 @@ export function createHandoffStore(opts: HandoffOptions = {}) {
       return { notFound: true, reason: "expired" };
     }
     firedAt.delete(instance); // one-shot per fire: first pull wins
-    return { secret: row.secret, inferenceKey: row.inferenceKey, armed_ms_ago: now() - row.armedAt };
+    return { cred: row.cred, armed_ms_ago: now() - row.armedAt };
   }
 
   /** User-side revocation: wipe the row (secret rotation, "stop doing

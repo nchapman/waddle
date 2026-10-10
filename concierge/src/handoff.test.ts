@@ -2,7 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHandoffStore } from "./handoff.js";
 
-const CRED = { secret: "s3cret", inferenceKey: "tk_x" };
+// Today's payload shape: an opaque bag the store never interprets.
+const CRED = { autonomyKey: "ak_s3cret", schedules: [{ id: "j1", title: "t", prompt: "p", enabled: true }] };
 
 function store(opts: Parameters<typeof createHandoffStore>[0] = {}) {
   let t = 1_000_000;
@@ -17,9 +18,8 @@ describe("wake handoff store", () => {
     s.arm("waddle", CRED);
     assert.equal((s.release("waddle") as { reason?: string }).reason, "no-fire");
     s.markWakeFired("waddle");
-    const got = s.release("waddle") as { secret: string; inferenceKey?: string; armed_ms_ago: number };
-    assert.equal(got.secret, CRED.secret);
-    assert.equal(got.inferenceKey, CRED.inferenceKey);
+    const got = s.release("waddle") as { cred: Record<string, unknown>; armed_ms_ago: number };
+    assert.deepEqual(got.cred, CRED); // the whole bag comes back, untouched
     // one-shot per fire: a second pull (e.g. a racing standby) is denied
     assert.equal((s.release("waddle") as { reason?: string }).reason, "no-fire");
   });
@@ -78,7 +78,7 @@ describe("wake handoff store", () => {
     s.arm("waddle", CRED);
     s.markWakeFired("waddle");
     assert.equal((s.release("other") as { reason?: string }).reason, "no-fire");
-    assert.ok((s.release("waddle") as { secret?: string }).secret);
-    assert.ok(!JSON.stringify(s.status("waddle")).includes("s3cret"));
+    assert.ok((s.release("waddle") as { cred?: Record<string, unknown> }).cred);
+    assert.ok(!JSON.stringify(s.status("waddle")).includes("ak_s3cret"));
   });
 });

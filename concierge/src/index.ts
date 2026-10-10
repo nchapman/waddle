@@ -31,6 +31,7 @@ import { promisify } from "node:util";
 import { timingSafeEqual } from "node:crypto";
 import { createTable } from "./table.js";
 import { createHandoffStore } from "./handoff.js";
+import { createPostboxStore } from "./postbox.js";
 import { createPool, envInt, standbyNameRe, type Pool } from "./pool.js";
 
 const exec = promisify(execFile);
@@ -231,6 +232,9 @@ const table = createTable(
  * wake row — standbys and user-wakes boot locked, by design. */
 const handoff = createHandoffStore({ ttlMs: envInt("WAKE_HANDOFF_TTL_MS", 7 * 24 * 3600_000, 60_000) });
 
+/** Return mail for unattended runs — sealed blobs only, pull-and-clear. */
+const postbox = createPostboxStore({ ttlMs: envInt("WAKE_POSTBOX_TTL_MS", 7 * 24 * 3600_000, 60_000) });
+
 /** Bounded retry bookkeeping for failed schedule deploys (memory-only). */
 const wakeRetries = new Map<string, number>();
 
@@ -395,7 +399,7 @@ app.get("/status", async (req, reply) => {
   if (!(await verifyExternal(token))) return reply.code(401).send({ error: "unauthorized" });
   return {
     now: Date.now(),
-    instances: table.snapshot().map((e) => ({ ...e, wake_handoff: handoff.status(e.instance) })),
+    instances: table.snapshot().map((e) => ({ ...e, wake_handoff: handoff.status(e.instance), postbox: postbox.status(e.instance) })),
   };
 });
 
@@ -403,13 +407,16 @@ app.get("/status", async (req, reply) => {
  * here (memory-only) so a later schedule-boot can run unattended. Auth is
  * the same external tier as /handshake — the fresh bb JWT or the shared
  * secret — because this fires seconds after a successful unlock.
- * `clear: true` is the disarm verb (user rotation / "stop while I'm
- * away"): wipes the row and any open release window. */
+ * `credential` is an OPAQUE bag the concierge never interprets (today:
+ * { autonomyKey, schedules[] } — a schedule-scoped derived key plus the
+ * due work; never the master secret). `clear: true` is the disarm verb
+ * (user rotation / "stop while I'm away"): wipes the row and any open
+ * release window. */
 app.post<{
-  Body: { instance?: string; secret?: string; inferenceKey?: string; ttl_ms?: number; clear?: boolean };
+  Body: { instance?: string; credential?: Record<string, unknown>; ttl_ms?: number; clear?: boolean };
 }>("/handoff", async (req, reply) => {
   const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
-  const { instance, secret, inferenceKey, ttl_ms, clear } = req.body ?? {};
+  const { instance, credential, ttl_ms, clear } = req.body ?? {};
   if (!allowedInstance(instance)) return reply.code(403).send({ error: "instance not allowed" });
   if (!(await verifyExternal(token))) return reply.code(401).send({ error: "unauthorized" });
   reply.header("cache-control", "no-store");
@@ -418,9 +425,9 @@ app.post<{
     app.log.info({ instance }, "wake handoff disarmed");
     return { ok: true, cleared: true };
   }
-  if (typeof secret !== "string" || !secret) return reply.code(400).send({ error: "secret required" });
-  const res = handoff.arm(instance, { secret, inferenceKey }, ttl_ms);
-  app.log.info({ instance, expires_in_ms: res.expires_in_ms }, "wake handoff armed (memory-only)");
+  if (!credential || typeof credential !== "object") return reply.code(400).send({ error: "credential payload required" });
+  const res = handoff.arm(instance, credential, ttl_ms);
+  app.log.info({ instance, expires_in_ms: res.expires_in_ms, keys: Object.keys(credential) }, "wake handoff armed (memory-only)");
   return { ok: true, ...res };
 });
 
@@ -440,8 +447,43 @@ app.post<{ Body: { instance?: string } }>("/handoff/pull", async (req, reply) =>
     app.log.info({ instance, reason: res.reason }, "wake handoff pull denied");
     return reply.code(404).send({ error: `no handoff (${res.reason})` });
   }
-  app.log.info({ instance, armed_ms_ago: res.armed_ms_ago }, "wake handoff released to schedule-boot");
-  return { secret: res.secret, inferenceKey: res.inferenceKey };
+  app.log.info({ instance, armed_ms_ago: res.armed_ms_ago, keys: Object.keys(res.cred) }, "wake handoff released to schedule-boot");
+  return { credential: res.cred };
+});
+
+/** Post a sealed blob — an autonomous machine's return mail at re-sleep.
+ *  The blob is AEAD ciphertext (instance-bound AAD, sealed under a key
+ *  derived from the autonomy subkey): the concierge holds mail it cannot
+ *  open. External-tier auth is fine — a forged row is undecryptable
+ *  junk, not a credential. */
+app.post<{ Body: { instance?: string; blob?: string; clear?: boolean } }>("/handoff/post", async (req, reply) => {
+  const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+  const { instance, blob, clear } = req.body ?? {};
+  if (!allowedInstance(instance)) return reply.code(403).send({ error: "instance not allowed" });
+  if (!(await verifyExternal(token))) return reply.code(401).send({ error: "unauthorized" });
+  reply.header("cache-control", "no-store");
+  if (clear) {
+    postbox.clear(instance);
+    return { ok: true, cleared: true };
+  }
+  if (typeof blob !== "string" || !blob) return reply.code(400).send({ error: "blob required" });
+  const res = postbox.post(instance, blob);
+  app.log.info({ instance, bytes: blob.length, expires_in_ms: res.expires_in_ms }, "postbox stored (sealed)");
+  return { ok: true, ...res };
+});
+
+/** Pull the postbox: the machine at the next unlock (which can derive the
+ *  seal key) collects and clears the mail. One delivery. */
+app.post<{ Body: { instance?: string } }>("/handoff/post/pull", async (req, reply) => {
+  const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+  const instance = req.body?.instance;
+  if (!allowedInstance(instance)) return reply.code(403).send({ error: "instance not allowed" });
+  if (!(await verifyExternal(token))) return reply.code(401).send({ error: "unauthorized" });
+  reply.header("cache-control", "no-store");
+  const blob = postbox.pull(instance);
+  if (blob === null) return reply.code(404).send({ error: "no mail" });
+  app.log.info({ instance, bytes: blob.length }, "postbox delivered (pull-and-clear)");
+  return { blob };
 });
 
 // ── The pool (module semantics in pool.ts; platform verbs here) ───────

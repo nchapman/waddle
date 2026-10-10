@@ -17,9 +17,10 @@ import { setBrowserEvents, browserLive, captureNow, userInput, releaseUserContro
 // (createArchive/restoreArchive live behind bb-backup.ts now; the old
 // debug GET /archive is gone — machine bytes never travel unsealed)
 import { setBbGrant, clearBbGrant, bbGrantActive, pushMachineBackup, pullMachineBackup, pruneOldGens } from "./bb-backup.js";
-import { createSchedule, listSchedules, cancelSchedule, markRun, dueSchedules, dueSoon, activeSchedules, nextDueMs, type Schedule } from "./schedules.js";
-import { handshakeConcierge, conciergeActive, renewIdleStop, deathFlare, writeTimer, armHandoff, pullHandoff } from "./concierge.js";
+import { createSchedule, listSchedules, cancelSchedule, markRun, dueSchedules, dueSoon, activeSchedules, nextDueMs, replaceAllSchedules, seedSchedules, type Schedule } from "./schedules.js";
+import { handshakeConcierge, conciergeActive, renewIdleStop, deathFlare, writeTimer, armHandoff, pullHandoff, postPostbox, pullPostbox } from "./concierge.js";
 import { autonomyEnabled, armWakeCredential, readWakeCredential, clearWakeCredential } from "./wakeboot.js";
+import { autonomyKeyFromSecret, sealPostbox, openPostbox, mergeSchedules, schedulableRows } from "./postbox.js";
 
 /** Reject after ms — bounds restore/final-backup so nothing hangs the boot or the exit. */
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
@@ -83,6 +84,7 @@ setInterval(() => {
 
 const PORT = Number(process.env.PORT ?? 8080);
 const VERSION = "0.0.1";
+const INSTANCE = process.env.WADDLE_INSTANCE ?? "waddle";
 
 // Ring buffer of recent log lines — tinfoil gives us no logs/exec, so the
 // session-gated /debug/log endpoint is the only window into a live enclave.
@@ -178,7 +180,10 @@ app.post("/unlock", async (request, reply) => {
   try {
     const { token, enrolled } = lock.unlock(secret, nonce);
     // A user unlocking is a takeover: whatever restricted autonomous state
-    // this machine booted into, a live user session outranks it.
+    // this machine booted into, a live user session outranks it. The flag
+    // is captured first — a takeover machine must not merge its own mail
+    // (its events are already live in this log).
+    const wasAutonomous = autonomous;
     if (autonomous) {
       autonomous = false;
       log?.append({ type: "message", role: "user", text: "[system] user unlock — autonomous session taken over", at: new Date().toISOString() });
@@ -250,20 +255,42 @@ app.post("/unlock", async (request, reply) => {
     })();
     app.log.info({ ok: bearer !== null, via: bearer === bb?.token ? "jwt" : bearer ? "shared-secret" : "none" }, "concierge handshake");
     if (bearer) renewIdleStop();
+    // Collect the postbox BEFORE the ticker can fire: an unattended run's
+    // mail carries its done-markers, and without them the restored shelf
+    // copy of the schedule would look still-due and re-fire (duplicate).
+    // The merge is awaited — the unlock response already includes it.
+    if (!wasAutonomous) {
+      try {
+        const blob = await pullPostbox();
+        if (blob) {
+          const payload = openPostbox(autonomyKeyFromSecret(secret), INSTANCE, blob);
+          for (const e of payload.events) log?.append(e);
+          replaceAllSchedules(mergeSchedules(listSchedules(), payload.schedules));
+          log?.append({ type: "message", role: "user", text: `[system] postbox merged — ${payload.events.length} events from the unattended run delivered`, at: new Date().toISOString() });
+          app.log.info({ events: payload.events.length, schedules: payload.schedules.length }, "postbox merged into session");
+        }
+      } catch (e) {
+        // Mail is consumed either way; undecryptable (rotated master?) or
+        // unreachable mail degrades to the pre-postbox behavior — the
+        // schedule re-fires from the shelf. Honest, not silent.
+        app.log.warn({ err: String(e) }, "postbox merge failed — degrading to re-fire delivery");
+      }
+    }
     // Wake autonomy: remember how to boot alone, so the concierge's
     // wake-timers find a machine that can actually run its schedule.
+    // The credential is SCHEDULE-SCOPED: an autonomy subkey (never the
+    // master) plus the due work itself (a fresh volume has no table).
     // The file arm covers dev (mounted DATA_DIR); the concierge handoff
     // is the real one — memory-only escrow, nothing at rest anywhere.
     // TTL is next-due + margin, and we skip arming entirely when no
     // schedule is pending (SME review: the escrow serves schedules, it
     // has no other reason to stand).
     if (autonomyEnabled()) {
-      armSecret = secret;
-      armInferenceKey = inferenceKey;
+      armAutonomyKey = autonomyKeyFromSecret(secret);
       // Best-effort: a failed arm (read-only storage, full disk) must never
       // fail an unlock that already succeeded.
       try {
-        armWakeCredential({ secret, inferenceKey, conciergeBearer: bearer });
+        armWakeCredential({ autonomyKey: armAutonomyKey, schedules: activeSchedules() });
       } catch (e) {
         app.log.warn({ err: String(e) }, "wake credential arm failed — autonomy off this session");
       }
@@ -274,7 +301,7 @@ app.post("/unlock", async (request, reply) => {
       const ttl = horizon === null ? undefined : horizon - Date.now() + 15 * 60_000;
       const escrowBearer = bearer ?? process.env.CONCIERGE_SHARED_SECRET;
       if (escrowBearer && ttl !== undefined) {
-        void armHandoff({ secret, inferenceKey }, escrowBearer, ttl).then((ok) => {
+        void armHandoff({ autonomyKey: armAutonomyKey, schedules: schedulableRows(activeSchedules()) }, escrowBearer, ttl).then((ok) => {
           if (!ok) app.log.warn("wake handoff arm failed — unattended runs degrade until next unlock");
         });
       }
@@ -450,11 +477,27 @@ async function sleep(reason: string): Promise<never> {
       // overdue row must fire immediately, not vanish.
       if (d !== null) await writeTimer({ action: "wake", dueMs: Math.max(1_000, d - Date.now()), jobId: s.id });
     }
+    // AUTONOMOUS SLEEP: post the return mail first. This machine cannot
+    // push its transcript to the shelf (no bb grant), so it seals events
+    // + the schedule table (done-markers!) under the postbox key and
+    // drops the blob on the concierge. The next unlock merges it — the
+    // run's output survives the machine, delivered exactly once, and the
+    // marked rows stop the duplicate re-fire.
+    if (autonomous && armAutonomyKey && log) {
+      try {
+        const blob = sealPostbox(armAutonomyKey, INSTANCE, { events: log.all, schedules: listSchedules() });
+        const ok = await postPostbox(blob);
+        if (ok) app.log.info({ events: log.all.length, bytes: blob.length }, "postbox posted (sealed) at autonomous sleep");
+        else app.log.warn("postbox post failed — unattended output degrades to re-fire delivery");
+      } catch (e) {
+        app.log.warn({ err: String(e) }, "postbox post failed — unattended output degrades to re-fire delivery");
+      }
+    }
     // Re-arm the escrow for the NEXT due (SME review: TTL is next-due +
     // margin, so recurring schedules need a fresh arm per cycle — the
     // machine writes it right here, next to the wake rows that depend
     // on it. No schedule left → the escrow simply lapses.
-    if (armSecret) {
+    if (armAutonomyKey) {
       const horizon = activeSchedules().reduce<number | null>((acc, s) => {
         const d = nextDueMs(s);
         return d === null ? acc : acc === null ? d : Math.min(acc, d);
@@ -469,7 +512,7 @@ async function sleep(reason: string): Promise<never> {
         if (!bearer) {
           app.log.warn({ horizon }, "sleep-gate escrow re-arm skipped — CONCIERGE_SHARED_SECRET unset; next wake boot stays locked");
         } else {
-          const ok = await armHandoff({ secret: armSecret, inferenceKey: armInferenceKey }, bearer, horizon - Date.now() + 15 * 60_000);
+          const ok = await armHandoff({ autonomyKey: armAutonomyKey, schedules: schedulableRows(activeSchedules()) }, bearer, horizon - Date.now() + 15 * 60_000);
           if (!ok) app.log.warn({ horizon }, "sleep-gate escrow re-arm failed — next wake boot stays locked");
         }
       }
@@ -669,11 +712,12 @@ app.get("/ws", { websocket: true }, (socket, request) => {
   });
 });
 
-// The enrolled secret, kept in memory while unlocked — the sleep gate
-// re-arms the escrow with it (next-due TTL). Same lifetime as the lock's
-// derived keys: memory-only, gone at sleep.
-let armSecret: string | null = null;
-let armInferenceKey: string | undefined;
+// The autonomy subkey, kept in memory while unlocked — the sleep gate
+// re-arms the escrow with it (next-due TTL). Derived from the master at
+// unlock; inherited as-is by an autonomous boot (a subkey boot cannot
+// re-derive it, and must not — the next boot gets the same key). Same
+// lifetime as the lock's derived keys: memory-only, gone at sleep.
+let armAutonomyKey: string | null = null;
 
 // Wake autonomy: a boot triggered by a concierge wake-timer finds the
 // machine locked with no keys — the due work couldn't run. The credential
@@ -689,14 +733,19 @@ let armInferenceKey: string | undefined;
 let autonomous = false;
 if (autonomyEnabled() && !lock.unlocked) {
   const cred = readWakeCredential() ?? (await pullHandoff());
-  if (cred) {
+  if (cred?.autonomyKey) {
     try {
-      lock.unlock(cred.secret, randomUUID());
-      if (!log) log = new EventLog(lock.logKey, lock.storage);
-      if (cred.inferenceKey) initAgent(cred.inferenceKey);
+      // Subkey unlock: TOFU by design — possession of the escrow (fire-gate
+      // released) IS the authorization; the master's verifier file is
+      // never consulted or clobbered. Inference is instance-provided
+      // (env TINFOIL_API_KEY) — no key material rides the credential.
+      const aut = lock.unlockAutonomous(cred.autonomyKey);
+      log = new EventLog(aut.logKey, lock.storage);
+      // Seed the due work: every deploy is a fresh volume, so the schedule
+      // table travels inside the credential.
+      if (cred.schedules) seedSchedules(cred.schedules as Schedule[]);
       autonomous = true;
-      armSecret = cred.secret;
-      armInferenceKey = cred.inferenceKey;
+      armAutonomyKey = cred.autonomyKey;
       log.append({ type: "message", role: "user", text: "[system] autonomous boot — unlocked from wake credential (restricted mode)", at: new Date().toISOString() });
       app.log.info("autonomous boot: unlocked from wake credential (restricted mode)");
       // Shared-secret handshake (the escrow no longer carries a bearer):
