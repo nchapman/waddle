@@ -71,6 +71,20 @@
 - Server-fired turns (scheduled runs) don't append to the live thread —
   reload + "resume session" renders them (parked client bug).
 
+## Two-tier autonomy (decided 2026-10-10, v0.0.46 design)
+
+Background tasks off (default) = no delegation, concierge holds zero
+secrets. Background tasks on (warned client dialog, user preference) =
+full delegation: escrow carries master secret + schedules + sealed ~64 KiB
+snapshot; scheduled boot restores then does a VERIFIED unlock; one
+master-sealed log; re-snapshot/re-arm at autonomous re-sleep. The
+invariant: operators can't read data without breaking the enclave
+(nothing at rest is plaintext; secrets are memory-only in enclaves).
+Residual (tier 1): machine→concierge is shared-secret, not attested —
+fake-concierge capture is the known active-attack surface; UCAN/silicon
+are the parked fixes. Full statement in PLAN.md "[Decided 2026-10-10]
+Two-tier autonomy". betterbase-accounts#1 closed — no bb changes.
+
 ## Known open items (as of v0.0.44 / concierge v0.3.11)
 
 - **Autonomous output dies with the machine** (bb-grant gap; schedules
