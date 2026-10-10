@@ -129,9 +129,18 @@ function newestSessionFile(): string | null {
   return best?.path ?? null;
 }
 
-/** The live event sink — module level, so it outlives boot and applies to
- *  whichever session (fresh or resumed) the boot creates. */
-const sink: { onDelta?: (d: string) => void; onToolStart?: (c: string, t: string, a: unknown) => void; onToolEnd?: (c: string, t: string, r: unknown, e: boolean) => void; onAssistantFinal?: (t: string) => void; onApprovalRequest?: (req: { type: "approval_request"; callId: string; tool: string; input: unknown; at?: string }) => void; onSettled?: () => void } = {};
+/** Live agent events for the wire (installed by index.ts): text deltas,
+ *  tool execution, approvals, finals. Module-level so it outlives boot and
+ *  applies to whichever session (fresh or resumed) the boot creates. */
+export interface Sink {
+  onDelta?: (delta: string) => void;
+  onToolStart?: (callId: string, tool: string, args: unknown) => void;
+  onToolEnd?: (callId: string, tool: string, result: unknown, isError: boolean) => void;
+  onAssistantFinal?: (text: string) => void;
+  onApprovalRequest?: (req: { type: "approval_request"; callId: string; tool: string; input: unknown; at?: string }) => void;
+  onSettled?: () => void;
+}
+const sink: Sink = {};
 
 async function boot() {
   mkdirSync(WORKSPACE, { recursive: true });
@@ -370,16 +379,7 @@ let agentBusy = false;
 
 /** Wire the live event sink (the active WSS connection). Applies to the
  *  session whenever it boots — no boot is forced here. */
-export function setSink(
-  next: {
-    onDelta?: (delta: string) => void;
-    onToolStart?: (callId: string, tool: string, args: unknown) => void;
-    onToolEnd?: (callId: string, tool: string, result: unknown, isError: boolean) => void;
-    onAssistantFinal?: (text: string) => void;
-    onApprovalRequest?: (req: { type: "approval_request"; callId: string; tool: string; input: unknown; at?: string }) => void;
-    onSettled?: () => void;
-  },
-): void {
+export function setSink(next: Sink): void {
   Object.keys(sink).forEach((k) => delete sink[k as keyof typeof sink]);
   Object.assign(sink, next);
 }

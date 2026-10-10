@@ -8,13 +8,16 @@
  * next activity. No import from index.ts (circular): logs to stdout in
  * the pino shape so the ring picks them up.
  */
+import type { Schedule } from "./schedules.js";
+
 const CONCIERGE_URL = process.env.CONCIERGE_URL ?? "";
 const INSTANCE = process.env.WADDLE_INSTANCE ?? "waddle";
-/** The stop row is a zombie backstop, never the primary sleep path:
- *  arm it just past the idle gate (idle + margin) from the last contact —
- *  activity renews, the gate's death flare replaces it with the real 5 s
- *  stop, and a machine that somehow hangs past its own gate gets reaped. */
-export function stopBackstopMs(): number {
+/** Stop-row backstop offset: the stop row is a zombie backstop, never
+ *  the primary sleep path — arm it just past the idle gate (idle +
+ *  margin) from the last contact; activity renews, the gate's death
+ *  flare replaces it with the real 5 s stop, and a machine that somehow
+ *  hangs past its own gate gets reaped. */
+function stopBackstopMs(): number {
   const idle = Number(process.env.WADDLE_IDLE_MS ?? 10 * 60_000);
   return idle + 30_000;
 }
@@ -85,20 +88,26 @@ export async function deathFlare(): Promise<void> {
 
 /** Wake-autonomy escrow: park the boot credential in the concierge's
  *  MEMORY (never on this machine's ephemeral disk). The credential is an
- *  opaque bag — today `{ autonomyKey, schedules[] }`: a schedule-scoped
- *  derived key (never the master) plus the due work itself. TTL is the
- *  NEXT due schedule + margin (SME review): the escrow exists to serve a
- *  schedule, so it stands exactly as long — not 7 days. Re-armed at every
- *  unlock AND at the sleep gate, so recurring schedules stay covered
- *  without a long-lived row. */
+ *  opaque bag — today `{ secret, schedules[], snapshot? }`: the master
+ *  secret plus due work and a sealed whole-machine snapshot (two-tier
+ *  autonomy, the warned opt-in). TTL is the NEXT due schedule + margin
+ *  (SME review): the escrow exists to serve a schedule, so it stands
+ *  exactly as long — not 7 days. Re-armed at every unlock AND at the
+ *  sleep gate, so recurring schedules stay covered without a long-lived
+ *  row. */
 export async function armHandoff(credential: Record<string, unknown>, bearer: string, ttlMs?: number): Promise<boolean> {
   const r = await post<{ ok: boolean }>("/handoff", { credential, ttl_ms: ttlMs }, bearer);
   return r?.ok === true;
 }
 
+/** The wake-boot credential (same shape wakeboot.ts arms): the master
+ *  secret, the due schedule rows, an optional sealed snapshot, and —
+ *  dev file arm only — an inference key. */
 export interface PulledCredential {
-  autonomyKey?: string;
-  schedules?: Array<Record<string, unknown>>;
+  secret?: string;
+  schedules?: Schedule[];
+  snapshot?: string;
+  inferenceKey?: string;
   [k: string]: unknown;
 }
 
@@ -126,9 +135,9 @@ export async function pullHandoff(): Promise<PulledCredential | null> {
   }
 }
 
-/** Post return mail at the autonomous re-sleep: a blob sealed under
- *  HKDF(autonomyKey, "postbox") — events + schedule table. Session-tier
- *  auth like every table write. */
+/** Post return mail at the autonomous re-sleep: a blob sealed under a
+ *  key derived from the master secret — events + schedule table.
+ *  Session-tier auth like every table write. */
 export async function postPostbox(blob: string): Promise<boolean> {
   if (!sessionToken) return false;
   const r = await post<{ ok: boolean }>("/handoff/post", { blob }, sessionToken);

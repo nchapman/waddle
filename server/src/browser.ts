@@ -369,15 +369,18 @@ export async function browserNavigate(url: string): Promise<string> {
   return digest();
 }
 
+/** Resolve on loadEventFired (or timeout) — once, whichever comes first. */
 function waitForLoad(timeoutMs: number): Promise<void> {
   return new Promise((resolve) => {
-    let finish = (): void => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       cdp?.off("message", onMsg);
       resolve();
     };
     const timer = setTimeout(finish, timeoutMs);
-    let done = false;
     function onMsg(raw: unknown) {
       try {
         const msg = JSON.parse(String(raw)) as { method?: string };
@@ -386,12 +389,6 @@ function waitForLoad(timeoutMs: number): Promise<void> {
         /* ignore */
       }
     }
-    const inner = finish;
-    finish = () => {
-      if (done) return;
-      done = true;
-      inner();
-    };
     cdp?.on("message", onMsg);
   });
 }

@@ -85,11 +85,22 @@ export type UserIntent =
   | { type: "session_restore"; jsonl: string }
   /** The user's hands: normalized input for the enclave browser. Transient —
    *  never sealed into the log. */
-  | { type: "browser_input"; events: Array<{ t: "move" | "down" | "up"; x: number; y: number; b?: "left" | "right" | "middle" } | { t: "wheel"; dx: number; dy: number; x?: number; y?: number } | { t: "key"; k: string; up?: boolean } | { t: "text"; s: string }> }
+  | { type: "browser_input"; events: BrowserInputEvent[] }
   /** Explicit hand-back (auto-releases on input idle too). */
   | { type: "browser_release" }
   /** The delegation switch (two-tier autonomy) — live from the header. */
   | { type: "preference"; background: boolean };
+
+/** One user-input event over the wire: normalized coordinates (against the
+ *  frame the client sees), DOM key names, or a batched printable run. The
+ *  server's input-map consumes these; they are NEVER sealed into the log. */
+export type BrowserInputEvent =
+  | { t: "move"; x: number; y: number }
+  | { t: "down"; x: number; y: number; b?: "left" | "right" | "middle" }
+  | { t: "up"; x: number; y: number; b?: "left" | "right" | "middle" }
+  | { t: "wheel"; dx: number; dy: number; x?: number; y?: number }
+  | { t: "key"; k: string; up?: boolean } // control key (or modifier) press/release
+  | { t: "text"; s: string }; // batched printable run (≤ 64 chars)
 
 /** Live stream chunk (transient — final message events are the persisted truth). */
 export interface DeltaEvent {

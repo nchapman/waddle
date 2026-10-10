@@ -16,13 +16,9 @@
  * with their Windows virtual key codes.
  */
 
-export type UserInputEvent =
-  | { t: "move"; x: number; y: number }
-  | { t: "down"; x: number; y: number; b?: "left" | "right" | "middle" }
-  | { t: "up"; x: number; y: number; b?: "left" | "right" | "middle" }
-  | { t: "wheel"; dx: number; dy: number; x?: number; y?: number }
-  | { t: "key"; k: string; up?: boolean } // control key (or modifier) press/release
-  | { t: "text"; s: string }; // batched printable run (≤ 64 chars)
+import type { BrowserInputEvent } from "@waddle/sdk";
+
+export type UserInputEvent = BrowserInputEvent;
 
 export interface CdpInputMessage {
   method: "Input.dispatchMouseEvent" | "Input.dispatchKeyEvent" | "Input.insertText";
