@@ -26,10 +26,9 @@
 import fastify from "fastify";
 import type { FastifyReply } from "fastify";
 import cors from "@fastify/cors";
-import { createRemoteJWKSet, jwtVerify } from "jose";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { timingSafeEqual } from "node:crypto";
+import { createVerifyExternal, secretOk } from "./auth.js";
 import type {
   HandshakeRequest,
   HandoffArmRequest,
@@ -67,8 +66,13 @@ const ALLOWED = new Set(
     .filter(Boolean),
 );
 
-const jwks = JWKS_URL ? createRemoteJWKSet(new URL(JWKS_URL)) : null;
-if (jwks && !AUDIENCE) {
+const verifyExternal = createVerifyExternal({
+  jwksUrl: JWKS_URL,
+  issuer: ISSUER,
+  audience: AUDIENCE,
+  sharedSecret: SHARED_SECRET,
+});
+if (JWKS_URL && !AUDIENCE) {
   console.warn("[concierge] CONCIERGE_AUDIENCE is empty: JWTs are verified for signature/issuer only. Pin the betterbase audience before trusting this in prod.");
 }
 
@@ -177,27 +181,8 @@ function bearer(req: { headers: { authorization?: string } }): string | undefine
   return req.headers.authorization?.replace(/^Bearer\s+/i, "");
 }
 
-/** Constant-time shared-secret compare (a straight === leaks length/prefix
- *  timing on the secret). */
-function secretOk(token: string | undefined): boolean {
-  const a = Buffer.from(token ?? "");
-  const b = Buffer.from(SHARED_SECRET ?? "");
-  return !!SHARED_SECRET && a.length === b.length && timingSafeEqual(a, b);
-}
-
-/** Verify a betterbase JWT (client path) or the dev shared secret. */
-async function verifyExternal(token: string | undefined): Promise<boolean> {
-  if (!token) return false;
-  if (jwks) {
-    try {
-      await jwtVerify(token, jwks, { issuer: ISSUER || undefined, audience: AUDIENCE || undefined });
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  return secretOk(token);
-}
+/** Verify a betterbase JWT or the shared secret — the external tier,
+ *  factored into auth.ts (tested there). */
 
 function allowedInstance(instance: string | undefined): instance is string {
   if (typeof instance !== "string") return false;
@@ -312,7 +297,7 @@ app.post<{ Body: HandshakeRequest }>("/handshake", async (req, reply) => {
   // fire-gate the session-tier rule closed. Machines always hold the
   // shared secret (their handshake bearer); nothing legitimate loses
   // access. Constant-time, as everywhere the secret is compared.
-  if (!secretOk(bearer(req))) return reply.code(401).send({ error: "unauthorized" });
+  if (!secretOk(bearer(req), SHARED_SECRET)) return reply.code(401).send({ error: "unauthorized" });
   const sessionToken = table.mintSession(instance);
   return { session_token: sessionToken };
 });
