@@ -63,7 +63,7 @@ export const WaddleToolChip: ToolCallMessagePartComponent = ({ toolName, argsTex
       {running && <span className="text-duck">running…</span>}
       {!running && !failed && result !== undefined && (
         <span className="min-w-0 flex-1 truncate" title={resultSummary(result)}>
-          <span className={failed ? "" : "text-live"}>✓</span> {resultSummary(result)}
+          <span className="text-live">✓</span> {resultSummary(result)}
         </span>
       )}
       {failed && <span className="text-gate-strong">failed</span>}

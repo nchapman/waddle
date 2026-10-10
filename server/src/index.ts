@@ -6,9 +6,8 @@
 import fastify from "fastify";
 import websocket from "@fastify/websocket";
 import cors from "@fastify/cors";
-import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { hello, type GatewayEvent, type UnlockRequest, type UnlockResponse, type StateResponse, type UserIntent } from "@waddle/sdk";
+import { hello, type GatewayEvent, type UnlockRequest, type UnlockResponse, type StateResponse } from "@waddle/sdk";
 import { Lock, freshNonce } from "./state.js";
 import { EventLog } from "./log.js";
 import { initAgent, chat, agentReady, stageSessionJsonl, stageHistoryRows, setBlackbox, setSink, getSessionJsonl } from "./agent.js";
@@ -208,7 +207,7 @@ app.post("/unlock", async (request, reply) => {
     if (bb) {
       try {
         await setBbGrant(secret, bb);
-        app.log.info({ endpoint: bb.endpoint, space: bb.spaceId, epoch: bb.epoch, anchor: bb.anchorId, tokenLen: bb.token?.length ?? 0 }, "[dbg] bb grant armed");
+        app.log.info({ endpoint: bb.endpoint, space: bb.spaceId, epoch: bb.epoch, anchor: bb.anchorId, tokenLen: bb.token.length }, "[dbg] bb grant armed");
       } catch (e) {
         app.log.warn({ err: String(e) }, "bb grant rejected — backups disabled this session");
         clearBbGrant();
@@ -345,10 +344,6 @@ app.get("/session", async (request, reply) => {
     return reply.code(500).send({ error: e instanceof Error ? e.message : String(e) });
   }
 });
-
-// One agent turn at a time for First Light (pi requires steer/followUp
-// semantics for concurrent prompts — that arrives with the real harness).
-let streaming = false;
 
 // ── Sleep: the idle gate ────────────────────────────────────────────────
 // Unlocked + idle past the gate → checkpoint (the log is already sealed

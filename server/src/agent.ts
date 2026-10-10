@@ -58,15 +58,7 @@ const SYSTEM_PROMPT = [
   "of personality is welcome.",
 ].join("\n");
 
-/** Live agent activity for the wire: text deltas + tool execution. */
-export interface AgentEvents {
-  onDelta: (delta: string) => void;
-  onToolStart?: (callId: string, tool: string, args: unknown) => void;
-  onToolEnd?: (callId: string, tool: string, result: unknown, isError: boolean) => void;
-}
-
 type AgentHandle = {
-  setSink: (s: object) => void;
   chat: (t: string) => Promise<void>;
   restoreContext: (rows: MemoryRow[]) => Promise<void>;
   nativeResumed: () => boolean;
@@ -342,10 +334,6 @@ async function boot() {
   });
 
   return {
-    setSink(next: typeof sink): void {
-      Object.keys(sink).forEach((k) => delete sink[k as keyof typeof sink]);
-      Object.assign(sink, next);
-    },
     async chat(text: string): Promise<void> {
       if (agentBusy) {
         // Mid-turn: steer the active run (pi applies it after the current
@@ -354,11 +342,9 @@ async function boot() {
         return;
       }
       agentBusy = true;
-      streaming = true;
       try {
         await session.prompt(text);
       } finally {
-        streaming = false;
         agentBusy = false;
       }
     },
@@ -381,7 +367,6 @@ async function boot() {
 }
 
 let agentBusy = false;
-let streaming = false;
 
 /** Wire the live event sink (the active WSS connection). Applies to the
  *  session whenever it boots — no boot is forced here. */

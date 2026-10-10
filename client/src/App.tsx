@@ -8,8 +8,6 @@ import {
   ensureMachineAnchor,
   type AccountStore,
 } from "./lib/betterbase-store";
-import { getSecret } from "./lib/session";
-import type { StateResponse } from "@waddle/sdk";
 import type { UIMessage } from "@ai-sdk/react";
 import { ChatSurface } from "./ChatSurface";
 import { BrowserDock, BrowserOverlay } from "./components/BrowserDock";
@@ -52,7 +50,6 @@ interface ChatMessage {
   /** Structured tool call (live + replay) — the seed renders real chips. */
   tool?: { name: string; args?: unknown; result?: unknown; isError?: boolean };
 }
-export type { ChatMessage };
 
 type State =
   | { phase: "verifying" }
@@ -65,7 +62,6 @@ type State =
       phase: "chat";
       result: AttestationResult;
       messages: ChatMessage[];
-      streaming: string;
       connected: boolean;
       replayed: boolean;
       error?: string;
@@ -76,14 +72,6 @@ type State =
       browserHeld?: boolean;
     };
 
-const box = (bg: string): React.CSSProperties => ({
-  background: bg,
-  borderRadius: 8,
-  padding: "0.35rem 0.7rem",
-  fontFamily: "ui-monospace, monospace",
-  fontSize: 13,
-  wordBreak: "break-all",
-});
 const fp = (s: string) => `${s.slice(0, 16)}…${s.slice(-8)}`;
 
 /** Dev parity: a structural stand-in so session/unlock code paths run unchanged. */
@@ -153,7 +141,6 @@ function eventsToRows(events: Array<Record<string, unknown>>): ChatMessage[] {
   return rows;
 }
 
-
 export function App() {
   const [state, setState] = useState<State>({ phase: "verifying" });
   const [browserExpanded, setBrowserExpanded] = useState(false);
@@ -169,18 +156,10 @@ export function App() {
   const bbLoadingRef = useRef(bb.isLoading);
   bbLoadingRef.current = bb.isLoading;
   const [bbStore, setBbStore] = useState<AccountStore | null>(null);
-  const bbStoreReadyRef = useRef<Promise<AccountStore | null> | null>(null);
-  const messagesRef = useRef<ChatMessage[]>([]);
-  const attestedClientRef = useRef<AttestationResult["client"] | null>(null);
   // True while the ws backlog for an already-seeded log streams in — its
   // rows are in the seed, so ingesting them again would duplicate history.
   const suppressReplayRef = useRef(false);
   const frameLiveRef = useRef(false);
-  // The pi transcript (jsonl) only grows when a turn is sealed — refetching
-  // it (and re-encrypting MBs) on every debounced push was the idle-CPU
-  // storm's fuel. Cache it, refetch only when the row count moved.
-  const jsonlCacheRef = useRef<{ len: number; jsonl: string | null }>({ len: -1, jsonl: null });
-  const pushBlockedUntilRef = useRef(0);
   const autoWokeRef = useRef(false);
   if (!transportRef.current) transportRef.current = new WaddleChatTransport();
 
@@ -335,35 +314,27 @@ export function App() {
         suppressReplayRef.current = false;
         return s.phase === "chat" ? { ...s, replayed: true } : s;
       }
-      if (suppressReplayRef.current && s.phase === "chat") {
+      if (suppressReplayRef.current) {
         // Backlog duplicate of the seeded history — drop.
         if (event.type === "message" || event.type === "history_row" || event.type === "tool_start" || event.type === "tool_end") return s;
       }
       if (s.phase !== "chat") return s;
       if (event.type === "history_row") {
         const messages = [...s.messages, { role: event.role, text: event.text } as ChatMessage];
-        messagesRef.current = messages;
         return { ...s, messages };
       }
       if (event.type === "browser_control") {
-        return s.phase === "chat" ? { ...s, browserHeld: event.held } : s;
+        return { ...s, browserHeld: event.held };
       }
       if (event.type === "browser_status") {
-        return s.phase === "chat" ? { ...s, browserUrl: event.url, browserTitle: event.title } : s;
+        return { ...s, browserUrl: event.url, browserTitle: event.title };
       }
       if (event.type === "message" && (event.role === "user" || event.role === "assistant")) {
         const messages = [...s.messages, { role: event.role, text: event.text }];
-        messagesRef.current = messages;
-        return {
-          ...s,
-          streaming: event.role === "assistant" ? "" : s.streaming,
-          messages,
-          error: undefined,
-        };
+        return { ...s, messages, error: undefined };
       }
       if (event.type === "tool_start") {
         const messages = [...s.messages, { role: "tool", text: `⚙️ ${event.tool} ${JSON.stringify(event.args ?? {}).slice(0, 140)}`, tool: { name: event.tool, args: event.args ?? {} } } as ChatMessage];
-        messagesRef.current = messages;
         return { ...s, messages };
       }
       if (event.type === "tool_end") {
@@ -408,7 +379,7 @@ export function App() {
     let disposed = false;
     const spaceId = bb.personalSpaceId ?? bb.session.getPersonalSpaceId?.() ?? null;
     if (!spaceId) return;
-    const ready = openAccountStore(spaceId)
+    openAccountStore(spaceId)
       .then((store) => {
         if (disposed) return null;
         setBbStore(store);
@@ -421,7 +392,6 @@ export function App() {
         console.warn("betterbase store failed to open", e);
         return null;
       });
-    bbStoreReadyRef.current = ready;
     return () => {
       disposed = true;
     };
@@ -432,7 +402,6 @@ export function App() {
       setState({ phase: "unlocking" });
       try {
         setInferenceKey(keyInput);
-        attestedClientRef.current = result.client;
         // The bb session hydrates async from storage — an unlock racing it
         // would silently shelf nothing all session. Wait briefly for it to
         // settle (signed-in or not) before building the grant.
@@ -474,7 +443,6 @@ export function App() {
           else setBackgroundPref(false);
           setBackground(unlocked.background);
         }
-        await getState(result.client, activeEnclave);
         const transport = transportRef.current!;
         transport.setAppTap((e) => onServerEvent(e));
         const conn = connectChat(
@@ -504,20 +472,12 @@ export function App() {
           suppressReplayRef.current = seed.length > 0;
           setTimeout(() => (suppressReplayRef.current = false), 8000);
         }
-        if (historyEvents.length === 0) {
-          // Fresh scratch with no shelf backup — a genuinely new machine.
-          // (When the enclave had a grant, it restored itself inside the
-          //  unlock call above: the history it pulled back from betterbase
-          //  already shows up in state2, and this branch is skipped.)
-        }
-        messagesRef.current = seed;
         setState({
           phase: "chat",
           result,
           messages: seed,
-          streaming: "",
           connected: true,
-          replayed: historyEvents.length > 0 ? false : true,
+          replayed: historyEvents.length === 0,
         });
       } catch (e) {
         setState({ phase: "error", message: `unlock: ${e instanceof Error ? e.message : String(e)}` });
@@ -686,7 +646,7 @@ export function App() {
           <StoreFooter
             connected={bb.isAuthenticated}
             handle={bb.handle ?? undefined}
-            opening={!!bbStore || !bb.isAuthenticated ? false : true}
+            opening={bb.isAuthenticated && !bbStore}
             onConnect={bb.clientId ? () => void bb.login() : undefined}
           />
         </div>

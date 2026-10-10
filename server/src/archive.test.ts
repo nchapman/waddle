@@ -47,7 +47,6 @@ test("archive packs the working dir, excludes caches, restores exactly", () => {
   seed(dir);
   const a = createArchive();
   assert.ok(a.size > 0);
-  assert.match(a.digest, /^[0-9a-f]{64}$/);
   // New slots are zstd (magic 28 b5 2f fd) — smaller and far faster to
   // build than the gzip slots they replace.
   assert.ok(a.body.subarray(0, 4).equals(Buffer.from([0x28, 0xb5, 0x2f, 0xfd])));
@@ -132,15 +131,3 @@ function zstdTarWithEntry(name: string, content: Buffer): Buffer {
 }
 
 /** Build a tar in-memory from [path, content] pairs. */
-function tarBytes(entries: Array<[string, string]>): Buffer {
-  const staging = mkdtempSync(join(tmpdir(), "waddle-tar-"));
-  for (const [p, content] of entries) {
-    const full = join(staging, p);
-    mkdirSync(join(full, ".."), { recursive: true });
-    writeFileSync(full, content);
-  }
-  const res = spawnSync("tar", ["-czf", "-", "-C", staging, "."], { maxBuffer: 1 << 28 });
-  rmSync(staging, { recursive: true, force: true });
-  if (res.status !== 0 || !res.stdout) throw new Error("test tar build failed");
-  return res.stdout;
-}

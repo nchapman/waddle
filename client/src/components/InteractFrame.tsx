@@ -20,14 +20,12 @@ const KEY_SEND = new Set([
 ]);
 
 export function InteractFrame({
-  frame,
   held,
   onRelease,
   send,
   children,
   className,
 }: {
-  frame: string | null;
   held: boolean;
   onRelease: () => void;
   send: (intent: { type: "browser_input"; events: InputEvent[] } | { type: "browser_release" }) => void;

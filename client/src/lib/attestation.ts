@@ -40,10 +40,6 @@ function readPin(): Pin | null {
   }
 }
 
-export function clearPin(): void {
-  localStorage.removeItem(PIN_KEY);
-}
-
 /** User explicitly approves a changed fingerprint (visible-diff flow). */
 export function repin(result: AttestationResult): void {
   localStorage.setItem(

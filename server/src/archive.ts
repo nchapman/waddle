@@ -1,13 +1,10 @@
 /**
- * The whole-machine backup: one tarball of the enclave's working directory.
- *
- * The running server is the source of truth — sealed log, pi session
- * transcripts, workspace files, the Chromium profile (logins ride with it).
- * On sleep and on a periodic tick the client pulls this blob over the
- * attested channel and shelves it in the user's betterbase file storage,
- * rotating a few slots so a bad state can be rolled back. On wake it pipes
- * the newest slot back in before anything boots. The client never opens
- * the archive; it is a pipe with credentials, nothing more.
+ * The whole-machine backup: one zstd'd tarball of the enclave's working
+ * directory — sealed log, pi session transcripts, workspace files, the
+ * Chromium profile (logins ride with it). bb-backup.ts owns the shelf
+ * lifecycle: it packs via createArchive() on its periodic/self-shelving
+ * ticks and restores via restoreArchive() before a fresh boot's unlock.
+ * Nothing here ever opens the archive; callers treat it as opaque bytes.
  *
  * Regenerable churn (browser caches, singleton locks) is excluded — the
  * archive is state, not disk.
@@ -72,9 +69,6 @@ const EXCLUDES = [
 
 export interface Archive {
   body: Buffer;
-  /** Creation time (epoch ms) — the generation clients rotate slots by. */
-  gen: number;
-  digest: string;
   size: number;
 }
 
@@ -118,7 +112,7 @@ export function createArchive(withoutBrowser = false): Archive {
   // build), piped through the zstd CLI. One retry: files can vanish
   // between listing and read (Chromium singleton churn); a second pass
   // over the survivors is stable.
-  for (let attempt = 0; ; attempt++) {
+  for (let attempt = 0; attempt < 2; attempt++) {
     const raw = spawnSync(
       "tar",
       [
@@ -136,30 +130,24 @@ export function createArchive(withoutBrowser = false): Archive {
         ? spawnSync("zstd", ["-q", "-3", "-"], { input: raw.stdout, maxBuffer: 1 << 30 })
         : raw;
     if (res.status === 0 && res.stdout) {
-      const body = res.stdout;
-      return {
-        body,
-        gen: Date.now(),
-        digest: createHash("sha256").update(body).digest("hex"),
-        size: body.length,
-      };
+      return { body: res.stdout, size: res.stdout.length };
     }
-    if (attempt >= 1) {
+    if (attempt === 1) {
       throw new Error(`archive: tar exited ${res.status}: ${res.stderr?.toString().slice(0, 400)}`);
     }
   }
+  throw new Error("archive: unreachable");
 }
 
 /**
  * Validate + restore an archive into the working directory, replacing what
- * is there. Only ever called onto a fresh enclave (the route refuses when
- * the sealed log already holds history) — the wipe is the point: the
- * machine comes back exactly as it went down.
+ * is there (bb-backup calls this only onto a fresh enclave — the wipe is
+ * the point: the machine comes back exactly as it went down).
  */
-/** Slots are zstd'd tar — the pack path's mirror. The body goes
- * through a temp FILE, not stdin — macOS bsdtar cannot pipe through
- * stdin reliably. */
 function detarBody(body: Buffer): Buffer {
+  // Slots are zstd'd tar — the pack path's mirror. The body goes
+  // through a temp FILE, not stdin — macOS bsdtar cannot pipe through
+  // stdin reliably.
   const zstd = body.length > 4 && body[0] === 0x28 && body[1] === 0xb5 && body[2] === 0x2f && body[3] === 0xfd;
   if (!zstd) throw new Error("restore: not a valid zstd tarball");
   const dec = spawnSync("zstd", ["-dcq", "-"], { input: body, maxBuffer: 1 << 30 });

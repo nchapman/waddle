@@ -90,7 +90,7 @@ export function BrowserDock({
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-hidden bg-black/40">
-        <InteractFrame frame={frame} held={held} onRelease={onRelease} send={send} className={cn("h-full w-full", held && "ring-1 ring-inset ring-duck/50")}>
+        <InteractFrame held={held} onRelease={onRelease} send={send} className={cn("h-full w-full", held && "ring-1 ring-inset ring-duck/50")}>
           <img
             src={frame}
             alt="waddle's browser (live — click to interact)"
@@ -152,7 +152,7 @@ export function BrowserOverlay({
             esc ⤡
           </button>
         </div>
-        <InteractFrame frame={frame} held={held} onRelease={onRelease} send={send} className={cn("w-full max-h-[84vh]", held && "ring-1 ring-inset ring-duck/50")}>
+        <InteractFrame held={held} onRelease={onRelease} send={send} className={cn("w-full max-h-[84vh]", held && "ring-1 ring-inset ring-duck/50")}>
           <img
             src={frame}
             alt="waddle's browser (live, expanded — click to interact)"

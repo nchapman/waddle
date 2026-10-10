@@ -69,10 +69,6 @@ export function setControlNotifier(fn: (held: boolean) => void): void {
   controlNotifier = fn;
 }
 
-export function userControlActive(): boolean {
-  return userControl;
-}
-
 export function releaseUserControl(): void {
   if (!userControl) return;
   userControl = false;
@@ -185,12 +181,10 @@ export async function ensureBrowser(): Promise<void> {
         cdp = null;
       });
     }
-    // Poll the debug endpoint until the browser answers.
-    const version = await waitForJson<{ webSocketDebuggerUrl?: string }>(`http://127.0.0.1:${DEBUG_PORT}/json/version`, 20_000);
-    // Chromium >= 111 exposes the browser-level ws on /json/version; page
-    // targets live on /json/list. We drive the first page target.
+    // Poll the debug endpoint until the browser answers (body unused —
+    // /json/list is where the page targets live; we drive the first).
+    await waitForJson(`http://127.0.0.1:${DEBUG_PORT}/json/version`, 20_000);
     await connectPage();
-    void version;
   })().finally(() => {
     booting = null;
   });

@@ -8,7 +8,6 @@ import {
   createHmac,
   hkdfSync,
   randomBytes,
-  timingSafeEqual,
 } from "node:crypto";
 
 /** Constant domain-separation nonce for long-lived derivations. */
@@ -38,10 +37,4 @@ export function open(key: Buffer, sealed: Buffer, aad: string): Buffer {
 
 export function hmac(key: Buffer, data: string): string {
   return createHmac("sha256", key).update(data).digest("base64url");
-}
-
-export function constantTimeEqual(a: string, b: string): boolean {
-  const ba = Buffer.from(a);
-  const bb = Buffer.from(b);
-  return ba.length === bb.length && timingSafeEqual(ba, bb);
 }

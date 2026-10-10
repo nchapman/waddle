@@ -5,7 +5,7 @@
  * data story visible.
  */
 import type { ReactNode } from "react";
-import { DuckMark, Chip } from "./DuckMark";
+import { DuckMark } from "./DuckMark";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 

@@ -30,7 +30,6 @@ export class Lock {
 
   /** "memory" = no writable storage found (ephemeral enrollment per boot). */
   readonly storage: "disk" | "memory" = "disk";
-  readonly dataDir: string = DATA_DIR;
 
   constructor() {
     try {
@@ -52,7 +51,7 @@ export class Lock {
     }
   }
 
-  /** dataDir key material accessor — the event log key, post-unlock. */
+  /** Log key material accessor — the event log key, post-unlock. */
   get logKey(): Buffer {
     if (!this.verifierKey) throw new Error("locked");
     return derive(this.verifierKey, "log");
