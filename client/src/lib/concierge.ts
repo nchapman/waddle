@@ -9,7 +9,9 @@ import { CONCIERGE_TOKEN, CONCIERGE_URL } from "./config";
 
 export type ConciergeAuth = () => Promise<string | null>;
 
-/** Wake the primary instance through the concierge. */
+/** Wake the primary instance through the concierge. The request is
+ *  synchronous by design: the concierge runs the deploy (75–95s) before
+ *  answering — the timeout only bounds a truly-stalled connection. */
 export async function wakeInstance(auth: ConciergeAuth): Promise<{ ok: boolean; detail?: string }> {
   const token = (await auth().catch(() => null)) ?? CONCIERGE_TOKEN;
   try {
@@ -17,7 +19,7 @@ export async function wakeInstance(auth: ConciergeAuth): Promise<{ ok: boolean; 
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify({ instance: "waddle" }),
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(150_000),
     });
     if (res.ok) return { ok: true };
     const body = await res.text().catch(() => "");
