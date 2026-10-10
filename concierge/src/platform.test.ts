@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import { createPlatform, type Exec } from "./platform.js";
 
 const LIST_OUTPUT = [
-  "NAME                 STATUS",
-  "waddle               Running",
-  "waddle-standby-1     Stopped",
-  "other-account-thing  Running",
+  "NAME                 STATUS      DOMAIN                                  TAG     REPO",
+  "waddle               Running     waddle.ddg.example.dev                   v1      r/r",
+  "waddle-standby-1     Stopped     waddle-standby-1.ddg.example.dev         v1      r/r",
+  "other-account-thing  Running     other.ddg.example.dev                   v1      r/r",
 ].join("\n");
 
 /** exec stub: match on `cmd args…` prefix; return stdout or throw. */
@@ -26,7 +26,11 @@ function fakeExec(routes: Array<{ args: string[]; stdout?: string; err?: string 
   return { calls, exec };
 }
 
-const tinfoil = (exec: Exec, deployTag = "v1") => createPlatform({ backend: "tinfoil", deployTag, exec });
+const tinfoil = (
+  exec: Exec,
+  deployTag = "v1",
+  probe?: (url: string, timeoutMs: number) => Promise<boolean>,
+) => createPlatform({ backend: "tinfoil", deployTag, exec, probe });
 
 test("statuses parses `container list` (header skipped, name → status)", async () => {
   const { exec } = fakeExec([{ args: ["container", "list"], stdout: LIST_OUTPUT }]);
@@ -51,10 +55,48 @@ test("list (tinfoil) is the statuses map's keys — the sweep shares the cache",
   assert.deepEqual(await p.list(), ["waddle", "waddle-standby-1", "other-account-thing"]);
 });
 
-test("ensure short-circuits on Running — no deploy on a healthy machine", async () => {
+test("ensure short-circuits on Running+healthy — no deploy on a healthy machine", async () => {
   const { calls, exec } = fakeExec([{ args: ["container", "list"], stdout: LIST_OUTPUT }]);
-  const detail = await tinfoil(exec).ensure("waddle");
-  assert.match(detail, /already running/);
+  const probed: string[] = [];
+  const probe = async (url: string) => {
+    probed.push(url);
+    return true;
+  };
+  const detail = await tinfoil(exec, "v1", probe).ensure("waddle");
+  assert.match(detail, /already running \(healthy\)/);
+  assert.deepEqual(probed, ["https://waddle.ddg.example.dev"]);
+  assert.ok(!calls.some((c) => c.includes("deploy")), "no deploy was attempted");
+});
+
+test("ensure treats a silent Running machine as a zombie: probe, then redeploy", async () => {
+  // Platform says Running, /health never answers. The fire's work must
+  // still happen: stop the zombie, redeploy (the 18:43Z incident class).
+  const deploys: string[][] = [];
+  const exec: Exec = async (_c, args) => {
+    deploys.push([...args]);
+    if (args[1] === "deploy" && deploys.filter((a) => a[1] === "deploy").length === 1) {
+      throw new Error("cannot deploy a running instance"); // the 409 the zombie throws
+    }
+    if (args[1] === "list") return { stdout: LIST_OUTPUT };
+    return { stdout: "ok" };
+  };
+  const detail = await tinfoil(exec, "v1", async () => false).ensure("waddle", 1);
+  assert.match(detail, /zombie recovered/);
+  // list, deploy(409), stop, deploy — the zombie dance ran before the recovery deploy
+  assert.deepEqual(deploys[2], ["container", "stop", "waddle"]);
+});
+
+test("ensure keeps probing within its budget — a slow boot is not a zombie", async () => {
+  const { calls, exec } = fakeExec([{ args: ["container", "list"], stdout: LIST_OUTPUT }]);
+  let n = 0;
+  const probeCalls: string[] = [];
+  const probe = async (url: string) => {
+    probeCalls.push(url);
+    return ++n >= 2; // healthy on the second probe
+  };
+  const detail = await tinfoil(exec, "v1", probe).ensure("waddle", 60_000);
+  assert.match(detail, /already running \(healthy\)/);
+  assert.equal(probeCalls.length, 2);
   assert.ok(!calls.some((c) => c.includes("deploy")), "no deploy was attempted");
 });
 

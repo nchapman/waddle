@@ -14,6 +14,17 @@ export type Exec = (
 ) => Promise<{ stdout: string }>;
 const realExec = promisify(execFile) as Exec;
 
+/** A reachability probe against the instance's public /health. */
+export type Probe = (url: string, timeoutMs: number) => Promise<boolean>;
+const realProbe: Probe = async (url, timeoutMs) => {
+  try {
+    const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(timeoutMs) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+};
+
 export interface Platform {
   /** Deploy/start an instance (zombie-recovering on tinfoil). */
   start(instance: string): Promise<string>;
@@ -26,12 +37,13 @@ export interface Platform {
   /** Every instance name the backend knows. */
   list(): Promise<string[]>;
   /** Health-first start: a machine the platform reports Running needs
-   *  nothing — the naive path would run the zombie stop-deploy dance on a
-   *  healthy machine. Residual (accepted, live-verified): a zombie (agent
-   *  dead, platform still reads Running) short-circuits too, and the
-   *  occurrence is consumed with no boot — tight fire booking at sleep
-   *  (≤ replacement-deploy cadence) is the standing mitigation. */
-  ensure(instance: string): Promise<string>;
+   *  nothing — the naive path would run the zombie stop-deploy dance on
+   *  a healthy machine. "Running" is verified, not trusted: the probe
+   *  polls the public /health for up to `probeMs` (a booting replacement
+   *  gets its ~90s to reach health), then a silent machine is treated
+   *  as the zombie it is — stop + redeploy, the release window still
+   *  open for the boot this fire intended. */
+  ensure(instance: string, probeMs?: number): Promise<string>;
 }
 
 /** Last few lines of CLI output, pipe-joined — deploy details for logs. */
@@ -41,9 +53,11 @@ export function createPlatform(opts: {
   backend: "docker" | "tinfoil";
   deployTag?: string;
   exec?: Exec;
+  probe?: Probe;
 }): Platform {
   const { backend, deployTag } = opts;
   const exec = opts.exec ?? realExec;
+  const probe = opts.probe ?? realProbe;
 
   if (backend === "docker") {
     const start = async (instance: string): Promise<string> => {
@@ -62,7 +76,7 @@ export function createPlatform(opts: {
         const { stdout } = await exec("docker", ["ps", "-a", "--format", "{{.Names}}"], { timeout: 60_000 });
         return stdout.split("\n").map((s) => s.trim()).filter(Boolean);
       },
-      ensure: start,
+      ensure: (instance: string) => start(instance), // docker start is already health-agnostic
     };
   }
 
@@ -113,27 +127,48 @@ export function createPlatform(opts: {
     }
   }
 
-  let statusCache: { at: number; map: Map<string, string> } | null = null;
-  async function statuses(): Promise<Map<string, string>> {
-    if (statusCache && Date.now() - statusCache.at < 10_000) return statusCache.map;
+  let statusCache: { at: number; rows: Map<string, { status: string; domain?: string }> } | null = null;
+  async function listRows(): Promise<Map<string, { status: string; domain?: string }>> {
+    if (statusCache && Date.now() - statusCache.at < 10_000) return statusCache.rows;
     const { stdout } = await exec("tinfoil", ["container", "list"], { timeout: 60_000 });
-    const map = new Map<string, string>();
-    // Header row then one row per instance; the name is the first column.
+    const rows = new Map<string, { status: string; domain?: string }>();
+    // Header row then one row per instance: NAME STATUS DOMAIN TAG REPO.
     for (const line of stdout.split("\n").slice(1)) {
       const cols = line.trim().split(/\s+/);
-      if (cols.length >= 2 && cols[0] && cols[0] !== "NAME") map.set(cols[0]!, cols[1]!);
+      if (cols.length >= 2 && cols[0] && cols[0] !== "NAME") rows.set(cols[0]!, { status: cols[1]!, domain: cols[2] });
     }
-    statusCache = { at: Date.now(), map };
-    return map;
+    statusCache = { at: Date.now(), rows };
+    return rows;
+  }
+
+  async function statuses(): Promise<Map<string, string>> {
+    const rows = await listRows();
+    return new Map([...rows].map(([name, r]) => [name, r.status]));
   }
 
   async function list(): Promise<string[]> {
-    return [...(await statuses()).keys()];
+    return [...(await listRows()).keys()];
   }
 
-  async function ensure(instance: string): Promise<string> {
+  /** Running must mean REACHABLE: poll the public /health for up to
+   *  probeMs (default 10s; the wake-row fire path gives a booting
+   *  replacement its ~90s). A machine that stays silent is a zombie —
+   *  fall through to start(), whose 409 dance stops and redeploys it
+   *  while the fire's release window is still open. */
+  async function ensure(instance: string, probeMs = 10_000): Promise<string> {
     try {
-      if ((await statuses()).get(instance) === "Running") return `already running: ${instance}`;
+      const row = (await listRows()).get(instance);
+      if (row?.status === "Running" && row.domain) {
+        const url = `https://${row.domain}`;
+        const deadline = Date.now() + probeMs;
+        do {
+          if (await probe(url, 5_000)) return `already running (healthy): ${instance}`;
+          await new Promise((r) => setTimeout(r, Math.min(5_000, Math.max(0, deadline - Date.now()))));
+        } while (Date.now() < deadline);
+        // Silent for the whole budget: a booting replacement that never
+        // reached health, or a dead agent under a Running status.
+        return start(instance);
+      }
     } catch {
       /* status unknown — fall through to the deploy path */
     }
