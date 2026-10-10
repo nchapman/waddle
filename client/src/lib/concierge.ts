@@ -24,18 +24,28 @@ export async function wakeInstance(
   auth: ConciergeAuth,
   timeoutMs = 150_000,
 ): Promise<{ ok: boolean; detail?: string }> {
+  const headers = await authHeaders(auth);
+  if (!headers.Authorization) {
+    return { ok: false, detail: "no betterbase session — connect your store to wake the enclave" };
+  }
   try {
     const res = await fetch(`${CONCIERGE_URL}/wake`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(await authHeaders(auth)) },
+      headers: { "Content-Type": "application/json", ...headers },
       body: JSON.stringify({ instance: "waddle" }),
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (res.ok) return { ok: true };
     const body = await res.text().catch(() => "");
     return { ok: false, detail: `concierge refused (${res.status}) ${body.slice(0, 120)}` };
-  } catch {
-    return { ok: false, detail: "concierge unreachable — is it running?" };
+  } catch (e) {
+    const stalled = e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");
+    return {
+      ok: false,
+      detail: stalled
+        ? `concierge stalled — wake gave up after ${Math.round(timeoutMs / 1000)}s (deploy still running?)`
+        : "concierge unreachable — is it running?",
+    };
   }
 }
 

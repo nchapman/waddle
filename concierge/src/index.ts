@@ -134,7 +134,7 @@ const table = createTable(
     // 75s probe budget: a replacement boot mid-flight gets its ~90s to
     // reach health before we call it a zombie and redeploy — the 10-min
     // release window comfortably covers probe + dance + boot.
-    void platform.ensure(instance, 75_000)
+    void platform.ensure(instance, 75_000, "fire")
       .then((detail) => {
         wakeRetries.delete(retryKey); // budget is per failure-chain, not per schedule lifetime
         app.log.info({ instance, jobId, detail }, "wake row fired — deploy ok");

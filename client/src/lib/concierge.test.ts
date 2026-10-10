@@ -37,14 +37,12 @@ test("wakeInstance posts the verb with the auth token (bb token wins)", async ()
   assert.equal(bearer(calls[0]!), "Bearer bb-token");
 });
 
-test("wakeInstance falls back to the dev token in DEV parity and reports refusals", async () => {
-  const { calls } = stubFetch(() => ({ ok: false, body: "nope" }));
+test("wakeInstance with no session (live shape) says so instead of sending a bare request", async () => {
+  const { calls } = stubFetch(() => ({ ok: true }));
   const r = await wakeInstance(async () => null);
   assert.equal(r.ok, false);
-  assert.match(r.detail!, /concierge refused \(503\)/);
-  // In the node test env DEV=0 (live shape): no session, no dev token —
-  // the request carries NO Authorization header rather than a baked secret.
-  assert.equal((calls[0]!.init!.headers as Record<string, string>).Authorization, undefined);
+  assert.match(r.detail!, /no betterbase session/);
+  assert.equal(calls.length, 0, "no request left without credentials");
 });
 
 test("wakeInstance bounds a silent stall by its abort signal", async () => {
@@ -62,9 +60,9 @@ test("wakeInstance bounds a silent stall by its abort signal", async () => {
 
 test("wakeInstance reports a failed concierge call as unreachable", async () => {
   // The structural timeout guard (AbortSignal on the /wake fetch) bounds a
-  // SILENT stall; this pins the loud-failure path through the same return.
+  // SILENT stall — the abort test above covers it; this pins the loud path.
   stubFetch(() => ({ throwErr: new Error("ECONNREFUSED") }));
-  const r = await wakeInstance(async () => null);
+  const r = await wakeInstance(async () => "tok");
   assert.equal(r.ok, false);
   assert.match(r.detail!, /concierge unreachable/);
 });

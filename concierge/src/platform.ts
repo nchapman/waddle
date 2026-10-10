@@ -36,14 +36,11 @@ export interface Platform {
   statuses(): Promise<Map<string, string>>;
   /** Every instance name the backend knows. */
   list(): Promise<string[]>;
-  /** Health-first start: a machine the platform reports Running needs
-   *  nothing — the naive path would run the zombie stop-deploy dance on
-   *  a healthy machine. "Running" is verified, not trusted: the probe
-   *  polls the public /health for up to `probeMs` (a booting replacement
-   *  gets its ~90s to reach health), then a silent machine is treated
-   *  as the zombie it is — stop + redeploy, the release window still
-   *  open for the boot this fire intended. */
-  ensure(instance: string, probeMs?: number): Promise<string>;
+  /** Health-first start, mode-aware (see the tinfoil implementation):
+   *  "user" (default) never stops a Running machine on a failed probe;
+   *  "fire" (wake rows) stop+redeploys a silent one while its release
+   *  window is open. */
+  ensure(instance: string, probeMs?: number, mode?: "user" | "fire"): Promise<string>;
 }
 
 /** Last few lines of CLI output, pipe-joined — deploy details for logs. */
@@ -137,11 +134,13 @@ export function createPlatform(opts: {
     const { stdout } = await exec("tinfoil", ["container", "list"], { timeout: 60_000 });
     const rows = new Map<string, { status: string; domain?: string }>();
     // Header row then one row per instance: NAME STATUS DOMAIN TAG REPO.
-    // A domain carries a dot; a drifted/absent column must not smuggle
-    // the TAG in as a probe host.
+    // Column-shape guard: a domain's LAST label is alphabetic (example.dev)
+    // — a dotted TAG (v0.3.18) must never smuggle in as a probe host.
+    const looksLikeDomain = (s: string | undefined): s is string =>
+      !!s && s.includes(".") && /^[a-z]{2,}$/i.test(s.split(".").pop() ?? "");
     for (const line of stdout.split("\n").slice(1)) {
       const cols = line.trim().split(/\s+/);
-      const domain = cols[2] && cols[2].includes(".") ? cols[2] : undefined;
+      const domain = looksLikeDomain(cols[2]) ? cols[2] : undefined;
       if (cols.length >= 2 && cols[0] && cols[0] !== "NAME") rows.set(cols[0]!, { status: cols[1]!, domain });
     }
     statusCache = { at: Date.now(), rows };
@@ -157,31 +156,43 @@ export function createPlatform(opts: {
     return [...(await listRows()).keys()];
   }
 
-  /** Running must mean REACHABLE: poll the public /health for up to
-   *  probeMs (default 10s; the wake-row fire path gives a booting
-   *  replacement its ~90s). A machine that stays silent is a zombie —
-   *  fall through to start(), whose 409 dance stops and redeploys it
-   *  while the fire's release window is still open. A Running machine
-   *  with no derivable domain is trusted, never stopped — the deploy
-   *  path's 409 dance would stop a live machine we merely can't probe. */
-  async function ensure(instance: string, probeMs = 10_000): Promise<string> {
+  /** Health-first start, two modes:
+   *
+   *  "fire" (wake-row): a silent Running machine IS the lost-work
+   *  incident — stop+redeploy it while the release window is open. The
+   *  409 dance is the recovery; failed deploys re-arm on their retry
+   *  budget.
+   *
+   *  "user" (/wake): non-destructive by default. A failed probe cannot
+   *  distinguish a dead agent from egress-blocking-the-probe, and the
+   *  client polls /health itself either way — so a silent machine is
+   *  reported, never stopped. A true zombie degrades to today's
+   *  behavior (client's poll times out) instead of risking a stop of a
+   *  live, possibly unlocked machine. */
+  async function ensure(instance: string, probeMs = 10_000, mode: "user" | "fire" = "user"): Promise<string> {
+    let row: { status: string; domain?: string } | undefined;
     try {
-      const row = (await listRows()).get(instance);
-      if (row?.status === "Running") {
-        const domain = row.domain ?? (domainBase ? `${instance}.${domainBase}` : undefined);
-        if (!domain) return `already running (no domain — probe skipped): ${instance}`;
-        const url = `https://${domain}`;
-        const deadline = Date.now() + probeMs;
-        do {
-          if (await probe(url, 5_000)) return `already running (healthy): ${instance}`;
-          await new Promise((r) => setTimeout(r, Math.min(5_000, Math.max(0, deadline - Date.now()))));
-        } while (Date.now() < deadline);
-        // Silent for the whole budget: a booting replacement that never
-        // reached health, or a dead agent under a Running status.
-        return start(instance);
-      }
+      row = (await listRows()).get(instance);
     } catch {
       /* status unknown — fall through to the deploy path */
+    }
+    if (row?.status === "Running") {
+      const domain = row.domain ?? (domainBase ? `${instance}.${domainBase}` : undefined);
+      if (!domain) return `already running (no domain — probe skipped): ${instance}`;
+      const url = `https://${domain}`;
+      const deadline = Date.now() + probeMs;
+      let healthy = false;
+      do {
+        healthy = await probe(url, 5_000);
+        if (healthy) return `already running (healthy): ${instance}`;
+        await new Promise((r) => setTimeout(r, Math.min(5_000, Math.max(0, deadline - Date.now()))));
+      } while (Date.now() < deadline);
+      if (mode === "user") {
+        return `already running (probe failed — left running): ${instance}`;
+      }
+      // Fire mode: silent past the budget — a booting replacement that
+      // never reached health, or a dead agent under a Running status.
+      return start(instance);
     }
     return start(instance);
   }

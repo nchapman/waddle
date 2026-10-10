@@ -68,7 +68,7 @@ test("ensure short-circuits on Running+healthy — no deploy on a healthy machin
   assert.ok(!calls.some((c) => c.includes("deploy")), "no deploy was attempted");
 });
 
-test("ensure treats a silent Running machine as a zombie: probe, then redeploy", async () => {
+test("fire mode treats a silent Running machine as a zombie: probe, then redeploy", async () => {
   // Platform says Running, /health never answers. The fire's work must
   // still happen: stop the zombie, redeploy (the 18:43Z incident class).
   const deploys: string[][] = [];
@@ -80,10 +80,34 @@ test("ensure treats a silent Running machine as a zombie: probe, then redeploy",
     if (args[1] === "list") return { stdout: LIST_OUTPUT };
     return { stdout: "ok" };
   };
-  const detail = await tinfoil(exec, "v1", async () => false).ensure("waddle", 1);
+  const detail = await tinfoil(exec, "v1", async () => false).ensure("waddle", 1, "fire");
   assert.match(detail, /zombie recovered/);
   // list, deploy(409), stop, deploy — the zombie dance ran before the recovery deploy
   assert.deepEqual(deploys[2], ["container", "stop", "waddle"]);
+});
+
+test("user mode NEVER stops a silent Running machine — a failed probe is reported, not acted on", async () => {
+  // The client polls /health itself; a probe failure from inside the
+  // concierge cannot distinguish a dead agent from blocked egress, so
+  // the destructive dance is reserved for fires.
+  const { calls, exec } = fakeExec([{ args: ["container", "list"], stdout: LIST_OUTPUT }]);
+  const detail = await tinfoil(exec, "v1", async () => false).ensure("waddle", 1);
+  assert.match(detail, /probe failed — left running/);
+  assert.ok(!calls.some((c) => c.includes("deploy") || c.includes("stop")));
+});
+
+test("a deploy failure propagates — never swallowed into a second deploy", async () => {
+  let deploys = 0;
+  const exec: Exec = async (_c, args) => {
+    if (args[1] === "list") throw new Error("CLI broke");
+    if (args[1] === "deploy") {
+      deploys++;
+      throw new Error("quota exceeded");
+    }
+    throw new Error("unexpected");
+  };
+  await assert.rejects(() => tinfoil(exec).ensure("waddle"), /quota exceeded/);
+  assert.equal(deploys, 1, "exactly one deploy attempt");
 });
 
 test("ensure keeps probing within its budget — a slow boot is not a zombie", async () => {
@@ -100,10 +124,11 @@ test("ensure keeps probing within its budget — a slow boot is not a zombie", a
   assert.ok(!calls.some((c) => c.includes("deploy")), "no deploy was attempted");
 });
 
-// A column-drifted `container list`: no DOMAIN column at all.
+// A column-drifted `container list`: no DOMAIN column — and a DOTTED
+// TAG (v0.3.18) sitting exactly where a domain would be.
 const LIST_NO_DOMAIN = [
-  "NAME      STATUS   TAG  REPO",
-  "waddle    Running  v1    r/r",
+  "NAME      STATUS   TAG       REPO",
+  "waddle    Running  v0.3.18   r/r",
 ].join("\n");
 
 test("ensure derives the probe URL from the zone when the DOMAIN column goes missing", async () => {
