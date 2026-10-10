@@ -104,7 +104,11 @@ const CLAIM_GRACE_MS = envInt("STANDBY_CLAIM_GRACE_MS", 12 * 3600_000, 60_000);
  *  standby creates can never skew from what the client verifies (latest
  *  release of the config repo). */
 const DEPLOY_TAG = process.env.CONCIERGE_DEPLOY_TAG ?? (POOL_CAPABLE ? STANDBY_CONFIG_TAG : "");
-const platform = createPlatform({ backend: BACKEND as "docker" | "tinfoil", deployTag: DEPLOY_TAG });
+const platform = createPlatform({
+  backend: BACKEND as "docker" | "tinfoil",
+  deployTag: DEPLOY_TAG,
+  domainBase: DOMAIN_BASE,
+});
 
 // ── The table (semantics live in table.ts; platform verbs fire here) ─────
 
@@ -168,13 +172,14 @@ const postbox = createPostboxStore({ ttlMs: envInt("WAKE_POSTBOX_TTL_MS", 7 * 24
 const wakeRetries = new Map<string, number>();
 
 // ── Auth ─────────────────────────────────────────────────────────────────
-// Three tiers, one grep away:
-//   requireExternal  bb JWT or shared secret  (/wake /assign /handoff /handoff/pull /status)
+// Four tiers, one grep away:
+//   requireExternal  bb JWT or shared secret  (/wake /assign /status)
 //   requireSession   handshake-minted token   (/timer /handoff/post /handoff/post/pull)
-//   secretOk         shared secret only       (/handshake bearer)
-// /handoff/pull returns the armed credential, so its real bound is the
-// handoff fire-gate (release windows open only for wake rows the concierge
-// itself fired) — the tier alone never authorizes a pull.
+//   requireSecret    shared secret only       (/handshake bearer, /handoff, /handoff/pull)
+// The escrow routes are MACHINE verbs (arm at sleep, pull at boot — both
+// present the env shared secret) and they move the master secret: the
+// external tier — every waddle-app JWT holder — must never reach them
+// (review-caught: arm had no gate at all, pull only the fire window).
 
 /** Bearer token from a request header. */
 function bearer(req: { headers: { authorization?: string } }): string | undefined {
@@ -242,6 +247,16 @@ async function requireSession(
   return instance;
 }
 
+/** The machine tier: the shared secret only — escrow verbs and session
+ *  minting move the master secret and must stay out of external reach. */
+function requireSecret(req: { headers: { authorization?: string } }, reply: FastifyReply): boolean {
+  if (!secretOk(bearer(req), SHARED_SECRET)) {
+    reply.code(401).send({ error: "unauthorized" });
+    return false;
+  }
+  return true;
+}
+
 /** No-store on every route that can return secrets or sealed mail. */
 function noStore(reply: FastifyReply): void {
   reply.header("cache-control", "no-store");
@@ -297,7 +312,7 @@ app.post<{ Body: HandshakeRequest }>("/handshake", async (req, reply) => {
   // fire-gate the session-tier rule closed. Machines always hold the
   // shared secret (their handshake bearer); nothing legitimate loses
   // access. Constant-time, as everywhere the secret is compared.
-  if (!secretOk(bearer(req), SHARED_SECRET)) return reply.code(401).send({ error: "unauthorized" });
+  if (!requireSecret(req, reply)) return reply;
   const sessionToken = table.mintSession(instance);
   return { session_token: sessionToken };
 });
@@ -360,7 +375,7 @@ app.get("/status", async (req, reply) => {
 app.post<{ Body: HandoffArmRequest }>("/handoff", async (req, reply) => {
   const { instance, credential, ttl_ms, clear } = req.body ?? {};
   if (!allowedInstance(instance)) return reply.code(403).send({ error: "instance not allowed" });
-  if (!(await requireExternal(req, reply))) return reply;
+  if (!requireSecret(req, reply)) return reply;
   noStore(reply);
   if (clear) {
     handoff.clear(instance);
@@ -383,7 +398,7 @@ app.post<{ Body: HandoffArmRequest }>("/handoff", async (req, reply) => {
 app.post<{ Body: HandoffPullRequest }>("/handoff/pull", async (req, reply) => {
   const { instance } = req.body ?? {};
   if (!allowedInstance(instance)) return reply.code(403).send({ error: "instance not allowed" });
-  if (!(await requireExternal(req, reply))) return reply;
+  if (!requireSecret(req, reply)) return reply;
   noStore(reply);
   const res = handoff.release(instance);
   if ("notFound" in res) {

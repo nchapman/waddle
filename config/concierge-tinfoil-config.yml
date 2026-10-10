@@ -36,6 +36,7 @@ networks:
     allow:
       - api.tinfoil.sh   # the only verb surface: container deploy/stop/list
       - accounts.betterbase.dev   # JWKS fetch (client JWT verification)
+      - ddg-waddle.containers.tinfoil.dev   # instance /health probes (ensure's zombie check)
 
 
 shim:

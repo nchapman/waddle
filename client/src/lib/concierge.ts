@@ -9,17 +9,27 @@ import { CONCIERGE_TOKEN, CONCIERGE_URL } from "./config";
 
 export type ConciergeAuth = () => Promise<string | null>;
 
+/** Headers for a concierge verb: the bb JWT when the session has one,
+ *  the dev token in DEV parity, nothing in live builds without a
+ *  session (a live shared secret must never ride the bundle). */
+async function authHeaders(auth: ConciergeAuth): Promise<Record<string, string>> {
+  const token = (await auth().catch(() => null)) ?? CONCIERGE_TOKEN;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 /** Wake the primary instance through the concierge. The request is
  *  synchronous by design: the concierge runs the deploy (75–95s) before
  *  answering — the timeout only bounds a truly-stalled connection. */
-export async function wakeInstance(auth: ConciergeAuth): Promise<{ ok: boolean; detail?: string }> {
-  const token = (await auth().catch(() => null)) ?? CONCIERGE_TOKEN;
+export async function wakeInstance(
+  auth: ConciergeAuth,
+  timeoutMs = 150_000,
+): Promise<{ ok: boolean; detail?: string }> {
   try {
     const res = await fetch(`${CONCIERGE_URL}/wake`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      headers: { "Content-Type": "application/json", ...(await authHeaders(auth)) },
       body: JSON.stringify({ instance: "waddle" }),
-      signal: AbortSignal.timeout(150_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (res.ok) return { ok: true };
     const body = await res.text().catch(() => "");
@@ -54,10 +64,9 @@ export async function pollUntilHealthy(
  *  by measurement, so it cannot catch a host switch). */
 export async function assignStandby(auth: ConciergeAuth, zone: string): Promise<string | null> {
   if (!zone) return null; // no zone to bind to — never accept a host unbound
-  const token = (await auth().catch(() => null)) ?? CONCIERGE_TOKEN;
   try {
     const res = await fetch(`${CONCIERGE_URL}/assign`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: await authHeaders(auth),
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) return null;

@@ -54,10 +54,14 @@ export function createPlatform(opts: {
   deployTag?: string;
   exec?: Exec;
   probe?: Probe;
+  /** The zone instance domains live under (INSTANCE_DOMAIN_BASE) — the
+   *  probe fallback when a `container list` row lacks its DOMAIN column. */
+  domainBase?: string;
 }): Platform {
   const { backend, deployTag } = opts;
   const exec = opts.exec ?? realExec;
   const probe = opts.probe ?? realProbe;
+  const domainBase = opts.domainBase ? opts.domainBase.replace(/^\.+/, "") : "";
 
   if (backend === "docker") {
     const start = async (instance: string): Promise<string> => {
@@ -133,9 +137,12 @@ export function createPlatform(opts: {
     const { stdout } = await exec("tinfoil", ["container", "list"], { timeout: 60_000 });
     const rows = new Map<string, { status: string; domain?: string }>();
     // Header row then one row per instance: NAME STATUS DOMAIN TAG REPO.
+    // A domain carries a dot; a drifted/absent column must not smuggle
+    // the TAG in as a probe host.
     for (const line of stdout.split("\n").slice(1)) {
       const cols = line.trim().split(/\s+/);
-      if (cols.length >= 2 && cols[0] && cols[0] !== "NAME") rows.set(cols[0]!, { status: cols[1]!, domain: cols[2] });
+      const domain = cols[2] && cols[2].includes(".") ? cols[2] : undefined;
+      if (cols.length >= 2 && cols[0] && cols[0] !== "NAME") rows.set(cols[0]!, { status: cols[1]!, domain });
     }
     statusCache = { at: Date.now(), rows };
     return rows;
@@ -154,12 +161,16 @@ export function createPlatform(opts: {
    *  probeMs (default 10s; the wake-row fire path gives a booting
    *  replacement its ~90s). A machine that stays silent is a zombie —
    *  fall through to start(), whose 409 dance stops and redeploys it
-   *  while the fire's release window is still open. */
+   *  while the fire's release window is still open. A Running machine
+   *  with no derivable domain is trusted, never stopped — the deploy
+   *  path's 409 dance would stop a live machine we merely can't probe. */
   async function ensure(instance: string, probeMs = 10_000): Promise<string> {
     try {
       const row = (await listRows()).get(instance);
-      if (row?.status === "Running" && row.domain) {
-        const url = `https://${row.domain}`;
+      if (row?.status === "Running") {
+        const domain = row.domain ?? (domainBase ? `${instance}.${domainBase}` : undefined);
+        if (!domain) return `already running (no domain — probe skipped): ${instance}`;
+        const url = `https://${domain}`;
         const deadline = Date.now() + probeMs;
         do {
           if (await probe(url, 5_000)) return `already running (healthy): ${instance}`;

@@ -100,6 +100,29 @@ test("ensure keeps probing within its budget — a slow boot is not a zombie", a
   assert.ok(!calls.some((c) => c.includes("deploy")), "no deploy was attempted");
 });
 
+// A column-drifted `container list`: no DOMAIN column at all.
+const LIST_NO_DOMAIN = [
+  "NAME      STATUS   TAG  REPO",
+  "waddle    Running  v1    r/r",
+].join("\n");
+
+test("ensure derives the probe URL from the zone when the DOMAIN column goes missing", async () => {
+  // Column drift must never turn into stop+redeploy of a live machine.
+  const { calls, exec } = fakeExec([{ args: ["container", "list"], stdout: LIST_NO_DOMAIN }]);
+  const probed: string[] = [];
+  const detail = await createPlatform({ backend: "tinfoil", deployTag: "v1", exec, domainBase: "ddg.example.dev", probe: async (url) => { probed.push(url); return true; } }).ensure("waddle");
+  assert.match(detail, /already running \(healthy\)/);
+  assert.deepEqual(probed, ["https://waddle.ddg.example.dev"]);
+  assert.ok(!calls.some((c) => c.includes("deploy")), "no deploy was attempted");
+});
+
+test("a Running machine with no derivable domain is trusted, never stopped", async () => {
+  const { calls, exec } = fakeExec([{ args: ["container", "list"], stdout: LIST_NO_DOMAIN }]);
+  const detail = await createPlatform({ backend: "tinfoil", deployTag: "v1", exec, probe: async () => true }).ensure("waddle");
+  assert.match(detail, /no domain — probe skipped/);
+  assert.ok(!calls.some((c) => c.includes("deploy") || c.includes("stop")), "no stop/deploy of a machine we can't probe");
+});
+
 test("ensure deploys (with the tag) when the machine is not Running", async () => {
   const { calls, exec } = fakeExec([
     { args: ["container", "list"], stdout: LIST_OUTPUT },

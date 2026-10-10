@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { wakeInstance, pollUntilHealthy, assignStandby } from "./concierge.js";
-import { CONCIERGE_TOKEN } from "./config.js";
 
 type Responder = { ok?: boolean; body?: unknown; throwErr?: Error };
 
@@ -38,12 +37,27 @@ test("wakeInstance posts the verb with the auth token (bb token wins)", async ()
   assert.equal(bearer(calls[0]!), "Bearer bb-token");
 });
 
-test("wakeInstance falls back to the shared-secret env token and reports refusals", async () => {
+test("wakeInstance falls back to the dev token in DEV parity and reports refusals", async () => {
   const { calls } = stubFetch(() => ({ ok: false, body: "nope" }));
   const r = await wakeInstance(async () => null);
   assert.equal(r.ok, false);
   assert.match(r.detail!, /concierge refused \(503\)/);
-  assert.equal(bearer(calls[0]!), `Bearer ${CONCIERGE_TOKEN}`);
+  // In the node test env DEV=0 (live shape): no session, no dev token —
+  // the request carries NO Authorization header rather than a baked secret.
+  assert.equal((calls[0]!.init!.headers as Record<string, string>).Authorization, undefined);
+});
+
+test("wakeInstance bounds a silent stall by its abort signal", async () => {
+  // Never settles on its own — only the AbortSignal can end it.
+  globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+    })) as typeof fetch;
+  const t0 = Date.now();
+  const r = await wakeInstance(async () => "tok", 25);
+  assert.equal(r.ok, false);
+  assert.match(r.detail!, /concierge unreachable/);
+  assert.ok(Date.now() - t0 < 5_000, "returned at the timeout, not never");
 });
 
 test("wakeInstance reports a failed concierge call as unreachable", async () => {

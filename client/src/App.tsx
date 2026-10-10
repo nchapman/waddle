@@ -68,7 +68,11 @@ const fp = (s: string) => `${s.slice(0, 16)}…${s.slice(-8)}`;
  *  malformed ENCLAVE_URL — the caller then skips standby assignment. */
 function standbyZone(): string {
   try {
-    return `.${new URL(ENCLAVE_URL).hostname.split(".").slice(1).join(".")}`;
+    const parts = new URL(ENCLAVE_URL).hostname.split(".");
+    // A single-label host (dev `http://waddle:8080`) has no parent zone —
+    // "" skips standby assignment (the guard in concierge.ts requires a
+    // real suffix; `.` would be truthy and bind nothing).
+    return parts.length > 1 ? `.${parts.slice(1).join(".")}` : "";
   } catch {
     return "";
   }
