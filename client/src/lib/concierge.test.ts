@@ -46,15 +46,17 @@ test("wakeInstance with no session (live shape) says so instead of sending a bar
 });
 
 test("wakeInstance bounds a silent stall by its abort signal", async () => {
-  // Never settles on its own — only the AbortSignal can end it.
+  // Never settles on its own — only the AbortSignal can end it. The
+  // rejection carries the real abort name so the stall branch matches.
   globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) =>
     new Promise((_resolve, reject) => {
-      init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      init?.signal?.addEventListener("abort", () =>
+        reject(Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" })));
     })) as typeof fetch;
   const t0 = Date.now();
   const r = await wakeInstance(async () => "tok", 25);
   assert.equal(r.ok, false);
-  assert.match(r.detail!, /concierge unreachable/);
+  assert.match(r.detail!, /stalled/);
   assert.ok(Date.now() - t0 < 5_000, "returned at the timeout, not never");
 });
 

@@ -72,9 +72,7 @@ const verifyExternal = createVerifyExternal({
   audience: AUDIENCE,
   sharedSecret: SHARED_SECRET,
 });
-if (JWKS_URL && !AUDIENCE) {
-  console.warn("[concierge] CONCIERGE_AUDIENCE is empty: JWTs are verified for signature/issuer only. Pin the betterbase audience before trusting this in prod.");
-}
+// (an empty audience with JWKS configured now throws at boot, in auth.ts)
 
 // ── Warm-standby pool (tinfoil backend only) ───────────────────────────
 const POOL_SIZE = envInt("WARM_POOL_SIZE", 0, 0);
@@ -131,10 +129,12 @@ const table = createTable(
     // it, and the agent is asleep); the stale window just expires in 3min.
     handoff.markWakeFired(instance);
     const retryKey = `${instance}:${jobId}`;
-    // 75s probe budget: a replacement boot mid-flight gets its ~90s to
-    // reach health before we call it a zombie and redeploy — the 10-min
-    // release window comfortably covers probe + dance + boot.
-    void platform.ensure(instance, 75_000, "fire")
+    // 150s probe budget: a replacement boot takes ~90s to reach /health
+    // — the fire must out-wait a booting replacement that WILL pull the
+    // credential in-window and become the scheduled boot on its own; the
+    // dance is only for machines that never answer. (10-min window
+    // comfortably covers probe + dance + boot.)
+    void platform.ensure(instance, 150_000, "fire")
       .then((detail) => {
         wakeRetries.delete(retryKey); // budget is per failure-chain, not per schedule lifetime
         app.log.info({ instance, jobId, detail }, "wake row fired — deploy ok");

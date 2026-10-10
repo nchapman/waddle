@@ -28,6 +28,11 @@ export function createVerifyExternal(opts: {
   verifyJwt?: VerifyJwt;
 }): (token: string | undefined) => Promise<boolean> {
   const jwks = opts.jwksUrl ? createRemoteJWKSet(new URL(opts.jwksUrl)) : null;
+if (jwks && !opts.audience) {
+  // Fail fast at boot, not on the first request: an unpinned audience
+  // silently verifies ANY token from the issuer for ANY client.
+  throw new Error("CONCIERGE_JWKS_URL set but CONCIERGE_AUDIENCE is empty — refusing to start (pin the waddle client id)");
+}
   const verifyJwt: VerifyJwt =
     opts.verifyJwt ??
     (async (token) => {
