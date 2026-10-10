@@ -27,3 +27,7 @@ concierge:
 
 down:
     docker compose down
+
+# Tool-calling eval suite (the regression bar — evals/tools-*.json)
+eval:
+    node scripts/eval-tools.mjs

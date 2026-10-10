@@ -17,14 +17,14 @@ import { randomBytes } from "node:crypto";
 /** setTimeout delays are 32-bit; a longer one silently fires at ~1 ms. */
 const MAX_DELAY = 2 ** 31 - 1;
 
-export interface Entry {
+interface Entry {
   sessionToken: string;
   lastContact: number;
   stopRow?: { due: number };
   wakeRows: Map<string, { due: number }>;
 }
 
-export interface TableSnapshot {
+interface TableSnapshot {
   instance: string;
   last_contact_ago_ms: number;
   stop_due_in_ms: number | null;
@@ -77,11 +77,11 @@ export function createTable(onStop: (instance: string) => void, onWake: (instanc
   }
 
   return {
-    /** Handshake/mint: entry + session token; touching counts as contact. */
-    mintSession(instance: string): { sessionToken: string; entry: Entry } {
+    /** Handshake/mint: the session token (idempotent); touching counts as contact. */
+    mintSession(instance: string): string {
       const e = entryFor(instance);
       e.lastContact = Date.now();
-      return { sessionToken: e.sessionToken, entry: e };
+      return e.sessionToken;
     },
     entry(instance: string): Entry | undefined {
       return table.get(instance);
@@ -126,4 +126,3 @@ export function createTable(onStop: (instance: string) => void, onWake: (instanc
   };
 }
 
-export type TimerTable = ReturnType<typeof createTable>;

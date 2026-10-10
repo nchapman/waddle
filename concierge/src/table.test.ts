@@ -86,8 +86,8 @@ test("snapshot reflects live rows; sessions mint per instance", async () => {
   const a1 = t.mintSession("waddle");
   const a2 = t.mintSession("waddle");
   const b = t.mintSession("other");
-  assert.equal(a1.sessionToken, a2.sessionToken); // idempotent mint
-  assert.notEqual(a1.sessionToken, b.sessionToken);
+  assert.equal(a1, a2); // idempotent mint
+  assert.notEqual(a1, b);
   t.setStop("waddle", 1000);
   const snap = t.snapshot();
   assert.ok(snap.find((s) => s.instance === "waddle" && s.stop_due_in_ms !== null));

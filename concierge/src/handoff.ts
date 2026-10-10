@@ -116,4 +116,3 @@ export function createHandoffStore(opts: HandoffOptions = {}) {
   return { arm, markWakeFired, windowOpen, release, clear, status };
 }
 
-export type HandoffStore = ReturnType<typeof createHandoffStore>;

@@ -12,9 +12,9 @@
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",
+    "@waddle/sdk": "workspace:*",
     "fastify": "^5.0.0",
-    "jose": "^6.0.0",
-    "zod": "^4.0.0"
+    "jose": "^6.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

@@ -9,14 +9,7 @@
  * enclave side.
  */
 import type { AuthSession } from "betterbase/auth";
-
-export interface BbGrantPayload {
-  endpoint: string;
-  token: string;
-  spaceId: string;
-  epoch: number;
-  anchorId: string;
-}
+import type { BbGrant } from "@waddle/sdk";
 
 /** The anchor record the files API requires uploads to reference —
  *  created once by ensureMachineAnchor(), never updated.
@@ -72,7 +65,7 @@ export async function buildBbGrant(
   session: AuthSession | null,
   personalSpaceId: string | null,
   syncEndpoint: string,
-): Promise<BbGrantPayload | null> {
+): Promise<BbGrant | null> {
   if (!session || !personalSpaceId || !syncEndpoint) return null;
   try {
     const token = await session.getToken();

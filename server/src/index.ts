@@ -231,11 +231,7 @@ app.get("/probe", async () => {
 // boots. The client is a pipe — it never opens the blob.
 app.addContentTypeParser("application/octet-stream", { parseAs: "buffer" }, (_req, body, done) => done(null, body));
 app.post("/unlock", async (request, reply) => {
-  const { secret, nonce, inferenceKey, bb, background } = (request.body ?? {}) as UnlockRequest & {
-    inferenceKey?: string;
-    background?: boolean;
-    bb?: import("./bb-backup.js").BbGrant;
-  };
+  const { secret, nonce, inferenceKey, bb, background } = (request.body ?? {}) as UnlockRequest;
   if (!secret || !nonce) return reply.code(400).send({ error: "secret and nonce required" });
   try {
     const { token, enrolled } = lock.unlock(secret, nonce);
@@ -367,7 +363,7 @@ app.post("/unlock", async (request, reply) => {
     if (inferenceKey) initAgent(inferenceKey);
     restoring = false;
     const prefs = getPreferences();
-    const res: UnlockResponse & { background?: boolean } = { token, enrolled, background: prefs.background };
+    const res: UnlockResponse = { token, enrolled, background: prefs.background };
     return res;
   } catch (e) {
     restoring = false;

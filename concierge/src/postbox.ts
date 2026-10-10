@@ -64,4 +64,3 @@ export function createPostboxStore(opts: PostboxOptions = {}) {
   return { post, pull, clear, status };
 }
 
-export type PostboxStore = ReturnType<typeof createPostboxStore>;

@@ -11,7 +11,7 @@ const subtle = webcrypto.subtle;
 const dir = mkdtempSync(join(tmpdir(), "waddle-bb-"));
 process.env.DATA_DIR = dir;
 const bb = await import("./bb-backup.js");
-type BbGrant = import("./bb-backup.js").BbGrant;
+type BbGrant = import("@waddle/sdk").BbGrant;
 
 // A tiny in-memory betterbase files server mimicking the real semantics
 // (sync bf55fe7): PUTs are create-only — different bytes under a live id

@@ -7,7 +7,7 @@
  * Light. Real custody (passphrase wrap / OS keystore) comes later —
  * the wire protocol does not change when it does.
  */
-import type { UnlockResponse, StateResponse } from "@waddle/sdk";
+import type { BbGrant, UnlockResponse, StateResponse } from "@waddle/sdk";
 
 /** Structural: the attested SecureClient in prod, plain fetch in dev parity mode. */
 export type VerifiedFetcher = { fetch: typeof fetch };
@@ -49,7 +49,7 @@ export async function unlock(
   client: VerifiedFetcher,
   enclaveURL: string,
   inferenceKey?: string,
-  bb?: import("./bb-grant.js").BbGrantPayload,
+  bb?: BbGrant,
   background?: boolean,
 ): Promise<UnlockResponse & { background?: boolean }> {
   const nonce = b64(crypto.getRandomValues(new Uint8Array(16)));

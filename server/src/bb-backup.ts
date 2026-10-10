@@ -26,21 +26,9 @@ import { join } from "node:path";
 import { derive, seal, open } from "./keys.js";
 import { createArchive, restoreArchive, machineFingerprint } from "./archive.js";
 import { DATA_DIR } from "./state.js";
+import type { BbGrant } from "@waddle/sdk";
 
 const subtle = webcrypto.subtle;
-
-export interface BbGrant {
-  /** Sync base URL, enclave-reachable (e.g. https://sync.example.com/api/v1). */
-  endpoint: string;
-  /** Bearer token for the sync API. */
-  token: string;
-  /** Personal space uuid. */
-  spaceId: string;
-  /** Current epoch number (wrapped-DEK prefix). */
-  epoch: number;
-  /** Record id the files API requires uploads to reference (anchor). */
-  anchorId: string;
-}
 
 // Generational slots (v3): betterbase files are immutable (create-only;
 // a conflicting PUT is an honest 409, byte-identical retries idempotent).

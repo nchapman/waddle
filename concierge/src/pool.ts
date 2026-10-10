@@ -155,7 +155,7 @@ export function createPool(cfg: PoolConfig, deps: PoolDeps): Pool {
     // adopted burn on the claim-grace clock, not warmth — users still
     // get their standby (temporary over-burn, bounded by the grace).
     const warmable = live().filter((m) => m.state !== "foreign").length;
-    if (cfg.size > 0 && warmable < cfg.size && !(deps.canFill && !deps.canFill())) {
+    if (cfg.size > 0 && warmable < cfg.size && (deps.canFill?.() ?? true)) {
       const name = deps.nextName();
       machines.set(name, { name, state: "booting", createdAt: deps.now() });
       try {

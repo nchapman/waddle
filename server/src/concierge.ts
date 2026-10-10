@@ -9,6 +9,15 @@
  * the pino shape so the ring picks them up.
  */
 import type { Schedule } from "./schedules.js";
+import type {
+  HandshakeResponse,
+  HandoffArmResponse,
+  HandoffPullResponse,
+  PostboxPostResponse,
+  PostboxPullResponse,
+  TimerRequest,
+  TimerResponse,
+} from "@waddle/sdk";
 
 const CONCIERGE_URL = process.env.CONCIERGE_URL ?? "";
 const INSTANCE = process.env.WADDLE_INSTANCE ?? "waddle";
@@ -54,7 +63,7 @@ async function post<T>(path: string, body: object, bearer: string): Promise<T | 
 
 /** Handshake at unlock — `bearer` is the (fresh) betterbase grant token. */
 export async function handshakeConcierge(bearer: string): Promise<boolean> {
-  const r = await post<{ session_token: string }>("/handshake", {}, bearer);
+  const r = await post<HandshakeResponse>("/handshake", {}, bearer);
   sessionToken = r?.session_token ?? null;
   return sessionToken !== null;
 }
@@ -70,7 +79,8 @@ export async function writeTimer(row: {
   jobId?: string;
 }): Promise<boolean> {
   if (!sessionToken) return false;
-  const r = await post<{ ok: boolean }>("/timer", { ...row, due_ms: row.dueMs, job_id: row.jobId }, sessionToken);
+  const body: Omit<TimerRequest, "instance"> = { action: row.action, due_ms: row.dueMs, job_id: row.jobId };
+  const r = await post<TimerResponse>("/timer", body, sessionToken);
   return r?.ok === true;
 }
 
@@ -96,7 +106,7 @@ export async function deathFlare(): Promise<void> {
  *  sleep gate, so recurring schedules stay covered without a long-lived
  *  row. */
 export async function armHandoff(credential: Record<string, unknown>, bearer: string, ttlMs?: number): Promise<boolean> {
-  const r = await post<{ ok: boolean }>("/handoff", { credential, ttl_ms: ttlMs }, bearer);
+  const r = await post<HandoffArmResponse>("/handoff", { credential, ttl_ms: ttlMs }, bearer);
   return r?.ok === true;
 }
 
@@ -126,7 +136,7 @@ export async function pullHandoff(): Promise<PulledCredential | null> {
     });
     log("POST /handoff/pull", { status: res.status });
     if (!res.ok) return null;
-    const row = (await res.json()) as { credential?: PulledCredential };
+    const row = (await res.json()) as HandoffPullResponse;
     if (!row.credential || typeof row.credential !== "object") return null;
     return row.credential;
   } catch (e) {
@@ -140,7 +150,7 @@ export async function pullHandoff(): Promise<PulledCredential | null> {
  *  Session-tier auth like every table write. */
 export async function postPostbox(blob: string): Promise<boolean> {
   if (!sessionToken) return false;
-  const r = await post<{ ok: boolean }>("/handoff/post", { blob }, sessionToken);
+  const r = await post<PostboxPostResponse>("/handoff/post", { blob }, sessionToken);
   return r?.ok === true;
 }
 
@@ -148,6 +158,6 @@ export async function postPostbox(blob: string): Promise<boolean> {
  *  (no mail / unreachable — both normal). */
 export async function pullPostbox(): Promise<string | null> {
   if (!sessionToken) return null;
-  const r = await post<{ blob?: string }>("/handoff/post/pull", {}, sessionToken);
+  const r = await post<PostboxPullResponse>("/handoff/post/pull", {}, sessionToken);
   return typeof r?.blob === "string" && r.blob ? r.blob : null;
 }
