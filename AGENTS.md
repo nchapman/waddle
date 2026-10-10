@@ -51,7 +51,9 @@
 
 ## Local layout
 
-- vite :5173 (dev/compose parity), :5174 (live mode); compose :8080
+- vite :5173 (dev/compose parity), :5174 (live mode — BLOCKED by default:
+  concierge `CONCIERGE_ALLOWED_ORIGINS` defaults to localhost:5173; use
+  `pnpm dev --port 5174`, not `pnpm dev -- --port 5174`); compose :8080
   (`docker compose down -v && up -d`); concierge :5390; betterbase-dev is a
   compose stack in `../betterbase-dev` (:5377/:5379, `docker compose -f
   docker-compose.yml -f docker-compose.dev.yml up -d`). Test account
@@ -64,7 +66,7 @@
   wake-proofs.md narrative, which is tracked).
 - Stray `.bak`/`.bak2` files are old debris — do not commit.
 
-## Live-environment facts (as of v0.0.44 / concierge v0.3.11)
+## Live-environment facts (as of v0.0.47 / concierge v0.3.14)
 
 - ATC (atc.tinfoil.sh) 500s intermittently ("Failed to build attestation
   bundle") — blocks client verification, fail-closed; recovers on retry in
@@ -77,8 +79,8 @@
   (100.100.100.100 tailscale → AdGuard → upstreams → authoritative); the
   record was healthy everywhere else. Clear the cache only AFTER upstream
   heals, or the clear re-poisons (30-min TTL).
-- Waddle deploys take ~75-95s (platform-side); wake fire → restricted
-  self-unlock ≈ 96s.
+- Waddle deploys take ~75-95s (platform-side); wake fire → restored+
+  self-unlocked ≈ 80-96s (observed 79s at v0.0.47, 96s at v0.0.45).
 
 ## Browser-driving rules (Playwright MCP against the client)
 
@@ -89,8 +91,10 @@
   `browser_snapshot` for full state; `browser_evaluate` for chat-log tails;
   screenshots time out on the live-stream element (use DOM extracts for
   evidence).
-- Server-fired turns (scheduled runs) don't append to the live thread —
-  reload + "resume session" renders them (parked client bug).
+- Server-fired turns mid-session (scheduled runs while the client
+  watches) don't append to the live thread — reload + "resume session"
+  renders them (parked client bug). Unlock-time postbox merges DO render
+  live (proven, proof 6 read-back).
 
 ## Two-tier autonomy (decided 2026-10-10, shipped v0.0.47 — proven live)
 
@@ -114,19 +118,20 @@ are the parked fixes. Full statement in PLAN.md "[Decided 2026-10-10]
 Two-tier autonomy" + the [Implemented] block. betterbase-accounts#1
 closed — no bb changes.
 
-## Known open items (as of v0.0.44 / concierge v0.3.11)
+## Known open items (as of v0.0.47 / concierge v0.3.14)
 
-- **Autonomous output dies with the machine** (bb-grant gap; schedules
-  survive and re-fire at next unlock — eventual consistency, proven).
-  Parked fix: concierge-as-postbox (sealed event tail POSTed at sleep,
-  merged at next unlock).
+- ~~Autonomous output dies with the machine~~ — RESOLVED: the postbox
+  (v0.0.45+) + context snapshot (v0.0.47) deliver unattended output
+  exactly once at next unlock; proven live, proof 6.
 - Client bugs filed: after /assign the SDK's pinned fetch still targets the
   primary ("refusing to send request… bound to the verified enclave/proxy");
   zombie stale locked:false "resume session"; reload re-sends last message;
   server-fired turns need reload (above).
-- Agent context does not survive boots (UI replays history; the pi session
-  starts fresh). Planned seam: `session.sendCustomMessage(..., {deliverAs:
-  "nextTurn"})` on history_restore.
+- Agent context now rides the snapshot on restored boots (proof 6:
+  "session resumed natively from …/sessions/…" in the boot log);
+  fresh-volume boots still start a new pi session — the planned seam
+  (`session.sendCustomMessage(..., {deliverAs: "nextTurn"})` on
+  history_restore) stays parked for smoothing the UI-replay path.
 - Browser tools: no scroll, and body links on long pages (wikipedia) fall
   outside the 80-element clickable index — the agent works around it by
   navigating directly (observed live).
@@ -136,5 +141,6 @@ closed — no bb changes.
   poison-arm overwrite, captured-release-is-the-secret; /handshake→/timer
   stays open to secret-holders until then.
 - User decisions pending: pool overnight economics (one warm standby always
-  burning); restricted-mode scope for real scheduled work (browser? with
-  which approvals?); optional CONCIERGE_SHARED_SECRET rotation.
+  burning); restricted-mode scope for real scheduled work (read-only proven
+  live — browser? with which approvals? still open); optional
+  CONCIERGE_SHARED_SECRET rotation.

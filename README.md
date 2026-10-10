@@ -14,7 +14,7 @@ decisions, and the phased build plan with acceptance gates.
 |---|---|
 | `server/` | The server that runs in the enclave (gateway + pi harness) |
 | `client/` | React client — assistant-ui over AI SDK, attestation via tinfoil SDK |
-| `concierge/` | The always-on operator service — wake-only for now (scoped key, betterbase JWT auth) |
+| `concierge/` | The always-on operator service — scheduled wake fires + memory-only escrow (tier-1 autonomy), postbox, warm-standby pool; betterbase JWT + shared-secret auth |
 | `sdk/` | The wire contract: event log protocol shared by vm + client (+ Expo later) |
 | `config/` | tinfoil-config.yml template (lives in its own public repo when deployed) |
 | `PLAN.md` | The design and build plan |
