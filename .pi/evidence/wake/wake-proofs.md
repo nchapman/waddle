@@ -508,3 +508,47 @@ unattended run delivered"** (4 = both prompts + both replies). DOM extract:
    stray ran v0.0.46 under a v0.0.47 pin — the TOFU pin doing its job.
 4. AdGuard single-name NXDOMAIN poison (18:02–18:30:50Z) blocked only the
    browser; curl via `--resolve` kept working; healed at TTL expiry.
+
+## 2026-10-10 21:45–23:59 UTC — the v0.0.48 deploy night: DNS teardown proved, the two designed reaps, JWKS live
+
+**Deploy train:** waddle v0.0.48 (cleanup + /health version wiring) + concierge
+v0.3.15→v0.3.20 (platform seam + ensure modes, bb-JWT external tier, secret-only
+escrow routes). Both /health endpoints now report their true package versions.
+
+**DNS mechanism, proved at Cloudflare's authoritative NS:** stop = DNS teardown
+(`dig @harley.ns.cloudflare.com` on a Stopped instance → NXDOMAIN aa; the two
+Running standbys → NOERROR). Deploy re-adds the record in ~90s. SOA negative TTL
+is 1800s, so every resolver that queries during a sleep caches NXDOMAIN ≤30min —
+the "browser can't reach a freshly-woken machine" class is structural, not flaky.
+Decision (PLAN.md): machines are cattle — per-boot `waddle-<rand>` names, client
+discovery via the concierge, TOFU anchored on zone+measurement. The browser-side
+DNS workaround attempt was rejected by the user (correctly — treat the disease).
+
+**The two "mystery stops" of a fresh deploy are both designed:**
+1. old concierge's backstop sweep (table entry from proof 6, ~28h quiet > 24h
+   HARD_STOP) stopped the first boot within minutes;
+2. the locked-boot stop backstop (WADDLE_IDLE_MS+30s = 10.5min) stopped the
+   second at exactly boot+10.5min (22:02:52Z Running → 22:13:34Z Stopping).
+A deployed-but-unattended machine lives ~10.5min by design.
+
+**JWKS leg, live-verified:** browser wake with a betterbase session →
+`/wake` 401 at v0.3.16 (issuer mismatch: prod tokens stamp iss=
+https://betterbase.dev, the apex — compose default accounts.betterbase.dev is
+wrong) → fixed at v0.3.17 → wake 202 → concierge deploy → boot → attestation →
+TOFU re-pin (pinned 33d8a8fb… → current a80d1058…, release v0.0.48 verified
+against the config repo's latest) → lock screen. Client wake verified to the
+unlock form; the unlock itself is the user's secret.
+
+**ensure() lessons (the review loop):** the health probe needs egress for the
+instance zone (added); user mode (/wake) must NEVER stop a silent Running
+machine — probe failure cannot distinguish dead agent from blocked egress — the
+stop+redeploy dance is fire-mode-only (150s probe > ~90s boot, so a replacement
+booting in-window is left to become the scheduled boot); a dotted TAG (v0.3.18)
+in a drifted DOMAIN column must not become a probe host (alphabetic-last-label
+guard); deploy failures propagate instead of re-running.
+
+**Open at 23:59Z:** concierge update wedged at the platform's certificate stage
+×5 (ACME suspicion); v0.3.17 serving (blue-green, no outage), v0.3.19/0.3.20
+released and pending deploy. Exposure window note: v0.3.16/17 have JWKS on with
+the escrow routes still external-tier — nothing was armed (rows:0) during the
+window, so no escrow was at risk.

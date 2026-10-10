@@ -83,12 +83,21 @@
   remembers. Both fired during the v0.0.48 deploy (22:13:34Z stop =
   boot+10.5min exact). "Mystery stops" of a fresh deploy are one of these
   two, not platform flakiness.
-- **Client /wake + /assign are 401 in live mode (as of v0.0.48)**: the
-  deployed concierge has no CONCIERGE_JWKS_URL (secret-only auth) and the
-  client's VITE_CONCIERGE_TOKEN predates the vault-only rotation, while
-  its egress allowlist (api.tinfoil.sh only) couldn't fetch JWKS anyway.
-  Decision pending: JWKS trio + egress for betterbase.dev (the designed
-  bb-JWT client path) vs rotating the shared secret into the client env.
+- **Client /wake + /assign 401s FIXED (v0.3.16–17)**: the external tier
+  now verifies betterbase JWTs (CONCIERGE_JWKS_URL + ISSUER + AUDIENCE in
+  the config, egress-allowed for the JWKS fetch — note prod tokens stamp
+  iss=https://betterbase.dev, the APEX, not accounts.); machines still
+  auth with the shared secret (the JWT leg falls through to it — JWKS
+  being on must never lock machines out). Live-verified 2026-10-10:
+  browser wake → 202 → deploy. The escrow routes (/handoff,
+  /handoff/pull, /handshake) are secret-ONLY from v0.3.19+ — they move
+  the master secret and are machine verbs; the bb-JWT tier must never
+  reach them.
+- **Concierge updates can wedge on the platform's certificate stage**
+  (2026-10-10 night: five consecutive `update` failures at
+  "starting: certificate", ~40min; the old version keeps serving —
+  blue-green, no outage). `container cancel` clears the wedged update;
+  retry later. Smells like ACME rate-limiting after the first failure.
 - ATC (atc.tinfoil.sh) 500s intermittently ("Failed to build attestation
   bundle") — blocks client verification, fail-closed; recovers on retry in
   minutes. `curl -X POST https://atc.tinfoil.sh/attestation` is the probe.
