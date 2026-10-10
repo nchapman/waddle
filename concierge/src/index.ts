@@ -197,16 +197,18 @@ const table = createTable(
       .catch((e) => app.log.warn({ instance, err: String(e) }, "stop row fired but failed"));
   },
   (instance, jobId) => {
-    // A schedule-boot deploys, and ONLY a deploy that SUCCEEDS may open a
-    // handoff release window — opening it on the timer alone lets any
-    // in-flight boot (a pool standby) steal the one-shot pull (SME
-    // review). A failed deploy re-arms the row: the timer table spent it,
-    // and nobody else will (the agent is asleep) — retry a few times,
-    // then give up loudly rather than loop forever on a broken deploy.
+    // Open the release window at FIRE time, before the deploy: the boot's
+    // pull lands seconds after the app starts (~90s), which can BEAT the
+    // deploy CLI's own resolve — marking after it inverted the race and
+    // the intended machine pulled `no-fire` (live-caught 01:23Z). The
+    // standby-steal vector this ordering once guarded against is closed
+    // by the pool's canFill deferral instead: no replacement boots while
+    // a window is open. A failed deploy re-arms its row (the table spent
+    // it, and the agent is asleep); the stale window just expires in 3min.
+    handoff.markWakeFired(instance);
     void ensureInstance(instance)
       .then((detail) => {
-        handoff.markWakeFired(instance);
-        app.log.info({ instance, jobId, detail }, "wake row fired — deploy ok, release window open");
+        app.log.info({ instance, jobId, detail }, "wake row fired — deploy ok");
       })
       .catch((e) => {
         const key = `${instance}:${jobId}`;
