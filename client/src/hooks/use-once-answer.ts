@@ -3,6 +3,17 @@
  *  answer exactly once and never while the user is typing elsewhere. */
 import { useEffect, useRef } from "react";
 
+/** The key→answer decision (pure — the hook's testable core): ⏎ yes,
+ *  esc no, null when the key is neither or the user is typing in an
+ *  input/textarea. */
+export function answerFromKey(e: { key: string; target: unknown }): boolean | null {
+  const tag = (e.target as { tagName?: unknown } | null)?.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA") return null;
+  if (e.key === "Enter") return true;
+  if (e.key === "Escape") return false;
+  return null;
+}
+
 export function useOnceAnswer(onAnswer: (ok: boolean) => void) {
   const answered = useRef(false);
   const answer = (ok: boolean) => {
@@ -13,14 +24,10 @@ export function useOnceAnswer(onAnswer: (ok: boolean) => void) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLElement && ["INPUT", "TEXTAREA"].includes(e.target.tagName)) return;
-      if (e.key === "Enter") {
-        e.preventDefault();
-        answer(true);
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        answer(false);
-      }
+      const verdict = answerFromKey(e);
+      if (verdict === null) return;
+      e.preventDefault();
+      answer(verdict);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);

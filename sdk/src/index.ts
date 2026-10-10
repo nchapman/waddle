@@ -139,9 +139,9 @@ export interface ErrorEvent {
 // The always-on lifecycle timer: a table of {instance, action, due} rows
 // plus memory-only escrows. Every route is POST with `instance` in the
 // body (no GETs — no caching, no URL-borne secrets). Auth tiers:
-//   external  bb JWT or shared secret  (/handshake /wake /assign /handoff)
+//   external  bb JWT or shared secret  (/wake /assign /handoff /handoff/pull)
 //   session   handshake-minted token   (/timer /handoff/post /handoff/post/pull)
-//   secret    shared secret only       (/handshake bearer, /handoff/pull)
+//   secret    shared secret only       (/handshake bearer — it mints sessions)
 
 export interface HandshakeRequest {
   instance: string;

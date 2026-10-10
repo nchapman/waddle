@@ -32,7 +32,7 @@ import { buildBbGrant, resolveSyncEndpoint } from "./lib/bb-grant";
 import { frameBus } from "./lib/frame-bus";
 import { WaddleChatTransport } from "./lib/waddle-transport";
 import { DEV, ENCLAVE_URL, CONFIG_REPO, BB_CLIENT_ID, BB_DOMAIN } from "./lib/config";
-import { eventsToRows, rowsToUIMessages, toolStartRow, toolEndRow, approvalRow, type ChatMessage } from "./lib/history";
+import { eventsToRows, rowsToUIMessages, toolStartRow, toolEndRow, approvalRow, historyRow, type ChatMessage } from "./lib/history";
 import { wakeInstance, pollUntilHealthy, assignStandby } from "./lib/concierge";
 
 /** The machine this session talks to: the primary, or a warm standby
@@ -62,6 +62,17 @@ type State =
     };
 
 const fp = (s: string) => `${s.slice(0, 16)}…${s.slice(-8)}`;
+
+/** The standby must live in the primary's operator domain: the TOFU pin
+ *  travels by measurement, so it cannot catch a host switch. Empty on a
+ *  malformed ENCLAVE_URL — the caller then skips standby assignment. */
+function standbyZone(): string {
+  try {
+    return `.${new URL(ENCLAVE_URL).hostname.split(".").slice(1).join(".")}`;
+  } catch {
+    return "";
+  }
+}
 
 /** Dev parity: a structural stand-in so session/unlock code paths run unchanged. */
 const DEV_RESULT = {
@@ -172,9 +183,11 @@ export function App() {
           autoWokeRef.current = true;
           // Pool first: a warm standby means ~7s to live (attest + unlock)
           // instead of a ~75s deploy. Same measured config → the pin holds
-          // (assignStandby zone-binds the URL so the pin CAN hold).
-          const zone = `.${new URL(ENCLAVE_URL).hostname.split(".").slice(1).join(".")}`;
-          const standby = await assignStandby(conciergeAuth, zone);
+          // (assignStandby zone-binds the URL so the pin CAN hold). A
+          // malformed ENCLAVE_URL skips the standby path — the wake path
+          // (which resets activeEnclave) is still the honest fallback.
+          const zone = standbyZone();
+          const standby = zone ? await assignStandby(conciergeAuth, zone) : null;
           if (standby) {
             activeEnclave = standby;
             void run(); // verify the standby; its unlock flow continues there
@@ -230,7 +243,7 @@ export function App() {
       }
       if (s.phase !== "chat") return s;
       if (event.type === "history_row") {
-        const messages = [...s.messages, { role: event.role, text: event.text } as ChatMessage];
+        const messages = [...s.messages, historyRow(event.role, event.text)];
         return { ...s, messages };
       }
       if (event.type === "browser_control") {

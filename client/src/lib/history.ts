@@ -61,6 +61,12 @@ export function approvalRow(tool: string, approved: boolean): ChatMessage {
   return { role: "tool", text: `${approved ? "🔓" : "⛔"} ${tool} ${approved ? "approved" : "denied"} by user` };
 }
 
+/** A relayed history row — tool rows get their structured form back via
+ *  parseToolText so live relays render the same chips a seeded log does. */
+export function historyRow(role: ChatMessage["role"], text: string): ChatMessage {
+  return { role, text, ...(role === "tool" ? { tool: parseToolText(text) } : {}) };
+}
+
 /** Deterministic history seed: map sealed log events to surface rows. */
 export function eventsToRows(events: Array<Record<string, unknown>>): ChatMessage[] {
   const rows: ChatMessage[] = [];
@@ -70,7 +76,7 @@ export function eventsToRows(events: Array<Record<string, unknown>>): ChatMessag
       rows.push({ role: e.role as "user" | "assistant", text: String(e.text ?? "") });
     } else if (t === "history_row" && typeof e.text === "string") {
       const role = e.role as ChatMessage["role"];
-      rows.push({ role, text: e.text, ...(role === "tool" ? { tool: parseToolText(e.text) } : {}) });
+      rows.push(historyRow(role, e.text));
     } else if (t === "tool_start") {
       rows.push(toolStartRow(String(e.tool ?? ""), e.args ?? {}));
     } else if (t === "tool_end") {

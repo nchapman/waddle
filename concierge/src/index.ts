@@ -161,9 +161,12 @@ const wakeRetries = new Map<string, number>();
 
 // ── Auth ─────────────────────────────────────────────────────────────────
 // Three tiers, one grep away:
-//   requireExternal  bb JWT or shared secret  (/wake /assign /handoff /status)
+//   requireExternal  bb JWT or shared secret  (/wake /assign /handoff /handoff/pull /status)
 //   requireSession   handshake-minted token   (/timer /handoff/post /handoff/post/pull)
-//   secretOk         shared secret only       (/handshake bearer, /handoff/pull)
+//   secretOk         shared secret only       (/handshake bearer)
+// /handoff/pull returns the armed credential, so its real bound is the
+// handoff fire-gate (release windows open only for wake rows the concierge
+// itself fired) — the tier alone never authorizes a pull.
 
 /** Bearer token from a request header. */
 function bearer(req: { headers: { authorization?: string } }): string | undefined {

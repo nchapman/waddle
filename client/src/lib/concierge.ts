@@ -17,6 +17,7 @@ export async function wakeInstance(auth: ConciergeAuth): Promise<{ ok: boolean; 
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify({ instance: "waddle" }),
+      signal: AbortSignal.timeout(10_000),
     });
     if (res.ok) return { ok: true };
     const body = await res.text().catch(() => "");
@@ -31,9 +32,10 @@ export async function pollUntilHealthy(
   url: string,
   attempts = 60,
   onTick?: (attempt: number) => void,
+  intervalMs = 2_000,
 ): Promise<boolean> {
   for (let i = 0; i < attempts; i++) {
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, intervalMs));
     try {
       const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(4000) });
       if (res.ok) return true;

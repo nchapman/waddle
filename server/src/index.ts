@@ -260,7 +260,7 @@ app.post("/unlock", async (request, reply) => {
     if (bb) {
       try {
         await setBbGrant(secret, bb);
-        app.log.info({ endpoint: bb.endpoint, space: bb.spaceId, epoch: bb.epoch, anchor: bb.anchorId, tokenLen: bb.token.length }, "[dbg] bb grant armed");
+        app.log.info({ endpoint: bb.endpoint, space: bb.spaceId, epoch: bb.epoch, anchor: bb.anchorId, tokenLen: bb.token?.length ?? 0 }, "[dbg] bb grant armed");
       } catch (e) {
         app.log.warn({ err: String(e) }, "bb grant rejected — backups disabled this session");
         clearBbGrant();

@@ -6,7 +6,13 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-const exec = promisify(execFile);
+/** One shell-out. Injectable so tests pin the CLI-output contracts. */
+export type Exec = (
+  cmd: string,
+  args: readonly string[],
+  opts?: { timeout?: number },
+) => Promise<{ stdout: string }>;
+const realExec = promisify(execFile) as Exec;
 
 export interface Platform {
   /** Deploy/start an instance (zombie-recovering on tinfoil). */
@@ -19,20 +25,29 @@ export interface Platform {
   statuses(): Promise<Map<string, string>>;
   /** Every instance name the backend knows. */
   list(): Promise<string[]>;
-  /** Health-first start: Running needs nothing (no zombie dance on a
-   *  healthy machine); otherwise start(). */
+  /** Health-first start: a machine the platform reports Running needs
+   *  nothing — the naive path would run the zombie stop-deploy dance on a
+   *  healthy machine. Residual (accepted, live-verified): a zombie (agent
+   *  dead, platform still reads Running) short-circuits too, and the
+   *  occurrence is consumed with no boot — tight fire booking at sleep
+   *  (≤ replacement-deploy cadence) is the standing mitigation. */
   ensure(instance: string): Promise<string>;
 }
 
 /** Last few lines of CLI output, pipe-joined — deploy details for logs. */
 const tail = (s: string, n = 3): string => s.trim().split("\n").slice(-n).join(" | ");
 
-export function createPlatform(opts: { backend: "docker" | "tinfoil"; deployTag?: string }): Platform {
+export function createPlatform(opts: {
+  backend: "docker" | "tinfoil";
+  deployTag?: string;
+  exec?: Exec;
+}): Platform {
   const { backend, deployTag } = opts;
+  const exec = opts.exec ?? realExec;
 
   if (backend === "docker") {
     const start = async (instance: string): Promise<string> => {
-      await exec("docker", ["start", instance]);
+      await exec("docker", ["start", instance], { timeout: 120_000 });
       return `docker:${instance} started`;
     };
     const rest = async (instance: string): Promise<string> => {
@@ -44,7 +59,7 @@ export function createPlatform(opts: { backend: "docker" | "tinfoil"; deployTag?
       rest,
       statuses: () => Promise.resolve(new Map()), // no status feed needed on docker
       async list() {
-        const { stdout } = await exec("docker", ["ps", "-a", "--format", "{{.Names}}"]);
+        const { stdout } = await exec("docker", ["ps", "-a", "--format", "{{.Names}}"], { timeout: 60_000 });
         return stdout.split("\n").map((s) => s.trim()).filter(Boolean);
       },
       ensure: start,
