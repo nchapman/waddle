@@ -24,7 +24,7 @@ containers:
       # Client auth: betterbase JWTs (signature+issuer+audience) on the
       # external tier — the per-user identity the cattle naming builds on
       - CONCIERGE_JWKS_URL: "https://accounts.betterbase.dev/.well-known/jwks.json"
-      - CONCIERGE_ISSUER: "https://accounts.betterbase.dev"
+      - CONCIERGE_ISSUER: "https://betterbase.dev"   # the apex is what prod accounts stamps in iss
       - CONCIERGE_AUDIENCE: "d096d76d-d066-4ac9-956c-ad3f35c57450"
     secrets:
       - TINFOIL_ADMIN_KEY
