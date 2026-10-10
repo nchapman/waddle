@@ -24,7 +24,7 @@
   never verifies it, so no TOFU re-pin for concierge deploys.
 - **The shim `paths` list is an exact-match ingress allowlist** — every new
   endpoint path must be added to the concierge config's shim or it 404s at
-  the gateway (bit us twice: /handoff, /handoff/pull).
+  the gateway (bit us three times: /handoff, /handoff/pull, /handoff/post + /handoff/post/pull — all in as of concierge v0.3.12).
 - **Concierge escrow is memory-only** — no volumes, no keyservers, nothing at
   rest (user decision, final). Machines are cattle; the shelf is the state.
 

@@ -414,3 +414,37 @@ survived sleep → fire → deploy → restricted run → re-sleep → next
 unlock in the user's own store, and the task's reply reached the user
 with zero human action at fire time. Output survival (postbox) remains
 the parked design fix, not a regression.
+
+## Proof 5 — schedule-scoped key + postbox (the sign of life), 2026-10-10 14:08–14:38Z
+
+Waddle **v0.0.45** (46ebdc1a), concierge **v0.3.12** (33fddb2b, STANDBY_CONFIG_TAG=v0.0.45,
+shim paths += /handoff/post, /handoff/post/pull).
+
+**Escrow:** at 💤 sleep 14:10:26Z the machine armed `{autonomyKey, schedules[]}` —
+HKDF(master,"autonomy") only. The master secret and inference key never travel.
+
+**Unattended cycle (no user, no master on the machine):**
+- 14:13:00Z — concierge fires, deploys with the escrow
+- 14:14:22Z — `/health` → `locked:false` — the boot self-unlocked from the subkey
+  (boot log: "autonomous boot — unlocked from wake credential (restricted mode)")
+- ~14:16Z — run completes; 14:25:57Z — idle gate fires, machine seals
+  `{events[], schedules[], cancelledIds[]}` with the subkey and POSTs it to the
+  concierge `/handoff/post`, then stops
+
+**Read-back at next unlock (14:38Z)** — postbox pulled inside the unlock POST and
+merged before the ticker could re-fire. DOM extract (inner​Text counts):
+
+- `[scheduled: sign of life proof]` → **1** occurrence (exactly-once delivery, no re-fire)
+- `SIGN-OF-LIFE ok` → 3 total = 1 delivered answer + 1 in the user's booking message
+  + 1 in the scheduled prompt echo — one true delivery
+- system marker: `[system] postbox merged — 4 events from the unattended run delivered`
+- transcript tail, in order: booking → "Scheduled, nothing else called. 🦆" →
+  `[system] autonomous boot` → scheduled prompt → **SIGN-OF-LIFE ok** → postbox-merged marker
+
+**Also proven this session:** subkey unlock leaves the master's verifier untouched
+(55 server tests incl. `Lock.unlockAutonomous`), cancel tombstones survive the merge,
+takeover re-seals the autonomous log into the master log, wrong-key log read throws.
+
+Incidents during the ceremony (both external): Quad9 NXDOMAIN for the enclave domain
+(recovered 07:32:44Z), ATC 500 "Failed to build attestation bundle" 14:26–14:37Z
+(recovered on its own; unlocked on first retry after).
