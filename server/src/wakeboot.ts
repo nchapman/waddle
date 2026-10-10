@@ -2,16 +2,18 @@
  * Wake autonomy: a boot credential for unattended scheduled runs.
  *
  * A wake-booted machine starts locked with no keys — but the concierge
- * rebooted it precisely because work is due. When the user opted in
- * (WADDLE_WAKE_AUTONOMY=1), unlock arms a credential that the next boot
- * consumes to self-unlock: run the due work, post the results, die.
+ * rebooted it precisely because work is due. The user opted into
+ * background tasks (the warned delegation dialog — two-tier autonomy,
+ * PLAN.md decided 2026-10-10), so the credential carries the master
+ * secret, the due schedule rows, and a sealed whole-machine snapshot:
+ * the boot restores the snapshot, performs a VERIFIED unlock (the
+ * restored verifier makes a wrong/corrupted secret 401 before touching
+ * anything), runs the due work as the user, re-snapshots, re-arms, dies.
  *
- * The credential is SCHEDULE-SCOPED: an autonomy subkey derived from the
- * master (never the master itself), plus the due schedule rows — every
- * deploy is a fresh volume, so the work travels with the key. The escrow
- * of record is the concierge handoff (memory-only); this file is the dev
- * fallback (mounted DATA_DIR) and is read only at boot. A stale
- * credential (rotated secret) just yields a useless subkey session — the
+ * The escrow of record is the concierge handoff (memory-only, TTL =
+ * next-due + margin); this file is the dev fallback (mounted DATA_DIR)
+ * and is read only at boot. A stale credential (rotated secret) yields a
+ * locked boot that re-fires the work at the next attended unlock — the
  * user unlock path is untouched — and is cleared on first user unlock.
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -22,10 +24,13 @@ const DATA_DIR = process.env.DATA_DIR ?? "/tmp/waddle-data";
 const WAKE_FILE = join(DATA_DIR, "wake-credential.json");
 
 export interface WakeCredential {
-  /** HKDF(master,"autonomy") — unlocks the machine for scheduled work only. */
-  autonomyKey: string;
+  /** The master unlock secret — full delegation, per the warned opt-in. */
+  secret: string;
   /** The due work: schedule rows to seed the ticker on a blank volume. */
   schedules?: Schedule[];
+  /** Sealed whole-machine snapshot (b64, HKDF(master,"waddle/snapshot")).
+   *  Absent on a degraded arm → the boot runs context-free. */
+  snapshot?: string;
   /** DEV FILE ARM ONLY — never escrowed with the concierge: prod machines
    *  infer on the platform-injected TINFOIL_API_KEY (proven v0.0.40); a
    *  dev compose machine without that env needs the key to run schedules. */
@@ -45,7 +50,7 @@ export function readWakeCredential(): WakeCredential | null {
   if (!existsSync(WAKE_FILE)) return null;
   try {
     const cred = JSON.parse(readFileSync(WAKE_FILE, "utf8")) as WakeCredential;
-    return typeof cred.autonomyKey === "string" && cred.autonomyKey ? cred : null;
+    return typeof cred.secret === "string" && cred.secret ? cred : null;
   } catch {
     return null;
   }

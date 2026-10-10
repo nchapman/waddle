@@ -1,6 +1,6 @@
 import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,48 +11,58 @@ process.env.DATA_DIR = dir;
 
 const { Lock } = await import("./state.js");
 const MASTER = Buffer.alloc(64, 7).toString("base64");
-const SUBKEY = Buffer.alloc(32, 9).toString("base64");
 
-describe("Lock.unlockAutonomous (the subkey path)", () => {
-  const lock = new Lock();
-
-  before(() => {
-    // Enroll with the master first — the verifier file must exist so the
-    // tests can prove the subkey path never touches it.
-    lock.unlock(MASTER, "aaaa");
-  });
-
-  it("unlocks TOFU-style without touching the master's verifier", () => {
+describe("Lock (master path, two-tier)", () => {
+  it("enrolls TOFU then verifies; verifier is deterministic (same secret re-enrolls identically)", () => {
+    const lock = new Lock();
+    const a = lock.unlock(MASTER, "n1");
     const before = readFileSync(join(dir, "verifier.bin"));
-    const aut = lock.unlockAutonomous(SUBKEY);
-    assert.ok(aut.token, "mints a session token");
-    assert.equal(aut.logKey.length, 32, "derives a log key from the subkey root");
-    assert.ok(lock.verify(aut.token), "session verifies");
+    const b = lock.unlock(MASTER, "n2");
     const after = readFileSync(join(dir, "verifier.bin"));
-    assert.ok(before.equals(after), "verifier file untouched — the subkey never clobbers enrollment");
+    assert.ok(lock.verify(a.token));
+    assert.ok(lock.verify(b.token));
+    assert.ok(before.equals(after), "same secret → same verifier (a snapshot-restored boot unlocks verified)");
   });
 
-  it("the master still unlocks afterwards (enrollment survived the subkey session)", () => {
-    const { token } = lock.unlock(MASTER, "bbbb");
-    assert.ok(lock.verify(token));
+  it("wrong secret on an enrolled machine 401s (the autonomous boot inherits this via the restored snapshot)", () => {
+    const lock = new Lock();
+    lock.unlock(MASTER, "n1");
+    assert.throws(() => lock.unlock(Buffer.alloc(64, 9).toString("base64"), "n2"), /wrong secret/i);
   });
 
-  it("rejects wrong-size keys", () => {
-    assert.throws(() => lock.unlockAutonomous(Buffer.alloc(31).toString("base64")), /32 bytes/);
-    assert.throws(() => lock.unlockAutonomous(MASTER), /32 bytes/); // 64-byte master is not a subkey
+
+  it("resyncEnrollment makes a snapshot-restored boot VERIFY, not TOFU-enroll", () => {
+    // The autonomous boot sequence: Lock constructed on a fresh volume
+    // (enrolled=false), then restoreArchive brings verifier.bin in, then
+    // resyncEnrollment + unlock. A WRONG secret must 401 — without the
+    // resync the boot would silently enroll the credential's secret.
+    const first = new Lock();
+    first.unlock(MASTER, "boot-a"); // enrolls the real verifier
+    const verifier = readFileSync(join(dir, "verifier.bin"));
+    rmSync(dir, { recursive: true, force: true }); // fresh deploy volume
+    const restored = new Lock(); // constructed BEFORE the restore lands
+    assert.equal(restored.enrolled, false, "fresh volume: nothing enrolled yet");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "verifier.bin"), verifier); // the snapshot restore
+    restored.resyncEnrollment();
+    assert.equal(restored.enrolled, true, "restored verifier recognized");
+    const wrong = Buffer.alloc(64, 0x5a).toString("base64");
+    assert.throws(() => restored.unlock(wrong, "boot-b"), /wrong secret/);
+    assert.ok(restored.unlock(MASTER, "boot-c").token, "right secret still unlocks");
   });
 
-  it("rate-limits like the user path", () => {
+  it("rate-limits brute-force attempts", () => {
     const fresh = new Lock();
     fresh.unlock(MASTER, "c1"); // enroll (counts as 1 attempt)
+    const wrong = Buffer.alloc(64, 3).toString("base64");
     for (let i = 0; i < 6; i++) {
       try {
-        fresh.unlockAutonomous(Buffer.alloc(32, i).toString("base64"));
+        fresh.unlock(wrong, `w${i}`);
       } catch {
         /* the 429s we're counting */
       }
     }
-    assert.throws(() => fresh.unlockAutonomous(Buffer.alloc(32, 99).toString("base64")), /too many/);
+    assert.throws(() => fresh.unlock(wrong, "w9"), /too many/);
   });
 
   it("cleans up scratch DATA_DIR", () => {

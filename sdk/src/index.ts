@@ -27,6 +27,7 @@ export type GatewayEvent =
   /** Restored-history row (device snapshot or betterbase pull, sealed on relay). */
   | { type: "history_row"; role: "user" | "assistant" | "tool"; text: string; at?: string }
   | { type: "history_restored"; count: number }
+  | { type: "preference"; background: boolean }
   | { type: "session_restored"; staged: boolean }
   | { type: "sleep_proposed"; reason: string }
   | { type: "sleep_cancelled"; reason: string }
@@ -86,7 +87,9 @@ export type UserIntent =
    *  never sealed into the log. */
   | { type: "browser_input"; events: Array<{ t: "move" | "down" | "up"; x: number; y: number; b?: "left" | "right" | "middle" } | { t: "wheel"; dx: number; dy: number; x?: number; y?: number } | { t: "key"; k: string; up?: boolean } | { t: "text"; s: string }> }
   /** Explicit hand-back (auto-releases on input idle too). */
-  | { type: "browser_release" };
+  | { type: "browser_release" }
+  /** The delegation switch (two-tier autonomy) — live from the header. */
+  | { type: "preference"; background: boolean };
 
 /** Live stream chunk (transient — final message events are the persisted truth). */
 export interface DeltaEvent {

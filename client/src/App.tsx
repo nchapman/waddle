@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { verifyEnclave, repin, type AttestationResult } from "./lib/attestation";
 import { unlock, getState, forgetSecret, getToken, getInferenceKey, setInferenceKey } from "./lib/session";
+import { getBackgroundPref, setBackgroundPref, hasAcceptedWarning, acceptWarning } from "./lib/background";
 import { connectChat, type ServerEvent, type ChatConnection } from "./lib/ws";
 import {
   openAccountStore,
@@ -16,6 +17,7 @@ import type { InputEvent } from "./components/InteractFrame";
 import { Shell, StoreFooter } from "./components/Shell";
 import { Chip } from "./components/DuckMark";
 import { ApprovalCard } from "./components/ApprovalCard";
+import { BackgroundDialog } from "./components/BackgroundDialog";
 import {
   VerifyingScreen,
   AttestedScreen,
@@ -157,6 +159,9 @@ export function App() {
   const [browserExpanded, setBrowserExpanded] = useState(false);
   const [keyInput, setKeyInput] = useState(getInferenceKey());
   const connRef = useRef<ChatConnection | null>(null);
+  // Two-tier autonomy: the delegation switch + its one-time warning.
+  const [background, setBackground] = useState<boolean>(getBackgroundPref() ?? false);
+  const [bgDialog, setBgDialog] = useState(false);
   const transportRef = useRef<WaddleChatTransport | null>(null);
   const bb = useAuth();
   // Live view of the auth hydration flag for async flows (closures capture
@@ -315,6 +320,13 @@ export function App() {
       }
       return;
     }
+    // Echo from the server (we sent the intent, or a snapshot carried a
+    // different value): keep the toggle truthful, remember the choice.
+    if (event.type === "preference") {
+      setBackgroundPref(event.background);
+      setBackground(event.background);
+      return;
+    }
     setState((s) => {
       // replay_done must land even while the unlock transition is finishing,
       // or the chat waits forever on "replaying history…". It also disarms
@@ -445,7 +457,23 @@ export function App() {
           bb.personalSpaceId,
           await resolveSyncEndpoint(),
         );
-        await unlock(result.client, activeEnclave, keyInput || undefined, grant ?? undefined);
+        const unlocked = await unlock(
+          result.client,
+          activeEnclave,
+          keyInput || undefined,
+          grant ?? undefined,
+          getBackgroundPref() ?? undefined,
+        );
+        // Fresh device (no local choice): adopt the machine's copy — the
+        // preference rides the snapshot, so it already survived boots. A
+        // true value means the user accepted the warning on another
+        // device (the snapshot carried the acceptance), so recording it
+        // here is accurate, not a bypass.
+        if (getBackgroundPref() === null && typeof unlocked.background === "boolean") {
+          if (unlocked.background) acceptWarning();
+          else setBackgroundPref(false);
+          setBackground(unlocked.background);
+        }
         await getState(result.client, activeEnclave);
         const transport = transportRef.current!;
         transport.setAppTap((e) => onServerEvent(e));
@@ -516,6 +544,20 @@ export function App() {
     connRef.current?.send({ type: "browser_release" });
     setState((s) => (s.phase === "chat" ? { ...s, browserHeld: false } : s));
   }, []);
+
+  /** The delegation switch. Enabling without a prior acceptance opens the
+   *  one-time warning; every change reaches the machine immediately (the
+   *  unlock payload carries it as backup) and persists locally. */
+  const toggleBackground = useCallback(() => {
+    const next = !background;
+    if (next && !hasAcceptedWarning()) {
+      setBgDialog(true); // tier 0 → tier 1 needs the warned opt-in, once
+      return;
+    }
+    setBackgroundPref(next);
+    setBackground(next);
+    connRef.current?.send({ type: "preference", background: next });
+  }, [background]);
 
   const wake = useCallback((note = "concierge booting the instance…") => void wakeCore(note), []);
 
@@ -651,6 +693,8 @@ export function App() {
       ) : (
         <Shell
           browserLive={!!state.frameLive}
+          background={background}
+          onToggleBackground={toggleBackground}
           onSleep={() => {
             // The enclave shelves its own final checkpoint inside the sleep
             // gate — nothing to push from here. Just tell it to go down.
@@ -702,6 +746,17 @@ export function App() {
             </div>
           )}
         </Shell>
+      )}
+      {bgDialog && (
+        <BackgroundDialog
+          onAccept={() => {
+            acceptWarning();
+            setBackground(true);
+            connRef.current?.send({ type: "preference", background: true });
+            setBgDialog(false);
+          }}
+          onCancel={() => setBgDialog(false)}
+        />
       )}
       {state.phase === "chat" && browserExpanded && (
         <BrowserOverlay

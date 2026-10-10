@@ -9,7 +9,7 @@ import cors from "@fastify/cors";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { hello, type GatewayEvent, type UnlockRequest, type UnlockResponse, type StateResponse, type UserIntent } from "@waddle/sdk";
-import { Lock } from "./state.js";
+import { Lock, freshNonce } from "./state.js";
 import { EventLog } from "./log.js";
 import { initAgent, chat, agentReady, stageSessionJsonl, stageHistoryRows, setBlackbox, setSink, getSessionJsonl } from "./agent.js";
 import { resolveApproval, denyAllPending, setOutcomeEmitter } from "./approvals.js";
@@ -20,7 +20,10 @@ import { setBbGrant, clearBbGrant, bbGrantActive, pushMachineBackup, pullMachine
 import { createSchedule, listSchedules, cancelSchedule, markRun, dueSchedules, dueSoon, activeSchedules, nextDueMs, replaceAllSchedules, seedSchedules, type Schedule } from "./schedules.js";
 import { handshakeConcierge, conciergeActive, renewIdleStop, deathFlare, writeTimer, armHandoff, pullHandoff, postPostbox, pullPostbox } from "./concierge.js";
 import { autonomyEnabled, armWakeCredential, readWakeCredential, clearWakeCredential } from "./wakeboot.js";
-import { autonomyKeyFromSecret, sealPostbox, openPostbox, mergeSchedules, schedulableRows } from "./postbox.js";
+import { sealPostbox, openPostbox, mergeSchedules, schedulableRows } from "./postbox.js";
+import { sealSnapshot, openSnapshot } from "./snapshot.js";
+import { getPreferences, setPreferences, backgroundTasksEnabled } from "./preferences.js";
+import { createArchive, restoreArchive } from "./archive.js";
 
 /** Reject after ms — bounds restore/final-backup so nothing hangs the boot or the exit. */
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
@@ -172,8 +175,9 @@ app.get("/probe", async () => {
 // boots. The client is a pipe — it never opens the blob.
 app.addContentTypeParser("application/octet-stream", { parseAs: "buffer" }, (_req, body, done) => done(null, body));
 app.post("/unlock", async (request, reply) => {
-  const { secret, nonce, inferenceKey, bb } = (request.body ?? {}) as UnlockRequest & {
+  const { secret, nonce, inferenceKey, bb, background } = (request.body ?? {}) as UnlockRequest & {
     inferenceKey?: string;
+    background?: boolean;
     bb?: import("./bb-backup.js").BbGrant;
   };
   if (!secret || !nonce) return reply.code(400).send({ error: "secret and nonce required" });
@@ -184,19 +188,12 @@ app.post("/unlock", async (request, reply) => {
     // is captured first — a takeover machine must not merge its own mail
     // (its events are already live in this log).
     const wasAutonomous = autonomous;
-    if (autonomous && log) {
-      // Takeover re-seals: the live log is subkey-sealed (a separate file
-      // the next boot would never read). Replay its events into a
-      // master-sealed log so the takeover conversation survives like any
-      // other — the user's transcript must never hinge on which key
-      // happened to boot the machine.
+    if (autonomous) {
+      // Takeover: one key domain, one log — the autonomous session's
+      // transcript is already in the master-sealed log (the boot restored
+      // it). A live user session outranks the autonomous flag, that's all.
       autonomous = false;
-      const masterLog = new EventLog(lock.logKey, lock.storage);
-      for (const e of log.all) masterLog.append(e);
-      log = masterLog;
-      log.append({ type: "message", role: "user", text: "[system] user unlock — autonomous session taken over", at: new Date().toISOString() });
-    } else if (autonomous) {
-      autonomous = false;
+      log?.append({ type: "message", role: "user", text: "[system] user unlock — autonomous session taken over", at: new Date().toISOString() });
     }
     if (!log) log = new EventLog(lock.logKey, lock.storage);
     // The clock starts the moment the machine wakes to a client — never
@@ -273,7 +270,10 @@ app.post("/unlock", async (request, reply) => {
       try {
         const blob = await pullPostbox();
         if (blob) {
-          const payload = openPostbox(autonomyKeyFromSecret(secret), INSTANCE, blob);
+          // Raw secret both sides: sealPostbox/openPostbox each derive
+          // HKDF(secret,"waddle/postbox") internally — feeding a derived
+          // key here would double-derive and never open (review catch).
+          const payload = openPostbox(secret, INSTANCE, blob);
           for (const e of payload.events) log?.append(e);
           replaceAllSchedules(mergeSchedules(listSchedules(), payload.schedules, payload.cancelledIds ?? []));
           log?.append({ type: "message", role: "user", text: `[system] postbox merged — ${payload.events.length} events from the unattended run delivered`, at: new Date().toISOString() });
@@ -286,36 +286,23 @@ app.post("/unlock", async (request, reply) => {
         app.log.warn({ err: String(e) }, "postbox merge failed — degrading to re-fire delivery");
       }
     }
-    // Wake autonomy: remember how to boot alone, so the concierge's
-    // wake-timers find a machine that can actually run its schedule.
-    // The credential is SCHEDULE-SCOPED: an autonomy subkey (never the
-    // master) plus the due work itself (a fresh volume has no table).
-    // The file arm covers dev (mounted DATA_DIR); the concierge handoff
-    // is the real one — memory-only escrow, nothing at rest anywhere.
-    // TTL is next-due + margin, and we skip arming entirely when no
-    // schedule is pending (SME review: the escrow serves schedules, it
-    // has no other reason to stand).
-    if (autonomyEnabled()) {
-      armAutonomyKey = autonomyKeyFromSecret(secret);
-      // Best-effort: a failed arm (read-only storage, full disk) must never
-      // fail an unlock that already succeeded.
+    // Two-tier autonomy: remember the secret in memory so the SLEEP gate
+    // can arm {secret, schedules, sealed snapshot}. Arming happens only
+    // at sleep (machine state is at rest there); the escrow serves
+    // schedules and has no other reason to stand.
+    armSecret = secret;
+    armInferenceKey = inferenceKey ?? null;
+    // The delegation preference rides the unlock (client is the source of
+    // truth while the user is present; the snapshot carries it across boots).
+    if (typeof background === "boolean" && background !== getPreferences().background) {
+      // Same discipline as the WS handler: a failed persistence (memory
+      // storage, read-only/full disk) must never fail an unlock that
+      // already succeeded — the machine keeps its previous value.
       try {
-        armWakeCredential({ autonomyKey: armAutonomyKey, schedules: activeSchedules(), inferenceKey });
+        setPreferences({ background });
       } catch (e) {
-        app.log.warn({ err: String(e) }, "wake credential arm failed — autonomy off this session");
+        app.log.warn({ err: String(e), background }, "preference write failed at unlock — keeping previous value");
       }
-      const horizon = activeSchedules().reduce<number | null>((acc, s) => {
-        const d = nextDueMs(s);
-        return d === null ? acc : acc === null ? d : Math.min(acc, d);
-      }, null);
-      const ttl = horizon === null ? undefined : horizon - Date.now() + 15 * 60_000;
-      const escrowBearer = bearer ?? process.env.CONCIERGE_SHARED_SECRET;
-      if (escrowBearer && ttl !== undefined) {
-        void armHandoff({ autonomyKey: armAutonomyKey, schedules: schedulableRows(activeSchedules()) }, escrowBearer, ttl).then((ok) => {
-          if (!ok) app.log.warn("wake handoff arm failed — unattended runs degrade until next unlock");
-        });
-      }
-      if (horizon === null) app.log.info("wake autonomy: no pending schedule — escrow not armed");
     }
     // The inference key rides the same attested, EHBP-encrypted unlock —
     // memory-only, never on disk, never in config. The agent boots lazily
@@ -323,7 +310,8 @@ app.post("/unlock", async (request, reply) => {
     // is resumed natively at boot — no digest needed on this path.
     if (inferenceKey) initAgent(inferenceKey);
     restoring = false;
-    const res: UnlockResponse = { token, enrolled };
+    const prefs = getPreferences();
+    const res: UnlockResponse & { background?: boolean } = { token, enrolled, background: prefs.background };
     return res;
   } catch (e) {
     restoring = false;
@@ -476,10 +464,13 @@ async function sleep(reason: string): Promise<never> {
   // Wake rows for every active schedule so the concierge reboots us for
   // the next occurrence. Refusal (no concierge + schedules due soon)
   // already ran above — this path is safe to fire-and-forget.
-  // Wake rows are pointless without wake autonomy — a wake-boot that
-  // stays locked burns compute until the sweep reaps it, and the refusal
-  // branch above already refused to die into near dues in that case.
-  if (conciergeActive() && autonomyEnabled()) {
+  // Wake rows are pointless without delegation — a wake-boot with no
+  // credential stays locked and burns compute until the sweep reaps it.
+  // The arm below writes the credential those rows consume; the two must
+  // share one condition (background off = tier 0 = pre-autonomy semantics:
+  // near dues hit the stayalive refusal above, far dues re-fire at the
+  // next unlock — no concierge involvement either way).
+  if (conciergeActive() && autonomyEnabled() && backgroundTasksEnabled()) {
     await deathFlare();
     for (const s of activeSchedules()) {
       const d = nextDueMs(s);
@@ -493,14 +484,16 @@ async function sleep(reason: string): Promise<never> {
     // drops the blob on the concierge. The next unlock merges it — the
     // run's output survives the machine, delivered exactly once, and the
     // marked rows stop the duplicate re-fire.
-    if (autonomous && armAutonomyKey && log) {
+    if (autonomous && armSecret && log) {
       try {
+        // This boot's DELTA (the run), not the whole restored transcript —
+        // the pre-boot history is already in the user's own sealed log.
         // Tail-cap: a scheduled run is one turn (tens of events), but a
         // pathological transcript must not blow the gateway body limit.
         // If it ever truncates, the mail says so — honest, never silent.
         const MAX_EVENTS = 200;
         const MAX_BLOB = 6 * 1024 * 1024; // gateway accepts 8MiB; stay under
-        let events = log.all;
+        let events = log.all.slice(bootLogBaseline);
         if (events.length > MAX_EVENTS) {
           events = [
             { type: "message", role: "user", text: `[system] postbox truncated — ${events.length - MAX_EVENTS} of ${events.length} events dropped (tail kept)`, at: new Date().toISOString() },
@@ -512,7 +505,7 @@ async function sleep(reason: string): Promise<never> {
         // are the no-re-fire / no-resurrect contract.
         const cancelledIds = [...bootSeededIds].filter((id) => !listSchedules().some((r) => r.id === id));
         let payload: { events: typeof events; schedules: ReturnType<typeof listSchedules>; cancelledIds: string[] } = { events, schedules: listSchedules(), cancelledIds };
-        let blob = sealPostbox(armAutonomyKey, INSTANCE, payload);
+        let blob = sealPostbox(armSecret, INSTANCE, payload);
         if (blob.length > MAX_BLOB) {
           // A single pathological event can outsize the count cap — drop
           // the transcript, keep the schedule truth, and say so in the mail.
@@ -521,7 +514,7 @@ async function sleep(reason: string): Promise<never> {
             schedules: payload.schedules,
             cancelledIds: payload.cancelledIds,
           };
-          blob = sealPostbox(armAutonomyKey, INSTANCE, payload);
+          blob = sealPostbox(armSecret, INSTANCE, payload);
         }
         const ok = await postPostbox(blob);
         if (ok) app.log.info({ events: payload.events.length, bytes: blob.length, cancelled: cancelledIds.length }, "postbox posted (sealed) at autonomous sleep");
@@ -534,23 +527,53 @@ async function sleep(reason: string): Promise<never> {
     // margin, so recurring schedules need a fresh arm per cycle — the
     // machine writes it right here, next to the wake rows that depend
     // on it. No schedule left → the escrow simply lapses.
-    if (armAutonomyKey) {
+    if (armSecret && backgroundTasksEnabled()) {
       const horizon = activeSchedules().reduce<number | null>((acc, s) => {
         const d = nextDueMs(s);
         return d === null ? acc : acc === null ? d : Math.min(acc, d);
       }, null);
       if (horizon !== null) {
-        // A failed re-arm is NOT silent: the wake rows above are already
-        // written, so the next boot would arrive locked and the work lost
-        // — better to see it in the ring (review finding). And never send
-        // an empty bearer: without the secret the call is a guaranteed
-        // 401.
+        // The arm carries the whole machine: secret + due work + a sealed
+        // snapshot (the same archive the shelf uses), so the next boot
+        // wakes WITH its state — full delegation, per the opt-in. A failed
+        // snapshot seals a credential without one (context-free boot, the
+        // run still fires); a failed re-arm is NOT silent: the wake rows
+        // above are already written, so the next boot would arrive locked
+        // and the work lost — better to see it in the ring.
+        let snapshot: string | undefined;
+        try {
+          const sealed = sealSnapshot(armSecret, INSTANCE, createArchive().body);
+          // The concierge's /handoff takes the default body limit (1MiB) —
+          // a lived-in machine's archive can outgrow it. Oversize → arm
+          // context-free (the run still fires, state degrades honestly).
+          const MAX_SNAP_B64 = 768 * 1024;
+          if (sealed.length > MAX_SNAP_B64) {
+            app.log.warn({ bytes: sealed.length, cap: MAX_SNAP_B64 }, "sleep gate: snapshot oversize — arming context-free");
+          } else {
+            snapshot = sealed;
+            app.log.info({ bytes: snapshot.length }, "sleep gate: snapshot sealed for escrow");
+          }
+        } catch (e) {
+          app.log.warn({ err: String(e) }, "sleep gate: snapshot seal failed — arming context-free");
+        }
         const bearer = process.env.CONCIERGE_SHARED_SECRET;
         if (!bearer) {
           app.log.warn({ horizon }, "sleep-gate escrow re-arm skipped — CONCIERGE_SHARED_SECRET unset; next wake boot stays locked");
         } else {
-          const ok = await armHandoff({ autonomyKey: armAutonomyKey, schedules: schedulableRows(activeSchedules()) }, bearer, horizon - Date.now() + 15 * 60_000);
+          const ok = await armHandoff({ secret: armSecret, schedules: schedulableRows(activeSchedules()), snapshot }, bearer, horizon - Date.now() + 15 * 60_000);
           if (!ok) app.log.warn({ horizon }, "sleep-gate escrow re-arm failed — next wake boot stays locked");
+        }
+        // Dev file arm ONLY — two independent gates: no platform-injected
+        // key (prod always has TINFOIL_API_KEY; volumes there are ephemeral
+        // anyway, so the file would never be read) AND wake autonomy
+        // explicitly on (the dev compose setting). A plaintext master at
+        // rest is a dev-localhost trust call; prod never writes it.
+        if (!process.env.TINFOIL_API_KEY && autonomyEnabled()) {
+          try {
+            armWakeCredential({ secret: armSecret, schedules: activeSchedules(), snapshot, inferenceKey: armInferenceKey ?? undefined });
+          } catch {
+            /* dev-only convenience */
+          }
         }
       }
     }
@@ -702,6 +725,27 @@ app.get("/ws", { websocket: true }, (socket, request) => {
       releaseUserControl();
       return;
     }
+    if (intent.type === "preference") {
+      // Threat model: the sender holds a session minted by a real unlock,
+      // i.e. the master holder — delegation by them is the design (the
+      // warned opt-in is UX honesty, not the security boundary; PLAN.md
+      // two-tier). A stolen session token's marginal escalation (arming
+      // a future escrow) is inside the documented escrow-capture residual.
+      const background = (intent as { background?: unknown }).background;
+      if (typeof background === "boolean") {
+        try {
+          const prefs = setPreferences({ background });
+          app.log.info({ background: prefs.background }, "preference updated (delegation switch)");
+          send({ type: "preference", background: prefs.background });
+        } catch (e) {
+          // A failed persistence (read-only/full disk) must never take a
+          // live session down — the value stays, the client just doesn't
+          // get its echo.
+          app.log.warn({ err: String(e) }, "preference write failed — serving session with previous value");
+        }
+      }
+      return;
+    }
     if (intent.type === "history_restore") {
       const rows = Array.isArray((intent as { rows?: unknown }).rows)
         ? ((intent as { rows: Array<{ role?: string; text?: string }> }).rows ?? [])
@@ -749,12 +793,20 @@ app.get("/ws", { websocket: true }, (socket, request) => {
   });
 });
 
-// The autonomy subkey, kept in memory while unlocked — the sleep gate
-// re-arms the escrow with it (next-due TTL). Derived from the master at
-// unlock; inherited as-is by an autonomous boot (a subkey boot cannot
-// re-derive it, and must not — the next boot gets the same key). Same
-// lifetime as the lock's derived keys: memory-only, gone at sleep.
-let armAutonomyKey: string | null = null;
+// The master secret while unlocked (two-tier autonomy: full delegation,
+// per the warned background-tasks opt-in). The sleep gate seals the
+// snapshot with it and re-arms the escrow; an autonomous boot inherits
+// it from the credential. Memory-only, same lifetime as the lock's
+// derived keys — never in DATA_DIR (the dev file arm below is the one
+// documented exception, dev-only and doubly gated), never in archives.
+let armSecret: string | null = null;
+/** Inference key for the dev file arm (prod machines use the injected
+ *  env key — this never rides the concierge escrow... except the dev file
+ *  writes the same JSON; keep it out of armHandoff explicitly below). */
+let armInferenceKey: string | null = null;
+/** Event index at autonomous boot — the postbox carries this boot's
+ *  delta (the run), not the whole restored transcript. */
+let bootLogBaseline = 0;
 /** Ids seeded from the wake credential — the tombstone baseline for the
  *  postbox (cancels during the run = seeded ids absent at re-sleep). */
 let bootSeededIds = new Set<string>();
@@ -765,22 +817,40 @@ let bootSeededIds = new Set<string>();
 // schedule-deploy); the file arm is the dev path. A rejected or absent
 // credential just leaves a normal locked boot.
 //
-// RESTRICTED MODE (SME review): a credential-unlock is *not* a user
-// session. While autonomous, interactive verbs (chat turns, browser
-// control) refuse — the machine runs due schedules, streams state, and
-// re-sleeps; it is not an open agent behind the user's back. The user
-// takes over by unlocking with their secret (matches → full mode).
+// DELEGATED MODE (two-tier): the boot restores the snapshot and acts as
+// the user — full capabilities, the same tools an attended session has.
+// Interactive verbs on the wire still refuse while autonomous (a
+// credential-boot is not a live user session); the user takes over by
+// unlocking with their secret (matches → full mode, conversation intact).
 let autonomous = false;
 if (autonomyEnabled() && !lock.unlocked) {
   const cred = readWakeCredential() ?? (await pullHandoff());
-  if (cred?.autonomyKey) {
+  if (cred?.secret) {
     try {
-      // Subkey unlock: TOFU by design — possession of the escrow (fire-gate
-      // released) IS the authorization; the master's verifier file is
-      // never consulted or clobbered. Inference is instance-provided
-      // (env TINFOIL_API_KEY) — no key material rides the credential.
-      const aut = lock.unlockAutonomous(cred.autonomyKey);
-      log = new EventLog(aut.logKey, lock.storage, "events.autonomous.jsonl");
+      // RESTORE FIRST, then unlock. The snapshot is the whole machine as
+      // it went down (workspace, sessions, master-sealed log, verifier).
+      // A failed restore degrades to a context-free boot — never bricks
+      // the schedule. Restoring brings back verifier.bin, so the unlock
+      // below is VERIFIED (wrong/corrupted secret 401s before touching
+      // anything); without a snapshot it is TOFU (deterministic verifier,
+      // so the same secret re-enrolls identically either way).
+      if (cred.snapshot) {
+        try {
+          const r = restoreArchive(openSnapshot(cred.secret as string, INSTANCE, cred.snapshot as string));
+          app.log.info({ files: r.files }, "autonomous boot: snapshot restored");
+        } catch (e) {
+          app.log.warn({ err: String(e) }, "autonomous boot: snapshot restore failed — booting context-free");
+        }
+        // The restore may have brought verifier.bin in after this Lock
+        // cached enrollment at module load — resync so the unlock below
+        // VERIFIES against it (stale/rotated secret 401s) instead of
+        // silently TOFU-enrolling whatever the credential carries.
+        lock.resyncEnrollment();
+      }
+      const { enrolled: bootVerified } = lock.unlock(cred.secret as string, freshNonce());
+      app.log.info({ verified: bootVerified, hadSnapshot: !!cred.snapshot }, "autonomous boot: unlock result");
+      log = new EventLog(lock.logKey, lock.storage);
+      bootLogBaseline = log.all.length;
       // Seed the due work: every deploy is a fresh volume, so the schedule
       // table travels inside the credential. Seeded ids are captured —
       // the postbox diff (seeded minus surviving) is the cancel tombstone
@@ -789,11 +859,28 @@ if (autonomyEnabled() && !lock.unlocked) {
         seedSchedules(cred.schedules as Schedule[]);
         bootSeededIds = new Set((cred.schedules as Schedule[]).map((r) => r.id));
       }
-      if (cred.inferenceKey) initAgent(cred.inferenceKey as string); // dev file arm only
+      if (cred.inferenceKey) {
+        initAgent(cred.inferenceKey as string); // dev file arm only
+        armInferenceKey = cred.inferenceKey as string;
+      }
       autonomous = true;
-      armAutonomyKey = cred.autonomyKey;
-      log.append({ type: "message", role: "user", text: "[system] autonomous boot — unlocked from wake credential (restricted mode)", at: new Date().toISOString() });
-      app.log.info("autonomous boot: unlocked from wake credential (restricted mode)");
+      armSecret = cred.secret as string;
+      // The credential IS the opt-in evidence: the sleep gate arms only
+      // when the background preference is on. A CONTEXT-FREE boot (no
+      // snapshot — oversize degrade or seal failure) has no
+      // preferences.json to inherit, and would otherwise read background
+      // off, skip its own re-arm, and break the recurring chain. Re-assert
+      // the preference from the credential's authority.
+      if (!backgroundTasksEnabled()) {
+        try {
+          setPreferences({ background: true });
+          app.log.info("autonomous boot: background preference re-asserted (context-free boot had none)");
+        } catch (e) {
+          app.log.warn({ err: String(e) }, "autonomous boot: preference re-assert failed — re-arm may skip");
+        }
+      }
+      log.append({ type: "message", role: "user", text: "[system] autonomous boot — state restored, acting as user (background tasks)", at: new Date().toISOString() });
+      app.log.info({ restored: !!cred.snapshot }, "autonomous boot: unlocked from wake credential (delegated mode)");
       // Shared-secret handshake (the escrow no longer carries a bearer):
       // without a session the machine cannot idle-stop, and burns forever.
       if (process.env.CONCIERGE_SHARED_SECRET) {

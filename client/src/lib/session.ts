@@ -50,7 +50,8 @@ export async function unlock(
   enclaveURL: string,
   inferenceKey?: string,
   bb?: import("./bb-grant.js").BbGrantPayload,
-): Promise<UnlockResponse> {
+  background?: boolean,
+): Promise<UnlockResponse & { background?: boolean }> {
   const nonce = b64(crypto.getRandomValues(new Uint8Array(16)));
   const res = await client.fetch(`${enclaveURL}/unlock`, {
     method: "POST",
@@ -60,9 +61,10 @@ export async function unlock(
       nonce,
       ...(inferenceKey ? { inferenceKey } : {}),
       ...(bb ? { bb } : {}),
+      ...(background !== undefined ? { background } : {}),
     }),
   });
-  const body = (await res.json()) as UnlockResponse & { error?: string };
+  const body = (await res.json()) as UnlockResponse & { background?: boolean; error?: string };
   if (!res.ok) throw new Error(body.error ?? `unlock failed (${res.status})`);
   localStorage.setItem(TOKEN_KEY, body.token);
   return body;

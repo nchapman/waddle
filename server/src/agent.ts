@@ -23,6 +23,7 @@ import { buildRestoreContext, type MemoryRow } from "./memory.js";
 import { Type } from "typebox";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createSchedule, listSchedules, cancelSchedule, nextDueMs, type Schedule } from "./schedules.js";
+import { backgroundTasksEnabled } from "./preferences.js";
 
 function summarize(s: Schedule): string {
   if (s.everyMs !== undefined) return `every ${Math.round(s.everyMs / 60000)}min`;
@@ -256,6 +257,15 @@ async function boot() {
         at_iso: Type.Optional(Type.String({ description: "One-shot ISO timestamp, e.g. 2026-10-11T09:00:00Z" })),
       }),
       async execute(_id: string, params: { title: string; prompt: string; every_ms?: number; at_iso?: string }) {
+        // Two-tier autonomy: background work is full delegation (escrow
+        // carries the master secret + snapshot). It only happens with the
+        // user's warned opt-in — refuse and point the agent at the toggle.
+        if (!backgroundTasksEnabled()) {
+          return {
+            content: [{ type: "text", text: "Background tasks are disabled — the user must enable them in the waddle client (header toggle) before anything can be scheduled. Tell the user exactly that; do not retry." }],
+            details: undefined,
+          };
+        }
         const s = createSchedule({ title: params.title, prompt: params.prompt, everyMs: params.every_ms, at: params.at_iso });
         return { content: [{ type: "text", text: `scheduled ${s.id}: "${s.title}" — ${summarize(s)}` }], details: undefined };
       },

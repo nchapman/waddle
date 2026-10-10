@@ -1,53 +1,58 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { autonomyKeyFromSecret, sealPostbox, openPostbox, mergeSchedules, schedulableRows } from "./postbox.js";
+import { sealPostbox, openPostbox, mergeSchedules, schedulableRows } from "./postbox.js";
+import { derive } from "./keys.js";
 import type { Schedule } from "./schedules.js";
 
 const MASTER = randomBytes(64).toString("base64");
+const OTHER = randomBytes(64).toString("base64");
 const INSTANCE = "waddle";
 
 function row(id: string, over: Partial<Schedule> = {}): Schedule {
   return { id, title: `t-${id}`, prompt: "p", enabled: true, createdAt: new Date().toISOString(), ...over };
 }
 
-describe("autonomy subkey", () => {
-  it("is deterministic from the master and is NOT the master", () => {
-    assert.equal(autonomyKeyFromSecret(MASTER), autonomyKeyFromSecret(MASTER));
-    assert.equal(autonomyKeyFromSecret(MASTER).length, 44, "32 bytes base64");
-    assert.notEqual(autonomyKeyFromSecret(MASTER), MASTER);
+describe("postbox key (master domain)", () => {
+  it("seal/open take the RAW secret — the sleep-seal/unlock-open convention (review-pinned)", () => {
+    // Production: index.ts seals with the raw master at re-sleep and
+    // opens with the raw master at unlock. A derived key fed to either
+    // side double-derives and the mail never opens — this pins that.
+    const blob = sealPostbox(MASTER, INSTANCE, { events: [], schedules: [] });
+    const back = openPostbox(MASTER, INSTANCE, blob);
+    assert.deepEqual(back.schedules, []);
+    // And the failure mode that shipped briefly: a pre-derived key must
+    // NOT open a raw-secret-sealed blob.
+    const derived = derive(Buffer.from(MASTER, "base64"), "waddle/postbox").toString("base64");
+    assert.throws(() => openPostbox(derived, INSTANCE, blob));
   });
 
-  it("differs per master (rotation revokes outstanding escrows)", () => {
-    const other = randomBytes(64).toString("base64");
-    assert.notEqual(autonomyKeyFromSecret(MASTER), autonomyKeyFromSecret(other));
+  it("raw-secret convention: wrong master cannot open the mail", () => {
+    const blob = sealPostbox(MASTER, INSTANCE, { events: [], schedules: [] });
+    assert.throws(() => openPostbox(OTHER, INSTANCE, blob));
   });
 });
 
-describe("postbox seal/open", () => {
+describe("postbox seal/open (raw-secret convention)", () => {
   it("round-trips events + schedules", () => {
-    const key = autonomyKeyFromSecret(MASTER);
-    const blob = sealPostbox(key, INSTANCE, {
+    const blob = sealPostbox(MASTER, INSTANCE, {
       events: [{ type: "message", role: "assistant", text: "SIGN ok" }],
       schedules: [row("j1")],
     });
-    const got = openPostbox(key, INSTANCE, blob);
+    const got = openPostbox(MASTER, INSTANCE, blob);
     assert.equal(got.events.length, 1);
     assert.equal((got.events[0] as { text?: string }).text, "SIGN ok");
     assert.equal(got.schedules[0]?.id, "j1");
   });
 
   it("rejects the wrong key (rotated master cannot read old mail)", () => {
-    const key = autonomyKeyFromSecret(MASTER);
-    const blob = sealPostbox(key, INSTANCE, { events: [], schedules: [] });
-    const wrongKey = autonomyKeyFromSecret(randomBytes(64).toString("base64"));
-    assert.throws(() => openPostbox(wrongKey, INSTANCE, blob));
+    const blob = sealPostbox(MASTER, INSTANCE, { events: [], schedules: [] });
+    assert.throws(() => openPostbox(OTHER, INSTANCE, blob));
   });
 
   it("rejects a blob posted for another instance (AAD binding)", () => {
-    const key = autonomyKeyFromSecret(MASTER);
-    const blob = sealPostbox(key, "waddle", { events: [], schedules: [] });
-    assert.throws(() => openPostbox(key, "waddle-standby-1", blob));
+    const blob = sealPostbox(MASTER, "waddle", { events: [], schedules: [] });
+    assert.throws(() => openPostbox(MASTER, "waddle-standby-1", blob));
   });
 });
 

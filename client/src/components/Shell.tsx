@@ -13,12 +13,17 @@ export function Shell({
   statusChips,
   browserLive,
   onSleep,
+  onToggleBackground,
+  background = false,
   children,
   browser,
 }: {
   statusChips: ReactNode;
   browserLive: boolean;
   onSleep: () => void;
+  /** The delegation switch (two-tier autonomy) — amber when armed. */
+  onToggleBackground: () => void;
+  background?: boolean;
   children: ReactNode;
   browser?: ReactNode;
 }) {
@@ -28,6 +33,22 @@ export function Shell({
         <DuckMark size={26} className="text-duck" />
         <span className="text-sm font-semibold tracking-tight">waddle</span>
         <div className="flex flex-1 flex-wrap items-center gap-1.5">{statusChips}</div>
+        <button
+          onClick={onToggleBackground}
+          title={
+            background
+              ? "background tasks on — the enclave wakes and acts as you on schedule. Click to disable."
+              : "background tasks off — nothing runs while you sleep. Click to enable (one-time warning)."
+          }
+          className={
+            "rounded-full border px-2.5 py-1 text-xs transition-colors " +
+            (background
+              ? "border-amber-500/50 bg-amber-500/15 text-amber-200"
+              : "border-border/60 text-muted-foreground hover:text-foreground")
+          }
+        >
+          {background ? "🌙 background on" : "🌙 background off"}
+        </button>
         <Button variant="ghost" size="sm" onClick={onSleep} className="text-muted-foreground">
           💤 sleep
         </Button>

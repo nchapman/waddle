@@ -42,6 +42,16 @@ export class Lock {
     if (existsSync(VERIFIER_FILE)) this.enrolled = true;
   }
 
+  /** Re-check enrollment from disk. The autonomous boot restores a
+   *  snapshot AFTER this Lock was constructed (enrollment cached at
+   *  module load): the restored verifier.bin must make the unlock a real
+   *  verification, not a TOFU enroll. */
+  resyncEnrollment(): void {
+    if (this.storage === "disk" && !this.enrolled && existsSync(VERIFIER_FILE)) {
+      this.enrolled = true;
+    }
+  }
+
   /** dataDir key material accessor — the event log key, post-unlock. */
   get logKey(): Buffer {
     if (!this.verifierKey) throw new Error("locked");
@@ -101,26 +111,7 @@ export class Lock {
     return true;
   }
 
-  /** The autonomy subkey's unlock. Deliberately TOFU — no verifier file
-   *  is read or written: possession of the escrow IS the authorization
-   *  (the concierge's fire-window gated its release), and the subkey must
-   *  never touch the master's enrollment. The session and log keys derive
-   *  from the subkey root, so the autonomous log is a separate artifact
-   *  from the user's — it lives in memory and the postbox, nothing else.
-   *  A user unlock later works exactly as before (the master verifier was
-   *  never consulted here). */
-  unlockAutonomous(keyB64: string): { token: string; logKey: Buffer } {
-    this.checkRate();
-    const root = Buffer.from(keyB64, "base64");
-    if (root.length !== 32) throw Object.assign(new Error("autonomy key must be 32 bytes"), { statusCode: 400 });
-    const nonce = freshNonce();
-    const sessionKey = derive(root, "session", Buffer.from(nonce, "base64"));
-    const token = hmac(sessionKey, "waddle-session-token");
-    this.sessions.set(token, { token, createdAt: Date.now() });
-    this.unlocked = true;
-    return { token, logKey: derive(root, "log") };
   }
-}
 
 export function freshNonce(): string {
   return randomBytes(16).toString("base64");

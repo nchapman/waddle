@@ -408,8 +408,10 @@ app.get("/status", async (req, reply) => {
  * the same external tier as /handshake — the fresh bb JWT or the shared
  * secret — because this fires seconds after a successful unlock.
  * `credential` is an OPAQUE bag the concierge never interprets (today:
- * { autonomyKey, schedules[] } — a schedule-scoped derived key plus the
- * due work; never the master secret). `clear: true` is the disarm verb
+ * { secret, schedules[], snapshot? } — the master secret plus due work
+ * and a sealed snapshot; two-tier autonomy, PLAN.md — the warned
+ * background-tasks opt-in IS the delegation boundary, and the bag rides
+ * concierge memory only, never disk). `clear: true` is the disarm verb
  * (user rotation / "stop while I'm away"): wipes the row and any open
  * release window. */
 app.post<{
