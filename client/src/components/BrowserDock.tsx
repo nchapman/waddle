@@ -7,9 +7,8 @@
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { frameBus } from "@/lib/frame-bus";
-import { InteractFrame, type InputEvent } from "./InteractFrame";
+import { InteractFrame, type BrowserSend } from "./InteractFrame";
 
-type Send = (intent: { type: "browser_input"; events: InputEvent[] } | { type: "browser_release" }) => void;
 
 function prettyUrl(u?: string): string {
   if (!u) return "about:blank";
@@ -41,7 +40,7 @@ export function BrowserDock({
   onExpand: () => void;
   held: boolean;
   onRelease: () => void;
-  send: Send;
+  send: BrowserSend;
 }) {
   const frame = useLiveFrame();
   const [fps, setFps] = useState(0);
@@ -115,7 +114,7 @@ export function BrowserOverlay({
   onClose: () => void;
   held: boolean;
   onRelease: () => void;
-  send: Send;
+  send: BrowserSend;
 }) {
   const frame = useLiveFrame();
   useEffect(() => {

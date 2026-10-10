@@ -13,6 +13,11 @@ import type { UserIntent } from "@waddle/sdk";
 
 /** The wire shape — taken from the sdk so client and gateway can't drift. */
 export type InputEvent = Extract<UserIntent, { type: "browser_input" }>["events"][number];
+/** Transient browser intents over the live ws — the dock, overlay, and App
+ *  all hand this same signature around. */
+export type BrowserSend = (
+  intent: { type: "browser_input"; events: InputEvent[] } | { type: "browser_release" },
+) => void;
 
 const KEY_SEND = new Set([
   "Enter", "Tab", "Backspace", "Delete", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",

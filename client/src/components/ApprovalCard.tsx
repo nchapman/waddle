@@ -3,8 +3,8 @@
  * Warm red-orange, impossible to miss, keyboard-first:
  * ⏎ approve · esc deny. Nothing else in the UI gets this color family.
  */
-import { useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
+import { useOnceAnswer } from "@/hooks/use-once-answer";
 
 export function ApprovalCard({
   tool,
@@ -15,28 +15,7 @@ export function ApprovalCard({
   input: unknown;
   onAnswer: (approved: boolean) => void;
 }) {
-  const answered = useRef(false);
-  const answer = (approved: boolean) => {
-    if (answered.current) return;
-    answered.current = true;
-    onAnswer(approved);
-  };
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLElement && ["INPUT", "TEXTAREA"].includes(e.target.tagName)) return;
-      if (e.key === "Enter") {
-        e.preventDefault();
-        answer(true);
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        answer(false);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const answer = useOnceAnswer(onAnswer);
 
   return (
     <div

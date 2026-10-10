@@ -14,9 +14,9 @@
  */
 import type { UIMessage } from "@ai-sdk/react";
 import type { ChatTransport, UIMessageChunk } from "ai";
-import type { DeltaEvent, ErrorEvent, GatewayEvent, UserIntent } from "@waddle/sdk";
+import type { UserIntent } from "@waddle/sdk";
+import type { ServerEvent } from "./ws";
 
-type ServerEvent = GatewayEvent | DeltaEvent | ErrorEvent;
 type Tap = (event: ServerEvent) => void;
 
 const text = (delta: string): UIMessageChunk => ({ type: "text-delta", delta, id: "w" });

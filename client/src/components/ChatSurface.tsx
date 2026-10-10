@@ -7,8 +7,8 @@ import { useChatRuntime } from "@assistant-ui/react-ai-sdk";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import type { UIMessage } from "@ai-sdk/react";
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
-import { WaddleToolChip } from "./components/WaddleToolChip";
-import type { WaddleChatTransport } from "./lib/waddle-transport";
+import { WaddleToolChip } from "./WaddleToolChip";
+import type { WaddleChatTransport } from "../lib/waddle-transport";
 
 export function ChatSurface(props: { transport: WaddleChatTransport; initialMessages: UIMessage[] }) {
   const runtime = useChatRuntime({ transport: props.transport, messages: props.initialMessages });

@@ -5,8 +5,8 @@
  * deliberate, distinct from the approval gate's red family. Keyboard:
  * ⏎ enable · esc cancel. Never auto-dismisses.
  */
-import { useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
+import { useOnceAnswer } from "@/hooks/use-once-answer";
 
 export function BackgroundDialog({
   onAccept,
@@ -15,28 +15,7 @@ export function BackgroundDialog({
   onAccept: () => void;
   onCancel: () => void;
 }) {
-  const answered = useRef(false);
-  const answer = (accept: boolean) => {
-    if (answered.current) return;
-    answered.current = true;
-    accept ? onAccept() : onCancel();
-  };
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLElement && ["INPUT", "TEXTAREA"].includes(e.target.tagName)) return;
-      if (e.key === "Enter") {
-        e.preventDefault();
-        answer(true);
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        answer(false);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const answer = useOnceAnswer((accept) => (accept ? onAccept() : onCancel()));
 
   return (
     <div

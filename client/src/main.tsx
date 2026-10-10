@@ -5,9 +5,7 @@ import "@fontsource-variable/inter";
 import "@fontsource-variable/jetbrains-mono";
 import "./index.css";
 import { App } from "./App";
-
-const BB_DOMAIN = import.meta.env.VITE_BETTERBASE_DOMAIN ?? "localhost:5377";
-const BB_CLIENT_ID = import.meta.env.VITE_BETTERBASE_CLIENT_ID ?? "";
+import { BB_CLIENT_ID, BB_DOMAIN } from "./lib/config";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

@@ -9,9 +9,9 @@ import {
   type AccountStore,
 } from "./lib/betterbase-store";
 import type { UIMessage } from "@ai-sdk/react";
-import { ChatSurface } from "./ChatSurface";
+import { ChatSurface } from "./components/ChatSurface";
 import { BrowserDock, BrowserOverlay } from "./components/BrowserDock";
-import type { InputEvent } from "./components/InteractFrame";
+import type { BrowserSend } from "./components/InteractFrame";
 import { Shell, StoreFooter } from "./components/Shell";
 import { Chip } from "./components/DuckMark";
 import { ApprovalCard } from "./components/ApprovalCard";
@@ -31,25 +31,14 @@ import { COLLECTIONS } from "./lib/bb-collections";
 import { buildBbGrant, resolveSyncEndpoint } from "./lib/bb-grant";
 import { frameBus } from "./lib/frame-bus";
 import { WaddleChatTransport } from "./lib/waddle-transport";
+import { DEV, ENCLAVE_URL, CONFIG_REPO, BB_CLIENT_ID, BB_DOMAIN } from "./lib/config";
+import { eventsToRows, rowsToUIMessages, toolStartRow, toolEndRow, approvalRow, type ChatMessage } from "./lib/history";
+import { wakeInstance, pollUntilHealthy, assignStandby } from "./lib/concierge";
 
-const DEV = import.meta.env.VITE_DEV === "1";
-const ENCLAVE_URL =
-  import.meta.env.VITE_ENCLAVE_URL ?? "https://waddle.ddg-waddle.containers.tinfoil.dev";
-const CONFIG_REPO = import.meta.env.VITE_CONFIG_REPO ?? "nchapman/waddle-config";
-const CONCIERGE_URL = import.meta.env.VITE_CONCIERGE_URL ?? "http://localhost:5390";
-const CONCIERGE_TOKEN = import.meta.env.VITE_CONCIERGE_TOKEN ?? "waddle-dev";
 /** The machine this session talks to: the primary, or a warm standby
  *  handed out by the concierge's pool (same config repo → same
  *  measurement → the TOFU pin travels with it). */
 let activeEnclave = ENCLAVE_URL;
-
-interface ChatMessage {
-  role: "user" | "assistant" | "tool";
-  text: string;
-  error?: boolean;
-  /** Structured tool call (live + replay) — the seed renders real chips. */
-  tool?: { name: string; args?: unknown; result?: unknown; isError?: boolean };
-}
 
 type State =
   | { phase: "verifying" }
@@ -87,60 +76,6 @@ const DEV_RESULT = {
   firstPin: false,
 } as unknown as import("./lib/attestation").AttestationResult;
 
-
-
-
-/** Parse the legacy emoji mono format back into structured tool rows. */
-function parseToolText(text: string): ChatMessage["tool"] | undefined {
-  const start = /^⚙️ (\S+) (\{.*\})$/s.exec(text);
-  if (start) {
-    try {
-      return { name: start[1]!, args: JSON.parse(start[2]!) as unknown };
-    } catch {
-      return { name: start[1]!, args: start[2] };
-    }
-  }
-  const end = /^([⛔✔]) (\S+) → (.*)$/s.exec(text);
-  if (end) {
-    let result: unknown = end[3];
-    try {
-      result = JSON.parse(end[3]!) as unknown;
-    } catch {
-      /* result excerpt was truncated — keep the text */
-    }
-    return { name: end[2]!, result, isError: end[1] === "⛔" };
-  }
-  return undefined;
-}
-
-/** Deterministic history seed: map sealed log events to surface rows. */
-function eventsToRows(events: Array<Record<string, unknown>>): ChatMessage[] {
-  const rows: ChatMessage[] = [];
-  for (const e of events) {
-    const t = e.type as string | undefined;
-    if (t === "message" && (e.role === "user" || e.role === "assistant")) {
-      rows.push({ role: e.role as "user" | "assistant", text: String(e.text ?? "") });
-    } else if (t === "history_row" && typeof e.text === "string") {
-      const role = e.role as ChatMessage["role"];
-      rows.push({ role, text: e.text, ...(role === "tool" ? { tool: parseToolText(e.text) } : {}) });
-    } else if (t === "tool_start") {
-      rows.push({
-        role: "tool",
-        text: `⚙️ ${e.tool} ${JSON.stringify(e.args ?? {}).slice(0, 140)}`,
-        tool: { name: String(e.tool ?? ""), args: e.args ?? {} },
-      } as ChatMessage);
-    } else if (t === "tool_end") {
-      const result = JSON.stringify(e.result ?? "").slice(0, 100);
-      rows.push({
-        role: "tool",
-        text: `${e.isError ? "⛔" : "✔"} ${e.tool} → ${result}`,
-        tool: { name: String(e.tool ?? ""), result: e.result ?? "", isError: !!e.isError },
-      } as ChatMessage);
-    }
-  }
-  return rows;
-}
-
 export function App() {
   const [state, setState] = useState<State>({ phase: "verifying" });
   const [browserExpanded, setBrowserExpanded] = useState(false);
@@ -155,6 +90,15 @@ export function App() {
   // a stale boolean; this ref tracks it across renders).
   const bbLoadingRef = useRef(bb.isLoading);
   bbLoadingRef.current = bb.isLoading;
+  // Same for the session object: `run`'s empty-deps closure would otherwise
+  // pin a first-render null forever — concierge auth would silently fall
+  // back to the shared secret on every auto-wake/assign.
+  const bbSessionRef = useRef(bb.session);
+  bbSessionRef.current = bb.session;
+  const conciergeAuth = useCallback(
+    async (): Promise<string | null> => (await bbSessionRef.current?.getToken().catch(() => null)) ?? null,
+    [],
+  );
   const [bbStore, setBbStore] = useState<AccountStore | null>(null);
   // True while the ws backlog for an already-seeded log streams in — its
   // rows are in the seed, so ingesting them again would duplicate history.
@@ -164,42 +108,22 @@ export function App() {
   if (!transportRef.current) transportRef.current = new WaddleChatTransport();
 
   /** Wake through the concierge: POST the verb, poll the enclave, re-run
-   *  the unlock flow when it answers. Shared by the manual button and the
-   *  load-time auto-wake (once per page load). Auth prefers the betterbase
-   *  session token (the TEE'd concierge verifies it); dev falls back to
-   *  the shared-secret env. */
+   *  the flow when it answers. Shared by the manual button and the
+   *  load-time auto-wake (once per page load). */
   async function wakeCore(note: string) {
     setState({ phase: "asleep", waking: true, note });
     activeEnclave = ENCLAVE_URL; // the wake path always targets the primary
-    const bbToken = await bb.session?.getToken().catch(() => null);
-    const auth = bbToken ?? CONCIERGE_TOKEN;
-    try {
-      const res = await fetch(`${CONCIERGE_URL}/wake`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${auth}` },
-        body: JSON.stringify({ instance: "waddle" }),
-      });
-      if (!res.ok) {
-        const body = await res.text().catch(() => "");
-        setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: `concierge refused (${res.status}) ${body.slice(0, 120)}` } : st));
-        return;
-      }
-    } catch {
-      setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: "concierge unreachable — is it running?" } : st));
+    const woke = await wakeInstance(conciergeAuth);
+    if (!woke.ok) {
+      setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: woke.detail } : st));
       return;
     }
-    for (let i = 0; i < 60; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      try {
-        const res = await fetch(`${activeEnclave}/health`, { signal: AbortSignal.timeout(4000) });
-        if (res.ok) {
-          void run();
-          return;
-        }
-      } catch {
-        /* still booting */
-      }
-      setState((st) => (st.phase === "asleep" ? { ...st, note: `waiting for the enclave… (${i + 1})` } : st));
+    const healthy = await pollUntilHealthy(activeEnclave, 60, (i) =>
+      setState((st) => (st.phase === "asleep" ? { ...st, note: `waiting for the enclave… (${i})` } : st)),
+    );
+    if (healthy) {
+      void run();
+      return;
     }
     setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: "gave up waiting — try again" } : st));
   }
@@ -247,28 +171,14 @@ export function App() {
         if (unreachable) {
           autoWokeRef.current = true;
           // Pool first: a warm standby means ~7s to live (attest + unlock)
-          // instead of a ~75s deploy. Same measured config → the pin holds.
-          const bbToken = await bb.session?.getToken().catch(() => null);
-          try {
-            const res = await fetch(`${CONCIERGE_URL}/assign`, {
-              headers: { Authorization: `Bearer ${bbToken ?? CONCIERGE_TOKEN}` },
-              signal: AbortSignal.timeout(5000),
-            });
-            if (res.ok) {
-              const m = (await res.json().catch(() => null)) as { name?: string; url?: string } | null;
-              // Zone-bind the handed-out URL: the standby must live in the
-              // same operator domain as the primary — the TOFU pin travels
-              // by measurement, so it cannot catch a host switch.
-              const zone = `.${new URL(ENCLAVE_URL).hostname.split(".").slice(1).join(".")}`;
-              const host = m && typeof m.url === "string" ? new URL(m.url).hostname : "";
-              if (host.endsWith(zone)) {
-                activeEnclave = m!.url!;
-                void run(); // verify the standby; its unlock flow continues there
-                return;
-              }
-            }
-          } catch {
-            /* concierge unreachable — fall through to the wake path */
+          // instead of a ~75s deploy. Same measured config → the pin holds
+          // (assignStandby zone-binds the URL so the pin CAN hold).
+          const zone = `.${new URL(ENCLAVE_URL).hostname.split(".").slice(1).join(".")}`;
+          const standby = await assignStandby(conciergeAuth, zone);
+          if (standby) {
+            activeEnclave = standby;
+            void run(); // verify the standby; its unlock flow continues there
+            return;
           }
           void wakeCore("auto-wake: enclave unreachable on load");
           return;
@@ -334,16 +244,15 @@ export function App() {
         return { ...s, messages, error: undefined };
       }
       if (event.type === "tool_start") {
-        const messages = [...s.messages, { role: "tool", text: `⚙️ ${event.tool} ${JSON.stringify(event.args ?? {}).slice(0, 140)}`, tool: { name: event.tool, args: event.args ?? {} } } as ChatMessage];
+        const messages = [...s.messages, toolStartRow(event.tool, event.args ?? {})];
         return { ...s, messages };
       }
       if (event.type === "tool_end") {
-        const result = JSON.stringify(event.result ?? "").slice(0, 100);
-        const messages = [...s.messages, { role: "tool", text: `${event.isError ? "⛔" : "✔"} ${event.tool} → ${result}`, tool: { name: event.tool, result: event.result ?? "", isError: event.isError } } as ChatMessage];
+        const messages = [...s.messages, toolEndRow(event.tool, event.result ?? "", event.isError)];
         return { ...s, messages };
       }
       if (event.type === "approval") {
-        const messages = [...s.messages, { role: "tool", text: `${event.approved ? "🔓" : "⛔"} ${event.tool} ${event.approved ? "approved" : "denied"} by user` } as ChatMessage];
+        const messages = [...s.messages, approvalRow(event.tool, event.approved)];
         return {
           ...s,
           messages,
@@ -494,8 +403,8 @@ export function App() {
   }, [state, doUnlock, keyInput]);
 
   /** The user's hands: transient input intents over the live ws. */
-  const sendBrowserInput = useCallback(
-    (intent: { type: "browser_input"; events: InputEvent[] } | { type: "browser_release" }) => {
+  const sendBrowserInput = useCallback<BrowserSend>(
+    (intent) => {
       connRef.current?.send(intent);
     },
     [],
@@ -526,71 +435,11 @@ export function App() {
   // runtime re-sync and wipe live streaming turns.
   const chatState = state.phase === "chat" ? state : null;
   const replayedNow = chatState?.replayed ?? false;
-  const seedMessages = useMemo(() => {
-    const rows = chatState?.messages ?? [];
-    const out: UIMessage[] = [];
-    let assistantParts: UIMessage["parts"] = [];
-    const flush = (id: string) => {
-      if (assistantParts.length > 0) out.push({ id, role: "assistant", parts: assistantParts });
-      assistantParts = [];
-    };
-    for (let i = 0; i < rows.length; i++) {
-      const m = rows[i]!;
-      if (m.role === "user") {
-        flush(`h${i}a`);
-        out.push({ id: `h${i}`, role: "user", parts: [{ type: "text", text: m.text }] });
-        continue;
-      }
-      if (m.role === "tool" && m.tool) {
-        // A completed call pairs its start row (args) with its end row
-        // (result) into one dynamic-tool part — same chip the live stream
-        // renders. Start-only rows (crash/interrupt) ride as input-available.
-        const next = rows[i + 1];
-        const start = m.tool.result === undefined ? m.tool : undefined;
-        if (start && next?.role === "tool" && next.tool?.name === m.tool.name && next.tool.result !== undefined) {
-          assistantParts.push({
-            type: "dynamic-tool",
-            toolName: m.tool.name,
-            toolCallId: `h${i}`,
-            state: next.tool.isError ? "output-error" : "output-available",
-            input: m.tool.args ?? {},
-            ...(next.tool.isError
-              ? { errorText: String(next.tool.result ?? "").slice(0, 200) }
-              : { output: next.tool.result ?? "" }),
-          } as UIMessage["parts"][number]);
-          i++; // consumed the end row
-          continue;
-        }
-        if (start) {
-          assistantParts.push({
-            type: "dynamic-tool",
-            toolName: m.tool.name,
-            toolCallId: `h${i}`,
-            state: "input-available",
-            input: m.tool.args ?? {},
-          } as UIMessage["parts"][number]);
-          continue;
-        }
-        // End row whose start was already consumed or absent.
-        assistantParts.push({
-          type: "dynamic-tool",
-          toolName: m.tool.name,
-          toolCallId: `h${i}e`,
-          state: m.tool.isError ? "output-error" : "output-available",
-          input: {},
-          ...(m.tool.isError
-            ? { errorText: String(m.tool.result ?? "").slice(0, 200) }
-            : { output: m.tool.result ?? "" }),
-        } as UIMessage["parts"][number]);
-        continue;
-      }
-      // Plain assistant text, or legacy tool rows without structure.
-      assistantParts.push({ type: "text", text: m.role === "tool" ? `\`${m.text}\`` : m.text });
-    }
-    flush("hz");
-    return out;
+  const seedMessages = useMemo(
+    () => rowsToUIMessages(chatState?.messages ?? []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [replayedNow]);
+    [replayedNow],
+  );
 
   const answerApproval = useCallback(
     (approved: boolean) => {
@@ -734,8 +583,8 @@ export function App() {
   // The sync engine mounts with the account store: pushes pending local
   // puts, pulls server records into the local db. Without it the store is
   // local-only (which is also why the device snapshot stays a fallback).
-  const bbClientId = import.meta.env.VITE_BETTERBASE_CLIENT_ID ?? "";
-  const bbDomain = import.meta.env.VITE_BETTERBASE_DOMAIN ?? "localhost:5377";
+  const bbClientId = BB_CLIENT_ID;
+  const bbDomain = BB_DOMAIN;
   if (bbStore && bb.session) {
     return (
       <BetterbaseProvider
