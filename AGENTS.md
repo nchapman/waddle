@@ -66,8 +66,29 @@
   wake-proofs.md narrative, which is tracked).
 - Stray `.bak`/`.bak2` files are old debris — do not commit.
 
-## Live-environment facts (as of v0.0.47 / concierge v0.3.14)
+## Live-environment facts (as of v0.0.48 / concierge v0.3.15)
 
+- **Stop = DNS teardown (platform, proved 2026-10-10 at Cloudflare's
+  authoritative NS)**: a stopped instance's name NXDOMAINs authoritatively;
+  deploy re-adds it in ~90s. SOA negative TTL is 1800s, so every resolver
+  that queried during a sleep caches NXDOMAIN up to 30min — the recurring
+  "browser can't reach a freshly-woken machine" class. curl --resolve
+  (or the tinfoil verified proxy) sidesteps it; AdGuard cache settings
+  were tuned 2026-10-10 to blunt the local amplification. Random per-boot
+  names ("every boot is a standby") would kill the class — parked in
+  PLAN.md territory (discovery via concierge, zone-bind trust).
+- **A deployed-but-unattended machine lives ~10.5min by design**: the
+  locked-boot stop backstop (WADDLE_IDLE_MS+30s) reaps boots nobody
+  unlocks, and the concierge's 24h-quiet sweep reaps machines its table
+  remembers. Both fired during the v0.0.48 deploy (22:13:34Z stop =
+  boot+10.5min exact). "Mystery stops" of a fresh deploy are one of these
+  two, not platform flakiness.
+- **Client /wake + /assign are 401 in live mode (as of v0.0.48)**: the
+  deployed concierge has no CONCIERGE_JWKS_URL (secret-only auth) and the
+  client's VITE_CONCIERGE_TOKEN predates the vault-only rotation, while
+  its egress allowlist (api.tinfoil.sh only) couldn't fetch JWKS anyway.
+  Decision pending: JWKS trio + egress for betterbase.dev (the designed
+  bb-JWT client path) vs rotating the shared secret into the client env.
 - ATC (atc.tinfoil.sh) 500s intermittently ("Failed to build attestation
   bundle") — blocks client verification, fail-closed; recovers on retry in
   minutes. `curl -X POST https://atc.tinfoil.sh/attestation` is the probe.
