@@ -293,3 +293,26 @@ Live-caught along the way:
   skew = the same client-refusal class as the deploy skew fixed in
   v0.3.4). Treadmill noted: every waddle release implies a concierge
   config bump + release.
+
+### Post-mortem addendum (00:36 UTC): the autonomous run's output did not survive
+
+The 00:35 unlock restored the shelf only up to the 00:13 manual sleep —
+no "[system] autonomous boot" event, no AUTONOMY-PROOF line. Root cause,
+confirmed in code: BOTH the restore pull and the sleep-time shelf push
+are gated on `bbGrantActive()`, and `setBbGrant` runs only in the client's
+unlock POST (the client supplies a fresh betterbase JWT). An autonomous
+boot has no grant: it self-unlocked into an EMPTY log, ran the due task
+(state-timing consistent), then idle-slept without pushing — the run
+existed only in that machine's memory and died with it.
+
+So the honest scoreboard for the unattended ceremony:
+- PROVEN (state-level, observed): stop → wake fire → deploy → fire-gated
+  handoff pull → self-unlock (locked:false at 00:18) → idle re-sleep at
+  00:29. The escrow, gate, and lifecycle all work.
+- GAP (design): autonomous output needs a survival path. Options inside
+  the memory-only constraint: (a) the concierge as postbox — autonomous
+  machines POST their event tail at sleep; the next unlock merges it
+  (extends the handoff pattern; the concierge stays metadata+sealed-blob
+  only); (b) a machine-capable bb grant in the armed credential (bigger
+  escrow blast radius — needs the privacy review's blessing); (c) accept
+  loss (dishonest for real scheduled work — rejected).
