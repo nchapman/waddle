@@ -386,3 +386,31 @@ recovers. Also wiped by the user's reboot: the /tmp copy of the shared
 secret (only the tinfoil vault holds the value now — `secrets get`
 never returns it; rotation available at the cost of a re-measure+
 re-pin cycle if /status access from the laptop matters again).
+
+### Read-back complete (04:29–04:32 UTC, ATC recovered)
+
+ATC came back at 04:29:14; retry → verify → unlock. The shelf restored,
+and the ticker fired BOTH overdue schedules at +3s each (proof-3 had
+also survived unfired from the 01:22 failed window):
+
+```
+[scheduled: hardened proof 4] Unattended hardened run 4. Reply with
+                             exactly: HARDENED-AUTONOMY-4 ok.
+HARDENED-AUTONOMY-4 ok
+```
+
+Verbatim DOM extract: .pi/evidence/wake/hardened-autonomy-4-readback.txt
+(screenshot capture times out on the live-stream element — DOM extract
+instead). One client quirk re-confirmed en route: the re-fired proof-4
+turn appended server-side but needed a page reload + "resume session"
+to render (the parked "server-fired turns need reload" bug; proof-3's
+render on the live socket was the restore-replay, not the stream).
+
+Honest attribution, same as the 00:36 post-mortem taught: this line is
+the RE-FIRED copy (04:30:0xZ, attended unlock) — the 04:12 autonomous
+machine's own output died with it (bb-grant gap, known and accepted at
+k=1). What the line nevertheless proves end-to-end: the schedule
+survived sleep → fire → deploy → restricted run → re-sleep → next
+unlock in the user's own store, and the task's reply reached the user
+with zero human action at fire time. Output survival (postbox) remains
+the parked design fix, not a regression.

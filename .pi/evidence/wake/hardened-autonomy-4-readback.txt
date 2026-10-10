@@ -1,0 +1,1 @@
+"Fires:\nTook the timestamp at face value, no clock check. It'll fire on its own — machine power-down or not.\n[scheduled: hardened proof 4] Unattended hardened run 4. Reply with exactly: HARDENED-AUTONOMY-4 ok.\nHARDENED-AUTONOMY-4 ok\n🔓 browser_open approved by user"
