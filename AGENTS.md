@@ -22,6 +22,17 @@
   treadmill — standby-create skew is the same client-refusal class as deploy
   skew). Concierge config changes re-measure the concierge only; the client
   never verifies it, so no TOFU re-pin for concierge deploys.
+- **`tinfoil container update waddle-concierge --tag vN` re-deploys the
+  tag's FROZEN config** — a STANDBY_CONFIG_TAG bump pushed to main does
+  NOT reach the running concierge until a NEW version is released (bit
+  us at v0.0.47: the concierge kept deploying v0.0.46 standbys/main
+  replacements and the wake fire hit an "already running" stray →
+  ceremony dead, 18:43Z). Every waddle release implies a concierge
+  VERSION bump + release, not just a config commit.
+- **Book scheduled fires ≤ sleep+3.5min** — stopped instances can get
+  replacement-deployed on a ~4min platform cadence; a later fire hits
+  `ensureInstance` → "already running" → the occurrence is consumed
+  with no boot. Tight booking wins the race.
 - **`tinfoil container deploy --tag vN` does NOT update the saved spec** —
   the concierge's wake path redeploys the SAVED tag, so a deploy-only
   release makes every wake boot the previous version (bit us at v0.0.46:
@@ -81,19 +92,27 @@
 - Server-fired turns (scheduled runs) don't append to the live thread —
   reload + "resume session" renders them (parked client bug).
 
-## Two-tier autonomy (decided 2026-10-10, v0.0.46 design)
+## Two-tier autonomy (decided 2026-10-10, shipped v0.0.47 — proven live)
 
 Background tasks off (default) = no delegation, concierge holds zero
 secrets. Background tasks on (warned client dialog, user preference) =
-full delegation: escrow carries master secret + schedules + sealed ~64 KiB
-snapshot; scheduled boot restores then does a VERIFIED unlock; one
-master-sealed log; re-snapshot/re-arm at autonomous re-sleep. The
+full delegation: escrow carries master secret + schedules + sealed
+CONTEXT snapshot (shelf archive minus `browser/` — the profile is tens
+of MiB and trips the 768KiB arm cap; unattended boots need
+log/verifier/workspace/schedules, not logins); scheduled boot restores
+then does a VERIFIED unlock (boot marker says which — `enrolled:true`
+alone can't, TOFU re-enrolls deterministically); one master-sealed
+log; re-snapshot/re-arm at autonomous re-sleep. Proven 2026-10-10
+19:08–19:29Z (wake-proofs.md proof 6): planted workspace fact →
+arm → fire → restored boot → read-tool proof with the fact → postbox
+delivered exactly once at unlock. The
 invariant: operators can't read data without breaking the enclave
 (nothing at rest is plaintext; secrets are memory-only in enclaves).
 Residual (tier 1): machine→concierge is shared-secret, not attested —
 fake-concierge capture is the known active-attack surface; UCAN/silicon
 are the parked fixes. Full statement in PLAN.md "[Decided 2026-10-10]
-Two-tier autonomy". betterbase-accounts#1 closed — no bb changes.
+Two-tier autonomy" + the [Implemented] block. betterbase-accounts#1
+closed — no bb changes.
 
 ## Known open items (as of v0.0.44 / concierge v0.3.11)
 

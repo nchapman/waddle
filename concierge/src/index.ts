@@ -230,7 +230,15 @@ const table = createTable(
 /** Wake-autonomy escrow: the user's boot credential in memory between
  * sessions. Released only to machines this concierge booted for a fired
  * wake row — standbys and user-wakes boot locked, by design. */
-const handoff = createHandoffStore({ ttlMs: envInt("WAKE_HANDOFF_TTL_MS", 7 * 24 * 3600_000, 60_000) });
+// releaseWindowMs: the fire→pull gap is normally ~90s (the boot pulls as
+// soon as the app starts), but platform-side stages can stall — a measured
+// certificate issuance of 5.4 min (2026-10-10 v0.0.46 ceremony) made the
+// old hard 3-min window close before the pull. Configurable; the SME race
+// concern stands for *very* long windows, so the default stays tight.
+const handoff = createHandoffStore({
+  ttlMs: envInt("WAKE_HANDOFF_TTL_MS", 7 * 24 * 3600_000, 60_000),
+  releaseWindowMs: envInt("WAKE_RELEASE_WINDOW_MS", 3 * 60_000, 30_000),
+});
 
 /** Return mail for unattended runs — sealed blobs only, pull-and-clear. */
 const postbox = createPostboxStore({ ttlMs: envInt("WAKE_POSTBOX_TTL_MS", 7 * 24 * 3600_000, 60_000) });

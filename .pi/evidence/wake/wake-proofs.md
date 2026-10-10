@@ -448,3 +448,63 @@ takeover re-seals the autonomous log into the master log, wrong-key log read thr
 Incidents during the ceremony (both external): Quad9 NXDOMAIN for the enclave domain
 (recovered 07:32:44Z), ATC 500 "Failed to build attestation bundle" 14:26–14:37Z
 (recovered on its own; unlocked on first retry after).
+
+## Proof 6 — two-tier autonomy: full delegation + context snapshot, 2026-10-10 19:07–19:29Z
+
+Waddle **v0.0.47** (22a5e14, image `sha256:001ac45d…`), concierge **v0.3.14**
+(STANDBY_CONFIG_TAG=v0.0.47, WAKE_RELEASE_WINDOW_MS=10min). The proof the whole
+two-tier design was built for: the escrow carries the **master** secret,
+schedules, and a **sealed context snapshot**; the unattended boot restores the
+machine's own memory and acts as the user.
+
+**Attended leg (19:07Z):** unlock on v0.0.47, 🌙 background on (preference rides
+the unlock), booked "snapshot proof 4" (`d034b8d0-ad03-4896-910a-f9fdeb7eb117`)
+for 19:12:00Z — sleep+3.5min (see incidents). The planted fact from the 18:33Z
+session was still in place: `ceremony-secret.txt` = `SNAPSHOT-PASSPHRASE:
+MARIGOLD-TANGO-7741` (workspace, verified by read tool).
+
+**Unattended cycle (nobody at the keyboard):**
+- 19:08:13Z — 💤 sleep: escrow armed `{master, schedules, context snapshot}`
+  (snapshot = archive minus `browser/`, sealed HKDF(master,"waddle/snapshot"));
+  machine stopped ~19:08:45Z
+- 19:12:00Z — concierge fires; deploy; boot stages done 19:12:49Z
+- **19:13:19Z — `/health` → `locked:false`** (poller t-mv2roo5h caught it)
+- Boot log (session-gated /state capture, 19:19Z, saved as
+  `two-tier-proof6-machine-log.json`): **"[system] autonomous boot — state
+  restored, verified unlock, acting as user (background tasks)"** — snapshot
+  restore + successful unlock = the escrowed master matched the restored
+  verifier (v0.0.47's honest marker; `enrolled:true` alone can't prove this)
+- The runs: overdue "snapshot proof 3" fired immediately (the overdue-row
+  floor) + "snapshot proof 4" at due. Each: read tool ONLY, relative path →
+  **"SNAPSHOT-PROOF: SNAPSHOT-PASSPHRASE: MARIGOLD-TANGO-7741"** + "Workspace
+  booted intact — file present at the relative path, read cleanly with the
+  read tool only." The workspace file came **back from the sealed snapshot** —
+  the context leg proof 2's context-free boot honestly ENOENT'd on
+- 19:26:30Z — idle backstop reaps; sleep gate seals this boot's delta and
+  POSTs the postbox
+
+**Read-back (19:28:16Z):** client wake + unlock (shelf restore + postbox
+merge). Log counts (session /state, 166 events): each scheduled reply exactly
+**once**, one merge marker: **"[system] postbox merged — 4 events from the
+unattended run delivered"** (4 = both prompts + both replies). DOM extract:
+`two-tier-proof6-dom.json`. No re-fire, no duplicates.
+
+**Incidents en route (attempts 2–3 → the lessons that shaped attempt 4):**
+1. **Attempt 2 (17:44Z), oversize snapshot:** whole-machine archive on a
+   lived-in box is tens of MiB (browser profile) → tripped the 768KiB arm cap
+   → context-free boot → the run's read honestly returned ENOENT. Fix
+   (22a5e14): the escrow snapshot is CONTEXT (log, verifier, workspace,
+   schedules, prefs), `browser/` excluded; the shelf still serves
+   full-profile restores when attended.
+2. **Attempt 3 (18:43Z), stale-release treadmill:** `container update
+   waddle-concierge --tag v0.3.13` re-deployed the tag's FROZEN config — the
+   STANDBY_CONFIG_TAG=v0.0.47 bump on main never reached the concierge, so a
+   replacement deployed the main instance at v0.0.46 ~4m18s after the sleep
+   stop; the fire then hit `ensureInstance` → "already running" → occurrence
+   consumed, no boot. Two lessons: every STANDBY_CONFIG_TAG bump needs a
+   version bump + release (v0.3.14); book fire ≤ sleep+3.5min so the deploy
+   wins the race.
+3. The client **correctly fail-closed** on measurement mismatch when the
+   stray ran v0.0.46 under a v0.0.47 pin — the TOFU pin doing its job.
+4. AdGuard single-name NXDOMAIN poison (18:02–18:30:50Z) blocked only the
+   browser; curl via `--resolve` kept working; healed at TTL expiry.
