@@ -251,3 +251,45 @@ agent answered — and correctly cannot see its own host identity or key).
 Standing cost note: the pool's steady state is one warm machine, always.
 WARM_POOL_SIZE is measured config — changing it re-measures the
 concierge. Overnight economics are a user decision, not a code one.
+
+## 2026-10-10 00:16–00:29 UTC — the unattended ceremony, live (waddle v0.0.43 + concierge v0.3.5–v0.3.7)
+
+The parked design, proven end to end with zero persistent infrastructure —
+the credential lives in the concierge's MEMORY:
+
+- 00:10:33 unlock (client, stored secret, blank inference field) → the
+  machine armed the handoff: POST /handoff → memory row. /status showed
+  `wake_handoff.armed: true` seconds later. (First arm attempt at 23:58
+  failed silently: the concierge shim didn't forward /handoff — fixed in
+  v0.3.7. Found by /status, not by luck.)
+- 00:11–00:13 scheduled the proof task via chat (agent tool
+  `schedule_create`, job 30cf083a, fires 00:16:32Z).
+- 00:13:16 manual 💤 sleep → gate wrote the wake row (+3min) → checkpoint
+  → death flare → machine Stopped 00:14. Nothing running anywhere.
+- 00:16:42 concierge wake row fired → markWakeFired → deploy v0.0.43.
+- 00:18:13 machine up `"locked":false` — the boot pulled the fire-gated
+  handoff and self-unlocked. Nobody touched anything.
+- 00:28–00:29 idle gate (600s) fired → machine re-slept itself. Burn
+  bounded; handoff still armed in memory for the next cycle.
+
+State-level proof complete: stop → fire → deploy → self-unlock → run →
+re-sleep. The shelf-level proof (the AUTONOMY-PROOF reply line) was
+blocked by an ATC outage (atc.tinfoil.sh 500s for the expected-measurement
+fetch, ~00:29+) — to be read back at the next unlock when ATC recovers.
+
+Live-caught along the way:
+- A sleep with no live concierge session (post-restart) skips the death
+  flare AND wake rows: process dies, container zombies Running until the
+  backstop stop row reaps it; the client's /wake cleared that backstop row
+  (userWake) and the zombie-recovery loop didn't land — manual stop+deploy
+  recovered. The client's "resume session" on a zombie read a stale
+  locked:false. Client bug filed: after /assign the SDK's pinned fetch
+  still targets the primary ("refusing to send request… bound to the
+  verified enclave/proxy").
+- Release tooling: runner gh CLI can lag the measure-action's 2.67.0
+  floor — both config repos' publish workflows now self-install current
+  gh. And sed ate a closing YAML quote during a digest bump (use python).
+- STANDBY_CONFIG_TAG must track every waddle release (standby-create
+  skew = the same client-refusal class as the deploy skew fixed in
+  v0.3.4). Treadmill noted: every waddle release implies a concierge
+  config bump + release.
