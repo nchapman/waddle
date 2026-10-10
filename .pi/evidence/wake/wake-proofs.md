@@ -316,3 +316,73 @@ So the honest scoreboard for the unattended ceremony:
   only); (b) a machine-capable bb grant in the armed credential (bigger
   escrow blast radius — needs the privacy review's blessing); (c) accept
   loss (dishonest for real scheduled work — rejected).
+
+## 2026-10-10 00:29–01:33 — SME hardening, and the race the fix inverted (v0.3.8 → v0.3.10)
+
+Privacy + security SME reviews ran against the v0.3.7 design. Verdicts:
+the privacy reviewer said do-not-ship-as-is (the fire gate was decorative:
+any external-tier /timer write could mint a fire and pull the escrow); the
+security reviewer found a standby-steal race (a racing boot could win the
+one-shot pull, self-unlock, and idle forever) and an unauthenticated
+/status. All findings implemented (commit 6bf610a, waddle v0.0.44 +
+concierge v0.3.8):
+
+- /timer is session-tier only; /status requires the shared secret;
+  GET /handoff replaced by POST /handoff/pull + no-store (caching/URL
+  secrets); constant-time secret compare.
+- Release window opens ONLY after the schedule deploy succeeds, 3-min
+  TTL; failed deploys re-arm the row (3 tries); the pool defers fills
+  while a window is open (canFill).
+- Escrow TTL = next-due + margin, armed at the sleep gate (recurring
+  schedules work; arm skipped with nothing pending); disarm verb
+  (clear:true); leftover Running machines adopted, not reaped blindly.
+- Restricted autonomous mode: credential-unlocked machines run schedules
+  only (chat/browser intents refused); a user unlock takes over.
+
+Then the 01:00 hardened cycle caught MY fix's own bug, live: the boot's
+escrow pull lands at ~+90s (app up), which BEATS the deploy CLI's own
+resolve — marking the fire only after the deploy resolved meant the
+intended machine pulled `no-fire` and booted locked (machine handshook
+01:23:42Z, escrow still armed, job spent). Fix (v0.3.10): the window
+opens at FIRE time; the standby-steal vector stays closed by the pool's
+canFill deferral (no replacement boots while a window is open), and a
+failed deploy re-arms its row while the stale window harmlessly expires.
+Lesson recorded: ordering fixes need the whole timeline, not just the
+attacker's — the defender's happy path can race too.
+
+Operational notes from the same stretch: the shim allowlist bit again
+(renamed /handoff/pull 404'd at the gateway until v0.3.9 forwarded it),
+and an AdGuard-Home negative-cache (NXDOMAIN for exactly one enclave
+host, poisoned from Quad9 during a network flap, 30-min TTL; re-poisoned
+once by a probe fired between cache-clear and upstream recovery) blocked
+client attestation for ~40 min — diagnosis via dig against each resolver
+in the chain, plus the user's AdGuard query log.
+
+## 2026-10-10 04:06–04:23 UTC — the hardened unattended cycle, live (waddle v0.0.44 + concierge v0.3.10)
+
+Zero persistent infrastructure, memory-only escrow, every hardening on:
+
+| UTC | event |
+|---|---|
+| 04:06:57 | manual 💤 (attended): checkpoint → stop → escrow armed (job 2bbb9a03 pending) |
+| 04:09:55 | machine Stopped; nothing running anywhere |
+| 04:11:00 | wake row fired → release window opens AT FIRE (v0.3.10) → deploy v0.0.44 |
+| 04:12:36 | booted `"locked":false` — the pull landed IN the window; restricted self-unlock |
+| ~04:12:40 | ticker ran "hardened proof 4" (prompt: reply exactly `HARDENED-AUTONOMY-4 ok`) |
+| 04:23:02 | 10-min idle gate → checkpoint → stop → re-sleep |
+
+The inverted race is dead: 96s fire→unlocked, pull in-window on the first
+try. The restricted mode held for the run window, and the machine put
+itself away — total unattended burn ~11.5 min, bounded by the idle gate.
+
+Read-back (the shelf-level line) blocked AGAIN by an ATC outage
+(atc.tinfoil.sh 500 "Failed to build attestation bundle", 04:26+;
+fail-closed client refuses to verify without it). Expected behavior per
+the eventual-consistency property observed at 00:35: the schedule
+persists in the shelf (the autonomous run's done-marker dies with the
+unpushed log), so the NEXT unlock re-fires proof-4 attended and the
+HARDENED-AUTONOMY-4 line should appear then. To be appended once ATC
+recovers. Also wiped by the user's reboot: the /tmp copy of the shared
+secret (only the tinfoil vault holds the value now — `secrets get`
+never returns it; rotation available at the cost of a re-measure+
+re-pin cycle if /status access from the laptop matters again).

@@ -4,7 +4,7 @@ memory: 2048
 
 containers:
   - name: "waddle-concierge"
-    image: "ghcr.io/nchapman/waddle-concierge@sha256:c4ba89e3ebf8ff0bee0f1059779358dac2ac8884380dbe3e85ba48322d493715"
+    image: "ghcr.io/nchapman/waddle-concierge@sha256:998c29201a3b19acff06faa135661ec4599226a505fdba1ce53311476da563ca"
     networks: [control]
     env:
       - CONCIERGE_PORT: "8081"
@@ -15,7 +15,7 @@ containers:
       - WARM_POOL_SIZE: "1"
       - STANDBY_TTL_MS: "3600000"
       - STANDBY_CONFIG_REPO: "nchapman/waddle-config"
-      - STANDBY_CONFIG_TAG: "v0.0.43"
+      - STANDBY_CONFIG_TAG: "v0.0.44"
       - INSTANCE_DOMAIN_BASE: "ddg-waddle.containers.tinfoil.dev"
       - CONCIERGE_ALLOWED_INSTANCES: "waddle"
     secrets:
@@ -39,5 +39,6 @@ shim:
     - /wake
     - /assign
     - /handoff
+    - /handoff/pull
   origins:
     - http://localhost:5173
