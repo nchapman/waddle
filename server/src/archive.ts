@@ -107,8 +107,13 @@ export function machineFingerprint(): string {
   return h.digest("hex");
 }
 
-/** Pack the working directory into one zstd'd tarball. */
-export function createArchive(): Archive {
+/** Pack the working directory into one zstd'd tarball.
+ *  `withoutBrowser`: the escrow-snapshot variant — excludes the browser
+ *  profile entirely. The wake snapshot exists to give an unattended boot
+ *  its CONTEXT (log, verifier, workspace, schedules); the profile is
+ *  tens of MiB of lived-in state that would blow the arm body limit, and
+ *  attended restores still get it via the shelf. Bounded beats blank. */
+export function createArchive(withoutBrowser = false): Archive {
   // Plain tar (no compression flags — tar's zstd support varies by
   // build), piped through the zstd CLI. One retry: files can vanish
   // between listing and read (Chromium singleton churn); a second pass
@@ -116,7 +121,14 @@ export function createArchive(): Archive {
   for (let attempt = 0; ; attempt++) {
     const raw = spawnSync(
       "tar",
-      ["-cf", "-", ...EXCLUDES.flatMap((e) => ["--exclude", e]), "-C", DATA_DIR, "."],
+      [
+        "-cf",
+        "-",
+        ...(withoutBrowser ? [...EXCLUDES, "browser"] : EXCLUDES).flatMap((e) => ["--exclude", e]),
+        "-C",
+        DATA_DIR,
+        ".",
+      ],
       { maxBuffer: 1 << 30 },
     );
     const res =

@@ -22,6 +22,16 @@
   treadmill — standby-create skew is the same client-refusal class as deploy
   skew). Concierge config changes re-measure the concierge only; the client
   never verifies it, so no TOFU re-pin for concierge deploys.
+- **`tinfoil container deploy --tag vN` does NOT update the saved spec** —
+  the concierge's wake path redeploys the SAVED tag, so a deploy-only
+  release makes every wake boot the previous version (bit us at v0.0.46:
+  wake booted v0.0.45 subkey code against a {secret,snapshot} credential →
+  locked burn). Always run `tinfoil container update waddle --tag vN --yes`
+  (which does persist the tag) after any release deploy.
+- **The concierge release window must outlive platform deploy latency** —
+  the fire→pull gap is ~90s normally, but certificate issuance stalled to
+  5.4 min once, closing the hard 3-min window before the boot's pull
+  (v0.3.13 makes it `WAKE_RELEASE_WINDOW_MS`, set to 10 min in config).
 - **The shim `paths` list is an exact-match ingress allowlist** — every new
   endpoint path must be added to the concierge config's shim or it 404s at
   the gateway (bit us three times: /handoff, /handoff/pull, /handoff/post + /handoff/post/pull — all in as of concierge v0.3.12).

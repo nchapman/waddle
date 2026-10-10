@@ -542,7 +542,11 @@ async function sleep(reason: string): Promise<never> {
         // and the work lost — better to see it in the ring.
         let snapshot: string | undefined;
         try {
-          const sealed = sealSnapshot(armSecret, INSTANCE, createArchive().body);
+          // Context snapshot: everything but the browser profile (the
+          // profile alone is tens of MiB — over any body limit — and an
+          // unattended run needs log/workspace/verifier, not logins; the
+          // shelf keeps serving full-profile restores when attended).
+          const sealed = sealSnapshot(armSecret, INSTANCE, createArchive(true).body);
           // The concierge's /handoff takes the default body limit (1MiB) —
           // a lived-in machine's archive can outgrow it. Oversize → arm
           // context-free (the run still fires, state degrades honestly).
@@ -848,6 +852,10 @@ if (autonomyEnabled() && !lock.unlocked) {
         lock.resyncEnrollment();
       }
       const { enrolled: bootVerified } = lock.unlock(cred.secret as string, freshNonce());
+      // Evidence in the sealed log itself: a snapshot restore + successful
+      // unlock = the credential's secret VERIFIED against the restored
+      // verifier (a wrong one would have thrown); no snapshot = TOFU.
+      const bootMode = cred.snapshot ? "state restored, verified unlock" : "context-free boot (TOFU unlock)";
       app.log.info({ verified: bootVerified, hadSnapshot: !!cred.snapshot }, "autonomous boot: unlock result");
       log = new EventLog(lock.logKey, lock.storage);
       bootLogBaseline = log.all.length;
@@ -879,7 +887,7 @@ if (autonomyEnabled() && !lock.unlocked) {
           app.log.warn({ err: String(e) }, "autonomous boot: preference re-assert failed — re-arm may skip");
         }
       }
-      log.append({ type: "message", role: "user", text: "[system] autonomous boot — state restored, acting as user (background tasks)", at: new Date().toISOString() });
+      log.append({ type: "message", role: "user", text: `[system] autonomous boot — ${bootMode}, acting as user (background tasks)`, at: new Date().toISOString() });
       app.log.info({ restored: !!cred.snapshot }, "autonomous boot: unlocked from wake credential (delegated mode)");
       // Shared-secret handshake (the escrow no longer carries a bearer):
       // without a session the machine cannot idle-stop, and burns forever.

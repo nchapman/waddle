@@ -28,6 +28,21 @@ function seed(root: string): void {
   writeFileSync(join(root, "tmp", "scratch"), "tmp");
 }
 
+test("escrow variant (withoutBrowser) keeps context, drops the whole profile", () => {
+  seed(dir);
+  const a = createArchive(true);
+  const listing = spawnList(a.body);
+  assert.ok(listing.some((l) => l.includes("log/events.jsonl")), "sealed log rides");
+  assert.ok(listing.some((l) => l.includes("workspace/notes/a.txt")), "workspace rides");
+  assert.ok(!listing.some((l) => l.includes("browser/")), "no browser bytes at all — bounded");
+  // and it restores as a working DATA_DIR (browser-less by construction)
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  restoreArchive(a.body);
+  assert.ok(existsSync(join(dir, "workspace", "notes", "a.txt")));
+  assert.ok(!existsSync(join(dir, "browser")));
+});
+
 test("archive packs the working dir, excludes caches, restores exactly", () => {
   seed(dir);
   const a = createArchive();
