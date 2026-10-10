@@ -25,6 +25,9 @@ export interface PostboxPayload {
   events: Array<Record<string, unknown>>;
   /** The full schedule table as the run left it (done-markers set). */
   schedules: Schedule[];
+  /** Rows the run CANCELLED (cancel = removal, so the diff travels as
+   *  tombstones: seeded-at-boot ids absent from the final table). */
+  cancelledIds?: string[];
 }
 
 const AAD = (instance: string) => `waddle-postbox-v1:${instance}`;
@@ -41,15 +44,17 @@ export function openPostbox(autonomyKeyB64: string, instance: string, blobB64: s
   return JSON.parse(open(key, Buffer.from(blobB64, "base64"), AAD(instance)).toString()) as PostboxPayload;
 }
 
-/** Merge schedule tables as an id-UNION: postbox rows are newer truth
- *  (done-markers, realignments) and replace by id; postbox-only rows —
- *  schedules the unattended run CREATED (agent chaining) — are added;
- *  local rows not mentioned survive untouched. (A replace-only merge
- *  dropped chained creations and resurrected unattended cancellations.) */
-export function mergeSchedules(local: Schedule[], postbox: Schedule[]): Schedule[] {
+/** Merge schedule tables as an id-UNION with tombstones: postbox rows are
+ *  newer truth (done-markers, realignments) and replace by id; postbox-only
+ *  rows — schedules the unattended run CREATED (agent chaining) — are
+ *  added; ids the run cancelled are dropped (a cancel is a removal, so it
+ *  travels as an explicit tombstone list, not as an absent row). */
+export function mergeSchedules(local: Schedule[], postbox: Schedule[], cancelledIds: string[] = []): Schedule[] {
+  const dead = new Set(cancelledIds);
   const byId = new Map(local.map((s) => [s.id, s]));
   for (const s of postbox) byId.set(s.id, s); // postbox wins per id
-  return [...byId.values()];
+  for (const id of dead) byId.delete(id);
+  return [...byId.values()].filter((s) => !dead.has(s.id));
 }
 
 /** Rows worth escrowing: enabled schedules only, serialized plainly — the

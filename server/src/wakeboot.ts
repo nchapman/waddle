@@ -26,6 +26,10 @@ export interface WakeCredential {
   autonomyKey: string;
   /** The due work: schedule rows to seed the ticker on a blank volume. */
   schedules?: Schedule[];
+  /** DEV FILE ARM ONLY — never escrowed with the concierge: prod machines
+   *  infer on the platform-injected TINFOIL_API_KEY (proven v0.0.40); a
+   *  dev compose machine without that env needs the key to run schedules. */
+  inferenceKey?: string;
 }
 
 export function autonomyEnabled(): boolean {

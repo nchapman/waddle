@@ -61,6 +61,14 @@ describe("schedule merge (the no-re-fire contract)", () => {
     assert.equal(merged.length, 2);
   });
 
+  it("tombstones drop rows the run cancelled — cancel-as-removal survives the merge", () => {
+    const local = [row("j1"), row("j2"), row("j3")];
+    const postboxRows = [row("j1", { enabled: false, lastRun: "2026-10-10T08:00:05Z" })]; // j2 ran+cancelled? no: j1 ran; j2 was cancelled (absent)
+    const merged = mergeSchedules(local, postboxRows, ["j2", "ghost-id"]);
+    assert.deepEqual(merged.map((x) => x.id).sort(), ["j1", "j3"], "cancelled id dropped, unknown tombstone harmless");
+    assert.equal(merged.find((x) => x.id === "j1")?.enabled, false, "done-marker still applied");
+  });
+
   it("schedulableRows carries enabled work only, as plain JSON", () => {
     const rows = schedulableRows([row("j1"), row("j2", { enabled: false })]);
     assert.deepEqual(rows.map((r) => r.id), ["j1"]);

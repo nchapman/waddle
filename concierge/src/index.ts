@@ -189,10 +189,7 @@ async function ensureInstance(instance: string): Promise<string> {
 
 // ── The table (semantics live in table.ts; platform verbs fire here) ─────
 
-// bodyLimit 8MiB: the postbox carries one autonomous run's sealed tail
-// (capped at 200 events client-side); the default 1MiB would reject a
-// sizeable run's mail at the gateway.
-const app = fastify({ logger: true, bodyLimit: 8 * 1024 * 1024 });
+const app = fastify({ logger: true });
 
 const table = createTable(
   (instance) => {
@@ -461,7 +458,13 @@ app.post<{ Body: { instance?: string } }>("/handoff/pull", async (req, reply) =>
  *  derived from the autonomy subkey): the concierge holds mail it cannot
  *  open. External-tier auth is fine — a forged row is undecryptable
  *  junk, not a credential. */
-app.post<{ Body: { instance?: string; blob?: string; clear?: boolean } }>("/handoff/post", async (req, reply) => {
+// bodyLimit 8MiB on THIS route only (default elsewhere — a raise is an
+// unauthenticated buffering surface; the postbox carries one run's sealed
+// tail, client-capped at 200 events).
+app.post<{ Body: { instance?: string; blob?: string; clear?: boolean } }>(
+  "/handoff/post",
+  { bodyLimit: 8 * 1024 * 1024 },
+  async (req, reply) => {
   // SESSION tier (like /timer): both writers — the autonomous machine at
   // re-sleep and the unlocking machine at collection — handshook first.
   // A bearer confusion here (session token sent to an external-tier
@@ -478,7 +481,8 @@ app.post<{ Body: { instance?: string; blob?: string; clear?: boolean } }>("/hand
   const res = postbox.post(instance, blob);
   app.log.info({ instance, bytes: blob.length, expires_in_ms: res.expires_in_ms }, "postbox stored (sealed)");
   return { ok: true, ...res };
-});
+  },
+);
 
 /** Pull the postbox: the machine at the next unlock (which can derive the
  *  seal key) collects and clears the mail. One delivery. */

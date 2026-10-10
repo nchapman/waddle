@@ -184,9 +184,19 @@ app.post("/unlock", async (request, reply) => {
     // is captured first — a takeover machine must not merge its own mail
     // (its events are already live in this log).
     const wasAutonomous = autonomous;
-    if (autonomous) {
+    if (autonomous && log) {
+      // Takeover re-seals: the live log is subkey-sealed (a separate file
+      // the next boot would never read). Replay its events into a
+      // master-sealed log so the takeover conversation survives like any
+      // other — the user's transcript must never hinge on which key
+      // happened to boot the machine.
       autonomous = false;
-      log?.append({ type: "message", role: "user", text: "[system] user unlock — autonomous session taken over", at: new Date().toISOString() });
+      const masterLog = new EventLog(lock.logKey, lock.storage);
+      for (const e of log.all) masterLog.append(e);
+      log = masterLog;
+      log.append({ type: "message", role: "user", text: "[system] user unlock — autonomous session taken over", at: new Date().toISOString() });
+    } else if (autonomous) {
+      autonomous = false;
     }
     if (!log) log = new EventLog(lock.logKey, lock.storage);
     // The clock starts the moment the machine wakes to a client — never
@@ -265,7 +275,7 @@ app.post("/unlock", async (request, reply) => {
         if (blob) {
           const payload = openPostbox(autonomyKeyFromSecret(secret), INSTANCE, blob);
           for (const e of payload.events) log?.append(e);
-          replaceAllSchedules(mergeSchedules(listSchedules(), payload.schedules));
+          replaceAllSchedules(mergeSchedules(listSchedules(), payload.schedules, payload.cancelledIds ?? []));
           log?.append({ type: "message", role: "user", text: `[system] postbox merged — ${payload.events.length} events from the unattended run delivered`, at: new Date().toISOString() });
           app.log.info({ events: payload.events.length, schedules: payload.schedules.length }, "postbox merged into session");
         }
@@ -290,7 +300,7 @@ app.post("/unlock", async (request, reply) => {
       // Best-effort: a failed arm (read-only storage, full disk) must never
       // fail an unlock that already succeeded.
       try {
-        armWakeCredential({ autonomyKey: armAutonomyKey, schedules: activeSchedules() });
+        armWakeCredential({ autonomyKey: armAutonomyKey, schedules: activeSchedules(), inferenceKey });
       } catch (e) {
         app.log.warn({ err: String(e) }, "wake credential arm failed — autonomy off this session");
       }
@@ -489,6 +499,7 @@ async function sleep(reason: string): Promise<never> {
         // pathological transcript must not blow the gateway body limit.
         // If it ever truncates, the mail says so — honest, never silent.
         const MAX_EVENTS = 200;
+        const MAX_BLOB = 6 * 1024 * 1024; // gateway accepts 8MiB; stay under
         let events = log.all;
         if (events.length > MAX_EVENTS) {
           events = [
@@ -496,9 +507,24 @@ async function sleep(reason: string): Promise<never> {
             ...events.slice(-MAX_EVENTS),
           ];
         }
-        const blob = sealPostbox(armAutonomyKey, INSTANCE, { events, schedules: listSchedules() });
+        // Cancels during the run: seeded-but-now-absent ids. The schedules
+        // (done-markers + chained creations) and these tombstones together
+        // are the no-re-fire / no-resurrect contract.
+        const cancelledIds = [...bootSeededIds].filter((id) => !listSchedules().some((r) => r.id === id));
+        let payload: { events: typeof events; schedules: ReturnType<typeof listSchedules>; cancelledIds: string[] } = { events, schedules: listSchedules(), cancelledIds };
+        let blob = sealPostbox(armAutonomyKey, INSTANCE, payload);
+        if (blob.length > MAX_BLOB) {
+          // A single pathological event can outsize the count cap — drop
+          // the transcript, keep the schedule truth, and say so in the mail.
+          payload = {
+            events: [{ type: "message", role: "user", text: "[system] postbox oversize — run transcript dropped at seal time, schedule state preserved", at: new Date().toISOString() }],
+            schedules: payload.schedules,
+            cancelledIds: payload.cancelledIds,
+          };
+          blob = sealPostbox(armAutonomyKey, INSTANCE, payload);
+        }
         const ok = await postPostbox(blob);
-        if (ok) app.log.info({ events: events.length, bytes: blob.length }, "postbox posted (sealed) at autonomous sleep");
+        if (ok) app.log.info({ events: payload.events.length, bytes: blob.length, cancelled: cancelledIds.length }, "postbox posted (sealed) at autonomous sleep");
         else app.log.warn("postbox post failed — unattended output degrades to re-fire delivery");
       } catch (e) {
         app.log.warn({ err: String(e) }, "postbox post failed — unattended output degrades to re-fire delivery");
@@ -729,6 +755,9 @@ app.get("/ws", { websocket: true }, (socket, request) => {
 // re-derive it, and must not — the next boot gets the same key). Same
 // lifetime as the lock's derived keys: memory-only, gone at sleep.
 let armAutonomyKey: string | null = null;
+/** Ids seeded from the wake credential — the tombstone baseline for the
+ *  postbox (cancels during the run = seeded ids absent at re-sleep). */
+let bootSeededIds = new Set<string>();
 
 // Wake autonomy: a boot triggered by a concierge wake-timer finds the
 // machine locked with no keys — the due work couldn't run. The credential
@@ -753,8 +782,14 @@ if (autonomyEnabled() && !lock.unlocked) {
       const aut = lock.unlockAutonomous(cred.autonomyKey);
       log = new EventLog(aut.logKey, lock.storage, "events.autonomous.jsonl");
       // Seed the due work: every deploy is a fresh volume, so the schedule
-      // table travels inside the credential.
-      if (cred.schedules) seedSchedules(cred.schedules as Schedule[]);
+      // table travels inside the credential. Seeded ids are captured —
+      // the postbox diff (seeded minus surviving) is the cancel tombstone
+      // set at re-sleep.
+      if (cred.schedules) {
+        seedSchedules(cred.schedules as Schedule[]);
+        bootSeededIds = new Set((cred.schedules as Schedule[]).map((r) => r.id));
+      }
+      if (cred.inferenceKey) initAgent(cred.inferenceKey as string); // dev file arm only
       autonomous = true;
       armAutonomyKey = cred.autonomyKey;
       log.append({ type: "message", role: "user", text: "[system] autonomous boot — unlocked from wake credential (restricted mode)", at: new Date().toISOString() });
