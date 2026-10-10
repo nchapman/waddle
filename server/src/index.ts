@@ -9,6 +9,7 @@ import cors from "@fastify/cors";
 import { WebSocket } from "ws";
 import { readFileSync } from "node:fs";
 import { hello, type GatewayEvent, type UnlockRequest, type UnlockResponse, type StateResponse } from "@waddle/sdk";
+import pkg from "../package.json" with { type: "json" };
 import { Lock, freshNonce } from "./state.js";
 import { EventLog } from "./log.js";
 import { initAgent, chat, agentReady, stageSessionJsonl, stageHistoryRows, setBlackbox, setSink, getSessionJsonl } from "./agent.js";
@@ -86,7 +87,7 @@ setInterval(() => {
 }, 10_000).unref();
 
 const PORT = Number(process.env.PORT ?? 8080);
-const VERSION = "0.0.1";
+const VERSION = pkg.version;
 const INSTANCE = process.env.WADDLE_INSTANCE ?? "waddle";
 /** Idle gate: no ACTIVITY for this long → sleep. A dev override shortens it. */
 const IDLE_MS = Number(process.env.WADDLE_IDLE_MS ?? 600_000); // 10 min

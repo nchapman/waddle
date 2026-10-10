@@ -39,6 +39,7 @@ import type {
   TimerRequest,
   WakeRequest,
 } from "@waddle/sdk";
+import pkg from "../package.json" with { type: "json" };
 import { createTable } from "./table.js";
 import { createHandoffStore } from "./handoff.js";
 import { createPostboxStore } from "./postbox.js";
@@ -266,7 +267,7 @@ await app.register(cors, {
 
 app.get("/health", async () => ({
   service: "waddle-concierge",
-  version: "0.3.0",
+  version: pkg.version,
   backend: BACKEND,
   rows: table.countRows(),
   // Counts only — standby NAMES authorize the standby namespace in

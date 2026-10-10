@@ -5,14 +5,18 @@ FROM node:24-slim AS build
 RUN corepack enable
 WORKDIR /app
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
-# Only the concierge is installed here: drop the absent importers
-# (client — with its out-of-workspace betterbase link — plus sdk and
-# server) so --frozen-lockfile validates against what actually exists.
-RUN awk '/^  (client|sdk|server):/ { skip=1 } /^  [A-Za-z.]+:/ && !/^  (client|sdk|server):/ { skip=0 } /^[A-Za-z]/ { skip=0 } !skip' pnpm-lock.yaml > lock.tmp && mv lock.tmp pnpm-lock.yaml
+# Only the concierge + sdk are installed here: drop the absent importers
+# (client with its out-of-workspace betterbase link, plus server) so
+# --frozen-lockfile validates against what actually exists. The sdk stays
+# — the concierge imports the wire types from it.
+RUN awk '/^  (client|server):/ { skip=1 } /^  [A-Za-z.]+:/ && !/^  (client|server):/ { skip=0 } /^[A-Za-z]/ { skip=0 } !skip' pnpm-lock.yaml > lock.tmp && mv lock.tmp pnpm-lock.yaml
 COPY concierge/package.json concierge/package.json
+COPY sdk/package.json sdk/package.json
 RUN pnpm install --frozen-lockfile
 COPY concierge concierge
-RUN pnpm --filter @waddle/concierge build \
+COPY sdk sdk
+RUN pnpm --filter @waddle/sdk build \
+ && pnpm --filter @waddle/concierge build \
  && pnpm --filter @waddle/concierge deploy --prod /deploy
 
 FROM node:24-slim
