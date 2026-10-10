@@ -129,6 +129,71 @@ describe("warm-standby pool", () => {
     assert.deepEqual(h.booted, ["s1", "s2"], "replacement boots after the slot frees");
   });
 
+  it("retries a failed destroy on a HEALTH-DEAD warm standby (stuck destroying is re-condemned every tick)", async () => {
+    const h = harness(["s1", "s2"]);
+    let failing = true;
+    h.deps.destroy = async (n) => {
+      if (failing) throw new Error("platform error");
+      h.destroyed.push(n);
+    };
+    const pool = createPool({ size: 1, ttlMs: 60_000 }, h.deps);
+    await pool.tick();
+    h.healthy.add("s1");
+    await pool.tick(); // warm
+
+    h.healthy.delete("s1"); // dies — destroy fails, state sticks at destroying
+    await pool.tick();
+    assert.deepEqual(h.destroyed, []);
+
+    // Well before TTL: the stuck destroying entry must still be retried
+    // (it used to fall out of the reap predicate entirely).
+    h.clock.t += 5_000;
+    await pool.tick();
+    assert.deepEqual(h.destroyed, [], "first retry also fails");
+
+    failing = false;
+    h.clock.t += 5_000;
+    await pool.tick();
+    assert.deepEqual(h.destroyed, ["s1"], "health-death destroy retried without waiting for TTL");
+  });
+
+  it("foreign (adopted Running) leftovers are never assignable and outlive the pool TTL", async () => {
+    const h = harness(["s1", "s2"]);
+    h.deps.destroy = async (n) => {
+      h.destroyed.push(n);
+    };
+    const pool = createPool({ size: 1, ttlMs: 60_000, claimGraceMs: 600_000 }, h.deps);
+    pool.adoptForeign(["standby-9"]);
+    assert.equal(pool.assign(), null, "foreign is never warm → never assignable");
+
+    h.clock.t += 61_000; // past the pool TTL — the claim grace still holds
+    await pool.tick();
+    assert.deepEqual(h.destroyed, [], "NOT TTL-reaped: a user may be mid-session");
+    assert.deepEqual(h.booted, ["s1"], "foreign does not consume the fill budget");
+
+    h.healthy.add("s1");
+    await pool.tick();
+    const got = pool.assign();
+    assert.equal(got?.name, "s1", "warm standby still assignable alongside foreign");
+
+    h.clock.t += 600_000; // claim grace elapses
+    await pool.tick();
+    assert.deepEqual(h.destroyed, ["standby-9"], "reaped on the claim-grace clock");
+  });
+
+  it("defers fills while canFill() is false (release-window deferral) and boots one tick later", async () => {
+    const h = harness(["s1"]);
+    let mayFill = false;
+    h.deps.canFill = () => mayFill;
+    const pool = createPool({ size: 1, ttlMs: 60_000 }, h.deps);
+    await pool.tick();
+    assert.deepEqual(h.booted, [], "no boot while the release window is open");
+
+    mayFill = true;
+    await pool.tick();
+    assert.deepEqual(h.booted, ["s1"], "fills resume the tick after the window closes");
+  });
+
   it("adopts leftover standbys so a concierge restart never orphans them", async () => {
     const h = harness(["s3"]);
     const pool = createPool({ size: 1, ttlMs: 60_000 }, h.deps);

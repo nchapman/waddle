@@ -12,11 +12,13 @@
  * stop rows, and the client own it from there). A booting machine that
  * never turns healthy, a warm machine that dies, or any machine past the
  * TTL is stopped-and-deleted (retried until the destroy lands) and
- * replaced on a later tick.
+ * replaced on a later tick. Foreign = a Running leftover adopted after
+ * a concierge restart with unknown claim status: never assignable,
+ * reaped on the claim-grace clock instead of the pool TTL.
  */
 export interface PoolMachine {
   name: string;
-  state: "booting" | "warm" | "destroying";
+  state: "booting" | "warm" | "destroying" | "foreign";
   createdAt: number;
 }
 
@@ -43,6 +45,10 @@ export interface PoolConfig {
   size: number;
   /** Unclaimed standbys older than this are destroyed. */
   ttlMs: number;
+  /** Adopted Running leftovers (unknown claim status) are reaped on
+   *  this clock — the claim bound, NOT the pool TTL: a machine a user
+   *  unlocked may be mid-session, and claims outlive pool rows. */
+  claimGraceMs?: number;
 }
 
 export interface Pool {
@@ -55,6 +61,10 @@ export interface Pool {
    *  health promotes them, the TTL reaps them if nobody claims — a
    *  concierge restart never orphans a billing standby. */
   adopt(names: string[]): void;
+  /** Adopt RUNNING leftovers with unknown claim status: never
+   *  assignable, reaped on the claim-grace clock instead of the TTL —
+   *  a user may be mid-session on one. */
+  adoptForeign(names: string[]): void;
   /** Names currently tracked (any state). */
   tracked(): PoolMachine[];
 }
@@ -82,33 +92,51 @@ export function createPool(cfg: PoolConfig, deps: PoolDeps): Pool {
   const machines = new Map<string, PoolMachine>();
   const live = (): PoolMachine[] => [...machines.values()];
 
+  /** Condemn + destroy, retried by later ticks while it doesn't land.
+   *  The entry is removed ONLY on a successful (or already-gone)
+   *  destroy — a failed one keeps it tracked so the next tick retries
+   *  instead of orphaning a billing machine nobody remembers. */
+  async function destroyMachine(m: PoolMachine): Promise<void> {
+    m.state = "destroying"; // synchronous: assign() must never hand out a machine mid-destroy
+    try {
+      await deps.destroy(m.name);
+      machines.delete(m.name);
+    } catch (e) {
+      // A not-found destroy is success in every way that matters
+      // (the machine is gone) — frees the slot.
+      if (/not found|no such|already (been )?deleted/i.test(String(e))) {
+        machines.delete(m.name);
+        deps.log("destroy: machine already gone — slot freed", { name: m.name });
+      } else {
+        deps.log("destroy failed — retrying next tick", { name: m.name, err: String(e) });
+      }
+    }
+  }
+
   async function tick(): Promise<void> {
-    // 1. Reap: TTL-expired or dead machines get destroyed. The entry is
-    //    removed ONLY on a successful destroy — a failed one leaves it
-    //    tracked so the next tick retries instead of orphaning a
-    //    billing machine nobody remembers.
+    // 1. Reap. A destroy that didn't land stays condemned: retried
+    //    every tick (health answers would not un-condemn it) — a stuck
+    //    "destroying" entry used to linger un-retried until TTL.
     for (const m of live()) {
+      if (m.state === "destroying") {
+        await destroyMachine(m);
+        continue;
+      }
+      // Foreign (adopted Running leftover, unknown claim status): never
+      // assignable, reaped on the claim-grace clock — NOT the pool TTL,
+      // because a claimed machine may legitimately be mid-session.
+      if (m.state === "foreign") {
+        if (deps.now() - m.createdAt > (cfg.claimGraceMs ?? 12 * 3600_000)) {
+          deps.log("adopted running leftover past claim grace — destroying", { name: m.name, age_ms: deps.now() - m.createdAt });
+          await destroyMachine(m);
+        }
+        continue;
+      }
       const expired = deps.now() - m.createdAt > cfg.ttlMs;
       const dead = m.state === "warm" && !(await deps.health(m.name).catch(() => false));
       if (expired || dead) {
         deps.log(expired ? "standby ttl expired — destroying" : "warm standby unhealthy — destroying", { name: m.name, age_ms: deps.now() - m.createdAt });
-        m.state = "destroying"; // synchronous: assign() must never hand out a machine mid-destroy
-        try {
-          await deps.destroy(m.name);
-          machines.delete(m.name);
-        } catch (e) {
-          // A not-found destroy is success in every way that matters
-          // (the machine is gone) — frees the slot. Anything else keeps
-          // the machine tracked so the next tick retries instead of
-          // orphaning a billing machine nobody remembers.
-          if (/not found|no such|already (been )?deleted/i.test(String(e))) {
-            machines.delete(m.name);
-            deps.log("destroy: machine already gone — slot freed", { name: m.name });
-          } else {
-            deps.log("destroy failed — retrying next tick", { name: m.name, err: String(e) });
-          }
-        }
-        continue;
+        await destroyMachine(m);
       }
     }
     // 2. Promote: a booting machine that answers health is warm.
@@ -123,7 +151,11 @@ export function createPool(cfg: PoolConfig, deps: PoolDeps): Pool {
     //    Deferred while a handoff release window is open: a replacement
     //    boot racing the intended schedule-boot's one-shot pull is the
     //    standby-steal path (SME review) — warm one tick later instead.
-    if (cfg.size > 0 && live().length < cfg.size && !(deps.canFill && !deps.canFill())) {
+    // Foreign machines don't count toward the fill budget: they're
+    // adopted burn on the claim-grace clock, not warmth — users still
+    // get their standby (temporary over-burn, bounded by the grace).
+    const warmable = live().filter((m) => m.state !== "foreign").length;
+    if (cfg.size > 0 && warmable < cfg.size && !(deps.canFill && !deps.canFill())) {
       const name = deps.nextName();
       machines.set(name, { name, state: "booting", createdAt: deps.now() });
       try {
@@ -156,10 +188,25 @@ export function createPool(cfg: PoolConfig, deps: PoolDeps): Pool {
     }
   }
 
+  /** Adopt Running leftovers whose claim status died with a restart.
+   *  NEVER assignable (assign() hands out warm only): a Running
+   *  standby may be a machine a user already claimed via /assign and
+   *  unlocked — handing its URL to a second user, or TTL-deleting it
+   *  mid-session, would violate the claim. Reaped on the claim-grace
+   *  clock instead (review finding). */
+  function adoptForeign(names: string[]): void {
+    for (const name of names) {
+      if (machines.has(name)) continue;
+      machines.set(name, { name, state: "foreign", createdAt: deps.now() });
+      deps.log("running leftover adopted as foreign (never assignable; claim-grace reaped)", { name });
+    }
+  }
+
   return {
     assign,
     tick,
     adopt,
+    adoptForeign,
     tracked: () => [...machines.values()],
   };
 }

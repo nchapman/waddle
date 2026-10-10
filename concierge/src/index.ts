@@ -206,19 +206,21 @@ const table = createTable(
     // a window is open. A failed deploy re-arms its row (the table spent
     // it, and the agent is asleep); the stale window just expires in 3min.
     handoff.markWakeFired(instance);
+    const retryKey = `${instance}:${jobId}`;
     void ensureInstance(instance)
       .then((detail) => {
+        wakeRetries.delete(retryKey); // budget is per failure-chain, not per schedule lifetime
         app.log.info({ instance, jobId, detail }, "wake row fired — deploy ok");
       })
       .catch((e) => {
-        const key = `${instance}:${jobId}`;
-        const n = (wakeRetries.get(key) ?? 0) + 1;
-        wakeRetries.set(key, n);
-        if (n <= 3) {
+        const n = (wakeRetries.get(retryKey) ?? 0) + 1;
+        if (n < 3) {
+          wakeRetries.set(retryKey, n);
           table.setWake(instance, jobId, 2 * 60_000);
           app.log.warn({ instance, jobId, attempt: n, err: String(e) }, "wake deploy failed — row re-armed (+2min)");
         } else {
-          app.log.error({ instance, jobId, err: String(e) }, "wake deploy failed 3x — job abandoned");
+          wakeRetries.delete(retryKey); // abandoned: a future occurrence starts fresh
+          app.log.error({ instance, jobId, err: String(e) }, "wake deploy failed 3x — job abandoned (this occurrence)");
         }
       });
   },
@@ -272,12 +274,20 @@ async function authorize(req: { headers: { authorization?: string }; body?: { in
     e.lastContact = Date.now();
     return instance;
   }
-  // SESSION-TIER ONLY (SME review): the external tier (shared secret /
+        // SESSION-TIER ONLY (SME review): the external tier (shared secret /
   // any bb JWT) must never write table rows. A wake row written with the
   // shared secret mints a handoff release window on demand — the
   // fire-gate would be decorative. Machines always handshake before
   // writing rows (the sleep gate refuses to die without a session), so
   // nothing legitimate is lost.
+  //
+  // KNOWN SEAM (review, k=1 accepted): /handshake itself still verifies
+  // at the external tier, so a shared-secret or bb-JWT holder can mint
+  // a session and then write rows. Closing it needs per-machine
+  // identity over the attested channel (PLAN.md); at k=1 the machines
+  // already hold the escrow secret, so the added exposure is the
+  // bb-JWT holder class only — /handshake below rejects bare JWTs to
+  // shrink exactly that class to secret-holders.
   return null;
 }
 
@@ -327,7 +337,16 @@ app.post<{ Body: { instance?: string } }>("/handshake", async (req, reply) => {
   const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
   const { instance } = req.body ?? {};
   if (!allowedInstance(instance)) return reply.code(403).send({ error: "instance not allowed" });
-  if (!(await verifyExternal(token))) return reply.code(401).send({ error: "unauthorized" });
+  // SECRET-ONLY (review): the general external tier also accepts bb
+  // JWTs, but a handshake mints a session and sessions write table rows
+  // — letting any JWT holder reach /timer re-opens the decorative
+  // fire-gate the session-tier rule closed. Machines always hold the
+  // shared secret (their handshake bearer); nothing legitimate loses
+  // access. Constant-time, as everywhere the secret is compared.
+  const a = Buffer.from(token ?? "");
+  const b = Buffer.from(SHARED_SECRET ?? "");
+  const secretOk = !!SHARED_SECRET && a.length === b.length && timingSafeEqual(a, b);
+  if (!secretOk) return reply.code(401).send({ error: "unauthorized" });
   const { sessionToken } = table.mintSession(instance);
   return { session_token: sessionToken };
 });
@@ -454,12 +473,16 @@ const pool: Pool | null = POOL_CAPABLE
           await exec("tinfoil", args, { timeout: 30_000 });
         },
         destroy: async (name) => {
-          await restInstance(name);
-          await exec("tinfoil", ["container", "delete", name], { timeout: 60_000 });
-          // The machine is gone: free the name. Recycling keeps the standby
-          // namespace tiny (standby-1, standby-2…) so the operator's egress
-          // allowlist can name every possible probe host exactly.
-          poolNames.delete(name);
+          try {
+            await restInstance(name);
+            await exec("tinfoil", ["container", "delete", name], { timeout: 60_000 });
+          } finally {
+            // The name frees on EVERY outcome — success or not-found both
+            // mean the machine is gone, and a failed destroy retries with
+            // the name still held; leaving it burned on the throw path
+            // drifted the recycled namespace (review finding).
+            poolNames.delete(name);
+          }
         },
         health: async (name) => (await instanceStatuses().catch(() => new Map())).get(name) === "Running",
         urlFor: (name) => `https://${name}.${DOMAIN_BASE}`,
@@ -471,41 +494,46 @@ const pool: Pool | null = POOL_CAPABLE
         },
         now: () => Date.now(),
         log: (msg, fields) => app.log.info(fields ?? {}, msg),
-        // Never boot a replacement while a handoff release window is open:
-        // the racing standby can steal the one-shot pull (SME review).
-        canFill: () => !handoff.windowOpen("waddle"),
+        // Never boot a replacement while a handoff release window is
+        // open for ANY allowed instance: a replacement boot racing the
+        // intended pull is the standby-steal path (SME review).
+        canFill: () => ![...ALLOWED].some((i) => handoff.windowOpen(i)),
       },
     )
   : null;
 if (pool) {
-  /** Leftover scan after a reboot (our memory is wiped): adopt ONLY
-   *  machines the platform reports Stopped — a stopped standby is
-   *  provably session-less (state lives on the shelf; the claimant's
-   *  client will simply be assigned another machine). Running ones are
-   *  never touched: unknown claim status, and only their own gates,
-   *  grace rows, and the hard sweep own them. Runs at boot and
-   *  periodically — a failed scan retries instead of waiting for the
-   *  next process restart. */
+  /** Leftover scan after a reboot (our memory is wiped). Stopped
+   *  standbys are provably session-less (state lives on the shelf; the
+   *  claimant's client simply gets assigned another machine) — adopted
+   *  as booting. Running ones have unknown claim status — adopted as
+   *  FOREIGN: never assignable, reaped on the claim-grace clock (a
+   *  user may be mid-session on one; only their own gates, grace rows,
+   *  and the hard sweep own them). Runs at boot and periodically — a
+   *  failed scan retries instead of waiting for the next process
+   *  restart. */
   const scanLeftovers = () =>
     instanceStatuses()
       .then(async (statuses) => {
-        const leftovers: string[] = [];
+        const stopped: string[] = [];
+        const running: string[] = [];
         for (const [n, st] of statuses) {
           if (!STANDBY_NAME_RE.test(n) || poolNames.has(n)) continue;
           poolNames.add(n);
-          // Adopt stopped AND running leftovers. Running-only was the
-          // original rule (unknown claim status), but a concierge restart
-          // orphans its own in-flight boots as untracked burn with no
-          // reaper at all — live-observed twice (evidence file). Adopting
-          // running ones as booting re-attaches the TTL/health reapers;
-          // the worst case (it was a claimed machine) equals the claim
-          // bound anyway, since claims and rows are memory-only and died
-          // with the same restart.
-          if (st === "Stopped" || st === "Running") leftovers.push(n);
+          // Stopped leftovers are provably session-less (state lives on
+          // the shelf) — adopt as booting, they re-enter the normal
+          // TTL/health lifecycle. Running leftovers have UNKNOWN claim
+          // status: a user may be mid-session on one. They are adopted
+          // as foreign — never assignable, reaped on the claim-grace
+          // clock, not the pool TTL (review finding: adopt-as-booting
+          // let the pool re-hand-out and then TTL-delete a claimed
+          // machine).
+          if (st === "Stopped") stopped.push(n);
+          else if (st === "Running") running.push(n);
           else app.log.info({ name: n, status: st }, "pool: leftover not adoptable yet");
         }
-        if (leftovers.length > 0) pool.adopt(leftovers);
-        app.log.info({ adopted: leftovers.length }, "pool: platform standby scan");
+        if (stopped.length > 0) pool.adopt(stopped);
+        if (running.length > 0) pool.adoptForeign(running);
+        app.log.info({ adopted_stopped: stopped.length, adopted_running_foreign: running.length }, "pool: platform standby scan");
         void pool.tick();
       })
       .catch((e) => app.log.warn({ err: String(e) }, "pool scan failed — retrying next interval"));

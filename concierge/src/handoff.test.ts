@@ -49,6 +49,17 @@ describe("wake handoff store", () => {
     assert.equal(s.arm("b", CRED, 999_999_999).expires_in_ms, 600_000);
   });
 
+  it("default release window is 3 minutes (pinned: the standby-steal exposure scale)", () => {
+    const { s, tick } = store(); // no override — the production default
+    s.arm("waddle", CRED);
+    s.markWakeFired("waddle");
+    tick(3 * 60_000);
+    assert.equal(s.windowOpen("waddle"), true, "still open at exactly 3min");
+    tick(1);
+    assert.equal(s.windowOpen("waddle"), false, "closed at 3min+1");
+    assert.equal((s.release("waddle") as { reason?: string }).reason, "window");
+  });
+
   it("windowOpen mirrors the release gate; clear disarms", () => {
     const { s } = store({ releaseWindowMs: 60_000 });
     s.arm("waddle", CRED);

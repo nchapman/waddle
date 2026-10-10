@@ -56,11 +56,15 @@ export function createHandoffStore(opts: HandoffOptions = {}) {
     return { expires_in_ms: ttl };
   }
 
-  /** The wake-table fire hook: a schedule-deploy SUCCEEDED, so the next
-   * machine to boot is the one this fire was for. Idempotent within a
-   * fire; cleared on release. Callers must only invoke this after the
-   * deploy resolves — opening the window on the timer alone would let any
-   * boot in flight steal the one-shot (SME review). */
+  /** The wake-table fire hook: the timer fired, so a schedule-boot is
+   * being deployed NOW and the next machine to boot is the one this
+   * fire was for. Called at FIRE time, deliberately BEFORE the deploy
+   * resolves — the boot's own pull lands ~90s in and can beat the
+   * deploy CLI's resolve (live-caught 01:23Z: marking after it made
+   * the intended machine pull no-fire). Compensating controls for the
+   * window this opens: the pool defers fills while it's open (canFill)
+   * and it expires in releaseWindowMs. Idempotent within a fire;
+   * cleared on release. */
   function markWakeFired(instance: string): void {
     firedAt.set(instance, now());
   }

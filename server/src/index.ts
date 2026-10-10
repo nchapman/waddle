@@ -460,7 +460,18 @@ async function sleep(reason: string): Promise<never> {
         return d === null ? acc : acc === null ? d : Math.min(acc, d);
       }, null);
       if (horizon !== null) {
-        await armHandoff({ secret: armSecret, inferenceKey: armInferenceKey }, process.env.CONCIERGE_SHARED_SECRET ?? "", horizon - Date.now() + 15 * 60_000);
+        // A failed re-arm is NOT silent: the wake rows above are already
+        // written, so the next boot would arrive locked and the work lost
+        // — better to see it in the ring (review finding). And never send
+        // an empty bearer: without the secret the call is a guaranteed
+        // 401.
+        const bearer = process.env.CONCIERGE_SHARED_SECRET;
+        if (!bearer) {
+          app.log.warn({ horizon }, "sleep-gate escrow re-arm skipped — CONCIERGE_SHARED_SECRET unset; next wake boot stays locked");
+        } else {
+          const ok = await armHandoff({ secret: armSecret, inferenceKey: armInferenceKey }, bearer, horizon - Date.now() + 15 * 60_000);
+          if (!ok) app.log.warn({ horizon }, "sleep-gate escrow re-arm failed — next wake boot stays locked");
+        }
       }
     }
   }
