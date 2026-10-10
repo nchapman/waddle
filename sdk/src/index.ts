@@ -137,8 +137,9 @@ export interface ErrorEvent {
 
 // ── Concierge wire ─────────────────────────────────────────────────────
 // The always-on lifecycle timer: a table of {instance, action, due} rows
-// plus memory-only escrows. Every route is POST with `instance` in the
-// body (no GETs — no caching, no URL-borne secrets). Auth tiers:
+// plus memory-only escrows. Writes are POST with `instance` in the body
+// (no URL-borne secrets); the read-only /health, /assign, /status are GET
+// (assign and status carry their bearer in the header). Auth tiers:
 //   external  bb JWT or shared secret  (/wake /assign /handoff /handoff/pull)
 //   session   handshake-minted token   (/timer /handoff/post /handoff/post/pull)
 //   secret    shared secret only       (/handshake bearer — it mints sessions)

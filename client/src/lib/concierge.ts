@@ -51,6 +51,7 @@ export async function pollUntilHealthy(
  *  handed-out host is outside the primary's zone (the TOFU pin travels
  *  by measurement, so it cannot catch a host switch). */
 export async function assignStandby(auth: ConciergeAuth, zone: string): Promise<string | null> {
+  if (!zone) return null; // no zone to bind to — never accept a host unbound
   const token = (await auth().catch(() => null)) ?? CONCIERGE_TOKEN;
   try {
     const res = await fetch(`${CONCIERGE_URL}/assign`, {

@@ -46,9 +46,9 @@ test("wakeInstance falls back to the shared-secret env token and reports refusal
   assert.equal(bearer(calls[0]!), `Bearer ${CONCIERGE_TOKEN}`);
 });
 
-test("wakeInstance reports a failed concierge call instead of hanging the wake flow", async () => {
-  // The structural timeout guard (AbortSignal on the /wake fetch) is what
-  // bounds a SILENT stall; this pins the loud-failure path.
+test("wakeInstance reports a failed concierge call as unreachable", async () => {
+  // The structural timeout guard (AbortSignal on the /wake fetch) bounds a
+  // SILENT stall; this pins the loud-failure path through the same return.
   stubFetch(() => ({ throwErr: new Error("ECONNREFUSED") }));
   const r = await wakeInstance(async () => null);
   assert.equal(r.ok, false);
