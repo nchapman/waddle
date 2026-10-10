@@ -84,40 +84,39 @@ export async function deathFlare(): Promise<void> {
 }
 
 /** Wake-autonomy escrow: park the boot credential in the concierge's
- *  MEMORY (never on this machine's ephemeral disk). The concierge
- *  releases it only to a machine it booted for a fired wake row; a
- *  concierge restart in between just means the pull 404s and the boot
- *  falls through to the normal locked ceremony — autonomy degrades,
- *  nothing breaks. */
-export async function armHandoff(
-  cred: { secret: string; inferenceKey?: string; conciergeBearer?: string },
-  bearer: string,
-): Promise<boolean> {
-  const r = await post<{ ok: boolean }>("/handoff", { ...cred }, bearer);
+ *  MEMORY (never on this machine's ephemeral disk). TTL is the NEXT due
+ *  schedule + margin (SME review): the escrow exists to serve a schedule,
+ *  so it stands exactly as long — not 7 days. Re-armed at every unlock
+ *  AND at the sleep gate, so recurring schedules stay covered without a
+ *  long-lived row. */
+export async function armHandoff(cred: { secret: string; inferenceKey?: string }, bearer: string, ttlMs?: number): Promise<boolean> {
+  const r = await post<{ ok: boolean }>("/handoff", { ...cred, ttl_ms: ttlMs }, bearer);
   return r?.ok === true;
 }
 
 /** The wake-boot side of the escrow: ask the concierge for the
- *  credential. Auth is the env shared secret — a locked boot has no
- *  session token, exactly like the locked-boot backstop handshake. */
+ *  credential. POST (no caching, no URL-borne secrets). Auth is the env
+ *  shared secret — a locked boot has no session token, exactly like the
+ *  locked-boot backstop handshake. */
 export async function pullHandoff(): Promise<{
   secret: string;
   inferenceKey?: string;
-  conciergeBearer?: string;
 } | null> {
   if (!CONCIERGE_URL) return null;
   try {
-    const res = await fetch(`${CONCIERGE_URL}/handoff?instance=${encodeURIComponent(INSTANCE)}`, {
-      headers: { authorization: `Bearer ${process.env.CONCIERGE_SHARED_SECRET ?? ""}` },
+    const res = await fetch(`${CONCIERGE_URL}/handoff/pull`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${process.env.CONCIERGE_SHARED_SECRET ?? ""}`, "content-type": "application/json" },
+      body: JSON.stringify({ instance: INSTANCE }),
       signal: AbortSignal.timeout(10_000),
     });
-    log("GET /handoff", { status: res.status });
+    log("POST /handoff/pull", { status: res.status });
     if (!res.ok) return null;
-    const row = (await res.json()) as { secret?: string; inferenceKey?: string; conciergeBearer?: string };
+    const row = (await res.json()) as { secret?: string; inferenceKey?: string };
     if (typeof row.secret !== "string" || !row.secret) return null;
-    return { secret: row.secret, inferenceKey: row.inferenceKey, conciergeBearer: row.conciergeBearer };
+    return { secret: row.secret, inferenceKey: row.inferenceKey };
   } catch (e) {
-    log("GET /handoff failed", { err: String(e) });
+    log("POST /handoff/pull failed", { err: String(e) });
     return null;
   }
 }

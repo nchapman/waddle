@@ -28,6 +28,7 @@ import cors from "@fastify/cors";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { timingSafeEqual } from "node:crypto";
 import { createTable } from "./table.js";
 import { createHandoffStore } from "./handoff.js";
 import { createPool, envInt, standbyNameRe, type Pool } from "./pool.js";
@@ -68,11 +69,6 @@ const STANDBY_SECRETS = (process.env.STANDBY_SECRETS ?? "CONCIERGE_SHARED_SECRET
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
-/** Standby idle gate: longer than the pool TTL so the POOL owns unclaimed
- *  standbys (TTL reap), not the machine's own locked-boot backstop — a
- *  10.5-min self-destruct would churn every slot ~6x the budget. Once
- *  claimed + unlocked, activity renews past it like any machine. */
-const STANDBY_IDLE_MS = envInt("STANDBY_IDLE_MS", STANDBY_TTL_MS + 15 * 60_000, 60_000);
 /** https://<instance>.<INSTANCE_DOMAIN_BASE> — URLs + health probes. */
 const DOMAIN_BASE = process.env.INSTANCE_DOMAIN_BASE ?? "";
 const POOL_CAPABLE = BACKEND === "tinfoil" && !!STANDBY_CONFIG_REPO && !!STANDBY_CONFIG_TAG && !!DOMAIN_BASE;
@@ -201,20 +197,38 @@ const table = createTable(
       .catch((e) => app.log.warn({ instance, err: String(e) }, "stop row fired but failed"));
   },
   (instance, jobId) => {
-    // A schedule-boot is the ONLY thing that may release a wake handoff
-    // (memory-only escrow — see handoff.ts). Record the fire first: the
-    // booted machine pulls the credential seconds after it comes up.
-    handoff.markWakeFired(instance);
+    // A schedule-boot deploys, and ONLY a deploy that SUCCEEDS may open a
+    // handoff release window — opening it on the timer alone lets any
+    // in-flight boot (a pool standby) steal the one-shot pull (SME
+    // review). A failed deploy re-arms the row: the timer table spent it,
+    // and nobody else will (the agent is asleep) — retry a few times,
+    // then give up loudly rather than loop forever on a broken deploy.
     void ensureInstance(instance)
-      .then((detail) => app.log.info({ instance, jobId, detail }, "wake row fired"))
-      .catch((e) => app.log.warn({ instance, jobId, err: String(e) }, "wake row fired but failed"));
+      .then((detail) => {
+        handoff.markWakeFired(instance);
+        app.log.info({ instance, jobId, detail }, "wake row fired — deploy ok, release window open");
+      })
+      .catch((e) => {
+        const key = `${instance}:${jobId}`;
+        const n = (wakeRetries.get(key) ?? 0) + 1;
+        wakeRetries.set(key, n);
+        if (n <= 3) {
+          table.setWake(instance, jobId, 2 * 60_000);
+          app.log.warn({ instance, jobId, attempt: n, err: String(e) }, "wake deploy failed — row re-armed (+2min)");
+        } else {
+          app.log.error({ instance, jobId, err: String(e) }, "wake deploy failed 3x — job abandoned");
+        }
+      });
   },
-);
+);;
 
 /** Wake-autonomy escrow: the user's boot credential in memory between
  * sessions. Released only to machines this concierge booted for a fired
  * wake row — standbys and user-wakes boot locked, by design. */
 const handoff = createHandoffStore({ ttlMs: envInt("WAKE_HANDOFF_TTL_MS", 7 * 24 * 3600_000, 60_000) });
+
+/** Bounded retry bookkeeping for failed schedule deploys (memory-only). */
+const wakeRetries = new Map<string, number>();
 
 // ── Auth ─────────────────────────────────────────────────────────────────
 
@@ -229,7 +243,12 @@ async function verifyExternal(token: string | undefined): Promise<boolean> {
       return false;
     }
   }
-  return SHARED_SECRET ? token === SHARED_SECRET : false;
+  // Constant-time: a straight === leaks length/prefix timing on the
+  // shared secret (SME review).
+  if (!SHARED_SECRET) return false;
+  const a = Buffer.from(token);
+  const b = Buffer.from(SHARED_SECRET);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 function allowedInstance(instance: string | undefined): instance is string {
@@ -251,9 +270,12 @@ async function authorize(req: { headers: { authorization?: string }; body?: { in
     e.lastContact = Date.now();
     return instance;
   }
-  // Fall through to external auth (client JWT / dev secret) — then bind to
-  // the instance's entry so both callers share one table.
-  if (await verifyExternal(token)) return instance;
+  // SESSION-TIER ONLY (SME review): the external tier (shared secret /
+  // any bb JWT) must never write table rows. A wake row written with the
+  // shared secret mints a handoff release window on demand — the
+  // fire-gate would be decorative. Machines always handshake before
+  // writing rows (the sleep gate refuses to die without a session), so
+  // nothing legitimate is lost.
   return null;
 }
 
@@ -297,7 +319,8 @@ app.get("/assign", async (req, reply) => {
 });
 
 /** Handshake: betterbase JWT (or dev secret) → session token. Once per
- *  agent boot; re-running replaces the token (idempotent). */
+ *  agent boot; re-running returns the SAME token (shared identity —
+ *  the machine cannot tell a reboot from a re-handshake). */
 app.post<{ Body: { instance?: string } }>("/handshake", async (req, reply) => {
   const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
   const { instance } = req.body ?? {};
@@ -342,46 +365,62 @@ app.post<{ Body: { instance?: string } }>("/wake", async (req, reply) => {
   }
 });
 
-/** Operator/debug: the table, no secrets. Handoff presence (never the
- * credential) rides along so autonomy state is observable. */
-app.get("/status", async () => ({
-  now: Date.now(),
-  instances: table.snapshot().map((e) => ({ ...e, wake_handoff: handoff.status(e.instance) })),
-}));
+/** Operator/debug: the table, no secrets — but AUTHENTICATED (SME
+ * review): the snapshot names standby machines (names authorize the
+ * standby namespace), exposes schedule timing, and reveals when the
+ * escrow is armed. /health stays open with counts only. */
+app.get("/status", async (req, reply) => {
+  const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+  if (!(await verifyExternal(token))) return reply.code(401).send({ error: "unauthorized" });
+  return {
+    now: Date.now(),
+    instances: table.snapshot().map((e) => ({ ...e, wake_handoff: handoff.status(e.instance) })),
+  };
+});
 
 /** Arm the wake handoff: the unlocking machine parks its boot credential
  * here (memory-only) so a later schedule-boot can run unattended. Auth is
  * the same external tier as /handshake — the fresh bb JWT or the shared
- * secret — because this fires seconds after a successful unlock. */
+ * secret — because this fires seconds after a successful unlock.
+ * `clear: true` is the disarm verb (user rotation / "stop while I'm
+ * away"): wipes the row and any open release window. */
 app.post<{
-  Body: { instance?: string; secret?: string; inferenceKey?: string; conciergeBearer?: string; ttl_ms?: number };
+  Body: { instance?: string; secret?: string; inferenceKey?: string; ttl_ms?: number; clear?: boolean };
 }>("/handoff", async (req, reply) => {
   const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
-  const { instance, secret, inferenceKey, conciergeBearer, ttl_ms } = req.body ?? {};
+  const { instance, secret, inferenceKey, ttl_ms, clear } = req.body ?? {};
   if (!allowedInstance(instance)) return reply.code(403).send({ error: "instance not allowed" });
   if (!(await verifyExternal(token))) return reply.code(401).send({ error: "unauthorized" });
+  reply.header("cache-control", "no-store");
+  if (clear) {
+    handoff.clear(instance);
+    app.log.info({ instance }, "wake handoff disarmed");
+    return { ok: true, cleared: true };
+  }
   if (typeof secret !== "string" || !secret) return reply.code(400).send({ error: "secret required" });
-  const res = handoff.arm(instance, { secret, inferenceKey, conciergeBearer }, ttl_ms);
+  const res = handoff.arm(instance, { secret, inferenceKey }, ttl_ms);
   app.log.info({ instance, expires_in_ms: res.expires_in_ms }, "wake handoff armed (memory-only)");
   return { ok: true, ...res };
 });
 
 /** Pull the wake handoff: a just-booted locked machine asks for its
- * credential. The fire-gate is the whole security story — a boot that the
- * concierge did not wake for a schedule gets 404 and stays a normal
- * locked ceremony. */
-app.get<{ Querystring: { instance?: string } }>("/handoff", async (req, reply) => {
+ * credential. POST (never GET — no caching, no URL-borne secrets) and
+ * the fire-gate is the whole security story: a boot that the concierge
+ * did not successfully deploy for a schedule gets 404 and stays a
+ * normal locked ceremony. */
+app.post<{ Body: { instance?: string } }>("/handoff/pull", async (req, reply) => {
   const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
-  const instance = req.query?.instance;
+  const instance = req.body?.instance;
   if (!allowedInstance(instance)) return reply.code(403).send({ error: "instance not allowed" });
   if (!(await verifyExternal(token))) return reply.code(401).send({ error: "unauthorized" });
+  reply.header("cache-control", "no-store");
   const res = handoff.release(instance);
   if ("notFound" in res) {
     app.log.info({ instance, reason: res.reason }, "wake handoff pull denied");
     return reply.code(404).send({ error: `no handoff (${res.reason})` });
   }
   app.log.info({ instance, armed_ms_ago: res.armed_ms_ago }, "wake handoff released to schedule-boot");
-  return { secret: res.secret, inferenceKey: res.inferenceKey, conciergeBearer: res.conciergeBearer };
+  return { secret: res.secret, inferenceKey: res.inferenceKey };
 });
 
 // ── The pool (module semantics in pool.ts; platform verbs here) ───────
@@ -430,6 +469,9 @@ const pool: Pool | null = POOL_CAPABLE
         },
         now: () => Date.now(),
         log: (msg, fields) => app.log.info(fields ?? {}, msg),
+        // Never boot a replacement while a handoff release window is open:
+        // the racing standby can steal the one-shot pull (SME review).
+        canFill: () => !handoff.windowOpen("waddle"),
       },
     )
   : null;
@@ -449,8 +491,16 @@ if (pool) {
         for (const [n, st] of statuses) {
           if (!STANDBY_NAME_RE.test(n) || poolNames.has(n)) continue;
           poolNames.add(n);
-          if (st === "Stopped") leftovers.push(n);
-          else app.log.info({ name: n, status: st }, "pool: leftover is live — left alone");
+          // Adopt stopped AND running leftovers. Running-only was the
+          // original rule (unknown claim status), but a concierge restart
+          // orphans its own in-flight boots as untracked burn with no
+          // reaper at all — live-observed twice (evidence file). Adopting
+          // running ones as booting re-attaches the TTL/health reapers;
+          // the worst case (it was a claimed machine) equals the claim
+          // bound anyway, since claims and rows are memory-only and died
+          // with the same restart.
+          if (st === "Stopped" || st === "Running") leftovers.push(n);
+          else app.log.info({ name: n, status: st }, "pool: leftover not adoptable yet");
         }
         if (leftovers.length > 0) pool.adopt(leftovers);
         app.log.info({ adopted: leftovers.length }, "pool: platform standby scan");

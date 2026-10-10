@@ -177,6 +177,12 @@ app.post("/unlock", async (request, reply) => {
   if (!secret || !nonce) return reply.code(400).send({ error: "secret and nonce required" });
   try {
     const { token, enrolled } = lock.unlock(secret, nonce);
+    // A user unlocking is a takeover: whatever restricted autonomous state
+    // this machine booted into, a live user session outranks it.
+    if (autonomous) {
+      autonomous = false;
+      log?.append({ type: "message", role: "user", text: "[system] user unlock — autonomous session taken over", at: new Date().toISOString() });
+    }
     if (!log) log = new EventLog(lock.logKey, lock.storage);
     // The clock starts the moment the machine wakes to a client — never
     // sooner (boot), never mid-restore (restoring guard below).
@@ -248,7 +254,12 @@ app.post("/unlock", async (request, reply) => {
     // wake-timers find a machine that can actually run its schedule.
     // The file arm covers dev (mounted DATA_DIR); the concierge handoff
     // is the real one — memory-only escrow, nothing at rest anywhere.
+    // TTL is next-due + margin, and we skip arming entirely when no
+    // schedule is pending (SME review: the escrow serves schedules, it
+    // has no other reason to stand).
     if (autonomyEnabled()) {
+      armSecret = secret;
+      armInferenceKey = inferenceKey;
       // Best-effort: a failed arm (read-only storage, full disk) must never
       // fail an unlock that already succeeded.
       try {
@@ -256,12 +267,18 @@ app.post("/unlock", async (request, reply) => {
       } catch (e) {
         app.log.warn({ err: String(e) }, "wake credential arm failed — autonomy off this session");
       }
+      const horizon = activeSchedules().reduce<number | null>((acc, s) => {
+        const d = nextDueMs(s);
+        return d === null ? acc : acc === null ? d : Math.min(acc, d);
+      }, null);
+      const ttl = horizon === null ? undefined : horizon - Date.now() + 15 * 60_000;
       const escrowBearer = bearer ?? process.env.CONCIERGE_SHARED_SECRET;
-      if (escrowBearer) {
-        void armHandoff({ secret, inferenceKey, conciergeBearer: bearer }, escrowBearer).then((ok) => {
+      if (escrowBearer && ttl !== undefined) {
+        void armHandoff({ secret, inferenceKey }, escrowBearer, ttl).then((ok) => {
           if (!ok) app.log.warn("wake handoff arm failed — unattended runs degrade until next unlock");
         });
       }
+      if (horizon === null) app.log.info("wake autonomy: no pending schedule — escrow not armed");
     }
     // The inference key rides the same attested, EHBP-encrypted unlock —
     // memory-only, never on disk, never in config. The agent boots lazily
@@ -433,6 +450,19 @@ async function sleep(reason: string): Promise<never> {
       // overdue row must fire immediately, not vanish.
       if (d !== null) await writeTimer({ action: "wake", dueMs: Math.max(1_000, d - Date.now()), jobId: s.id });
     }
+    // Re-arm the escrow for the NEXT due (SME review: TTL is next-due +
+    // margin, so recurring schedules need a fresh arm per cycle — the
+    // machine writes it right here, next to the wake rows that depend
+    // on it. No schedule left → the escrow simply lapses.
+    if (armSecret) {
+      const horizon = activeSchedules().reduce<number | null>((acc, s) => {
+        const d = nextDueMs(s);
+        return d === null ? acc : acc === null ? d : Math.min(acc, d);
+      }, null);
+      if (horizon !== null) {
+        await armHandoff({ secret: armSecret, inferenceKey: armInferenceKey }, process.env.CONCIERGE_SHARED_SECRET ?? "", horizon - Date.now() + 15 * 60_000);
+      }
+    }
   }
   setTimeout(() => process.exit(0), 500).unref();
   await app.close().catch(() => process.exit(0));
@@ -543,6 +573,13 @@ app.get("/ws", { websocket: true }, (socket, request) => {
     touch();
     if (conciergeActive()) renewIdleStop(); // activity = debounce the stop row
     const intent = JSON.parse(String(raw)) as { type?: string; text?: string };
+    // Restricted mode (SME review): a credential-unlocked machine serves
+    // its schedules and streams state — interactive verbs refuse. The
+    // user's unlock flips `autonomous` off and full mode returns.
+    if (autonomous && (intent.type === "user_message" || intent.type === "browser_input" || intent.type === "browser_release")) {
+      send({ type: "error", message: "machine is in autonomous mode (scheduled work only) — unlock to take over" });
+      return;
+    }
     if (intent.type === "sleep_now") {
       send({ type: "sleep_proposed", reason: "user requested" });
       void sleep("user requested");
@@ -621,11 +658,24 @@ app.get("/ws", { websocket: true }, (socket, request) => {
   });
 });
 
+// The enrolled secret, kept in memory while unlocked — the sleep gate
+// re-arms the escrow with it (next-due TTL). Same lifetime as the lock's
+// derived keys: memory-only, gone at sleep.
+let armSecret: string | null = null;
+let armInferenceKey: string | undefined;
+
 // Wake autonomy: a boot triggered by a concierge wake-timer finds the
 // machine locked with no keys — the due work couldn't run. The credential
-// comes from the concierge's memory escrow (released only to a
-// schedule-boot); the file arm is the dev path. A rejected or absent
+// comes from the concierge's memory escrow (released only to a successful
+// schedule-deploy); the file arm is the dev path. A rejected or absent
 // credential just leaves a normal locked boot.
+//
+// RESTRICTED MODE (SME review): a credential-unlock is *not* a user
+// session. While autonomous, interactive verbs (chat turns, browser
+// control) refuse — the machine runs due schedules, streams state, and
+// re-sleeps; it is not an open agent behind the user's back. The user
+// takes over by unlocking with their secret (matches → full mode).
+let autonomous = false;
 if (autonomyEnabled() && !lock.unlocked) {
   const cred = readWakeCredential() ?? (await pullHandoff());
   if (cred) {
@@ -633,20 +683,19 @@ if (autonomyEnabled() && !lock.unlocked) {
       lock.unlock(cred.secret, randomUUID());
       if (!log) log = new EventLog(lock.logKey, lock.storage);
       if (cred.inferenceKey) initAgent(cred.inferenceKey);
-      log.append({ type: "message", role: "user", text: "[system] autonomous boot — unlocked from wake credential", at: new Date().toISOString() });
-      app.log.info("autonomous boot: unlocked from wake credential");
-      // The armed bearer may be a stale bb JWT by now — fall back to the
-      // env shared secret so the machine can still idle-stop (a machine
-      // that can't handshake can't die, and burns forever).
-      const bootBearer = cred.conciergeBearer ?? process.env.CONCIERGE_SHARED_SECRET;
-      const via = bootBearer === cred.conciergeBearer ? "armed" : "shared-secret";
-      const ok = bootBearer ? await handshakeConcierge(bootBearer).then((r) => r).catch(() => false) : false;
-      if (!ok && process.env.CONCIERGE_SHARED_SECRET) {
+      autonomous = true;
+      armSecret = cred.secret;
+      armInferenceKey = cred.inferenceKey;
+      log.append({ type: "message", role: "user", text: "[system] autonomous boot — unlocked from wake credential (restricted mode)", at: new Date().toISOString() });
+      app.log.info("autonomous boot: unlocked from wake credential (restricted mode)");
+      // Shared-secret handshake (the escrow no longer carries a bearer):
+      // without a session the machine cannot idle-stop, and burns forever.
+      if (process.env.CONCIERGE_SHARED_SECRET) {
         await handshakeConcierge(process.env.CONCIERGE_SHARED_SECRET).catch(() => undefined);
       }
       if (conciergeActive()) {
         renewIdleStop();
-        app.log.info({ via }, "autonomous concierge handshake");
+        app.log.info({ via: "shared-secret" }, "autonomous concierge handshake");
       }
     } catch (e) {
       clearWakeCredential();

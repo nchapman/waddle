@@ -20,9 +20,6 @@
 export interface HandoffCredential {
   secret: string;
   inferenceKey?: string;
-  /** Best bearer at arm time (bb JWT or shared secret) — best-effort for
-   * the wake-boot's handshake; stale tokens just fall back. */
-  conciergeBearer?: string;
 }
 
 interface HandoffRow extends HandoffCredential {
@@ -31,10 +28,12 @@ interface HandoffRow extends HandoffCredential {
 }
 
 export interface HandoffOptions {
-  /** Max wall-clock a credential may stay armed. Default 7 days. */
+  /** Max wall-clock a credential may stay armed. Default 7 days (the
+   * server arms with ttl_ms = next due + margin, so this is the cap). */
   ttlMs?: number;
-  /** How long after a wake fire a pull may release. Default 15 min —
-   * the boot takes ~90s, the due work minutes; the pull is seconds in. */
+  /** How long after a successful schedule-boot deploy a pull may release.
+   * Default 3 min — the boot exists and its pull fires within seconds of
+   * the app starting; a long window only invites races (SME review). */
   releaseWindowMs?: number;
   now?: () => number;
 }
@@ -46,7 +45,7 @@ export interface HandoffStatus {
 
 export function createHandoffStore(opts: HandoffOptions = {}) {
   const ttlMs = opts.ttlMs ?? 7 * 24 * 3600_000;
-  const releaseWindowMs = opts.releaseWindowMs ?? 15 * 60_000;
+  const releaseWindowMs = opts.releaseWindowMs ?? 3 * 60_000;
   const now = opts.now ?? Date.now;
   const rows = new Map<string, HandoffRow>();
   const firedAt = new Map<string, number>();
@@ -57,10 +56,21 @@ export function createHandoffStore(opts: HandoffOptions = {}) {
     return { expires_in_ms: ttl };
   }
 
-  /** The wake-table fire hook: records that a schedule-boot is why the
-   * next machine exists. Idempotent within a fire; cleared on release. */
+  /** The wake-table fire hook: a schedule-deploy SUCCEEDED, so the next
+   * machine to boot is the one this fire was for. Idempotent within a
+   * fire; cleared on release. Callers must only invoke this after the
+   * deploy resolves — opening the window on the timer alone would let any
+   * boot in flight steal the one-shot (SME review). */
   function markWakeFired(instance: string): void {
     firedAt.set(instance, now());
+  }
+
+  /** Is a release window currently open? The pool defers standby fills
+   * while one is — a replacement boot racing the intended pull is the
+   * standby-steal path (SME review). */
+  function windowOpen(instance: string): boolean {
+    const fired = firedAt.get(instance);
+    return fired !== undefined && now() - fired <= releaseWindowMs;
   }
 
   /** One-shot release: gated on a recent fire and a live row. */
@@ -78,7 +88,14 @@ export function createHandoffStore(opts: HandoffOptions = {}) {
       return { notFound: true, reason: "expired" };
     }
     firedAt.delete(instance); // one-shot per fire: first pull wins
-    return { secret: row.secret, inferenceKey: row.inferenceKey, conciergeBearer: row.conciergeBearer, armed_ms_ago: now() - row.armedAt };
+    return { secret: row.secret, inferenceKey: row.inferenceKey, armed_ms_ago: now() - row.armedAt };
+  }
+
+  /** User-side revocation: wipe the row (secret rotation, "stop doing
+   * things while I'm away"). Memory-only, immediate. */
+  function clear(instance: string): void {
+    rows.delete(instance);
+    firedAt.delete(instance);
   }
 
   /** For /status: presence only — never key material. */
@@ -87,7 +104,7 @@ export function createHandoffStore(opts: HandoffOptions = {}) {
     return { armed: !!row && row.expiresAt > now(), armed_ms_ago: row ? now() - row.armedAt : null };
   }
 
-  return { arm, markWakeFired, release, status };
+  return { arm, markWakeFired, windowOpen, release, clear, status };
 }
 
 export type HandoffStore = ReturnType<typeof createHandoffStore>;

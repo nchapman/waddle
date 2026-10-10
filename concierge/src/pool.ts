@@ -16,7 +16,7 @@
  */
 export interface PoolMachine {
   name: string;
-  state: "booting" | "warm";
+  state: "booting" | "warm" | "destroying";
   createdAt: number;
 }
 
@@ -31,6 +31,9 @@ export interface PoolDeps {
   urlFor(name: string): string;
   /** Next standby name that doesn't collide with tracked machines. */
   nextName(): string;
+  /** May the pool boot a new standby right now? (Release-window
+   * deferral — see index.ts. Absent = always may.) */
+  canFill?(): boolean;
   now(): number;
   log(msg: string, fields?: Record<string, unknown>): void;
 }
@@ -89,11 +92,21 @@ export function createPool(cfg: PoolConfig, deps: PoolDeps): Pool {
       const dead = m.state === "warm" && !(await deps.health(m.name).catch(() => false));
       if (expired || dead) {
         deps.log(expired ? "standby ttl expired — destroying" : "warm standby unhealthy — destroying", { name: m.name, age_ms: deps.now() - m.createdAt });
+        m.state = "destroying"; // synchronous: assign() must never hand out a machine mid-destroy
         try {
           await deps.destroy(m.name);
           machines.delete(m.name);
         } catch (e) {
-          deps.log("destroy failed — retrying next tick", { name: m.name, err: String(e) });
+          // A not-found destroy is success in every way that matters
+          // (the machine is gone) — frees the slot. Anything else keeps
+          // the machine tracked so the next tick retries instead of
+          // orphaning a billing machine nobody remembers.
+          if (/not found|no such|already (been )?deleted/i.test(String(e))) {
+            machines.delete(m.name);
+            deps.log("destroy: machine already gone — slot freed", { name: m.name });
+          } else {
+            deps.log("destroy failed — retrying next tick", { name: m.name, err: String(e) });
+          }
         }
         continue;
       }
@@ -107,7 +120,10 @@ export function createPool(cfg: PoolConfig, deps: PoolDeps): Pool {
       }
     }
     // 3. Fill: one boot per tick — size>1 warms gradually, never bursts.
-    if (cfg.size > 0 && live().length < cfg.size) {
+    //    Deferred while a handoff release window is open: a replacement
+    //    boot racing the intended schedule-boot's one-shot pull is the
+    //    standby-steal path (SME review) — warm one tick later instead.
+    if (cfg.size > 0 && live().length < cfg.size && !(deps.canFill && !deps.canFill())) {
       const name = deps.nextName();
       machines.set(name, { name, state: "booting", createdAt: deps.now() });
       try {
