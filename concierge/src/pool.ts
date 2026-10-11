@@ -61,6 +61,13 @@ export interface PoolConfig {
 }
 
 export interface Pool {
+  /** A user just used the service (/boot, /wake) — (re)arm warmth for
+   *  the next TTL window. With no demand inside a TTL, the pool stays
+   *  EMPTY (scale-to-0): idle time burns nothing but the concierge. */
+  markDemand(): void;
+  /** Milliseconds since the last service use (Infinity when never) —
+   *  the /health signal for why the pool is empty (scale-to-0). */
+  demandMsAgo(): number;
   /** Claim a warm standby for a user. Null when none is warm yet. */
   assign(): { name: string; url: string } | null;
   /** Maintenance pass — call on an interval. */
@@ -100,6 +107,9 @@ export function standbyNameRe(prefix: string): RegExp {
 export function createPool(cfg: PoolConfig, deps: PoolDeps): Pool {
   const machines = new Map<string, PoolMachine>();
   const live = (): PoolMachine[] => [...machines.values()];
+  // null = "never used since boot": a cold-started concierge fills
+  // NOTHING until the first real /boot — scale-to-0 from first breath.
+  let lastDemandAt: number | null = null;
 
   /** Condemn + destroy, retried by later ticks while it doesn't land.
    *  The entry is removed ONLY on a successful (or already-gone)
@@ -163,14 +173,19 @@ export function createPool(cfg: PoolConfig, deps: PoolDeps): Pool {
       }
     }
     // 3. Fill: one boot per tick — size>1 warms gradually, never bursts.
-    //    Deferred while a handoff release window is open: a replacement
-    //    boot racing the intended schedule-boot's one-shot pull is the
-    //    standby-steal path (SME review) — warm one tick later instead.
+    //    DEMAND-GATED (scale-to-0): warmth exists only for users who
+    //    might arrive — the TTL window after the last real use. Past
+    //    that, the pool stays empty until the next /boot pays the cold
+    //    mint and re-arms it. Deferred while a handoff release window
+    //    is open: a replacement boot racing the intended schedule-boot's
+    //    one-shot pull is the standby-steal path (SME review) — warm one
+    //    tick later instead.
     // Foreign machines don't count toward the fill budget: they're
     // adopted burn on the claim-grace clock, not warmth — users still
     // get their standby (temporary over-burn, bounded by the grace).
+    const warmthArmed = lastDemandAt !== null && deps.now() - lastDemandAt <= cfg.ttlMs;
     const warmable = live().filter((m) => m.state !== "foreign").length;
-    if (cfg.size > 0 && warmable < cfg.size && (deps.canFill?.() ?? true)) {
+    if (cfg.size > 0 && warmthArmed && warmable < cfg.size && (deps.canFill?.() ?? true)) {
       const name = deps.nextName();
       machines.set(name, { name, state: "booting", createdAt: deps.now() });
       try {
@@ -218,6 +233,10 @@ export function createPool(cfg: PoolConfig, deps: PoolDeps): Pool {
   }
 
   return {
+    markDemand: () => {
+      lastDemandAt = deps.now();
+    },
+    demandMsAgo: () => (lastDemandAt === null ? Infinity : deps.now() - lastDemandAt),
     assign,
     tick,
     adopt,

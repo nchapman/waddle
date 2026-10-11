@@ -48,6 +48,7 @@ describe("warm-standby pool", () => {
   it("boots one per tick, promotes on health, assigns warm only", async () => {
     const h = harness(["s1", "s2"]);
     const pool = createPool({ size: 1, ttlMs: 60_000 }, h.deps);
+    pool.markDemand();
     await pool.tick();
     assert.deepEqual(h.booted, ["s1"]);
     assert.equal(pool.assign(), null, "booting ≠ warm");
@@ -64,22 +65,57 @@ describe("warm-standby pool", () => {
     assert.deepEqual(h.booted, ["s1", "s2"]);
   });
 
-  it("destroys TTL-expired standbys and replaces them", async () => {
+  it("destroys TTL-expired standbys — with no further use the pool scales to 0", async () => {
     const h = harness(["s1", "s2"]);
     const pool = createPool({ size: 1, ttlMs: 60_000 }, h.deps);
+    pool.markDemand();
+    await pool.tick();
+    h.healthy.add("s1");
+    await pool.tick();
+
+    h.clock.t += 61_000; // expire — and nobody has used the service since
+    await pool.tick();
+    assert.deepEqual(h.destroyed, ["s1"]);
+    assert.deepEqual(h.booted, ["s1"], "no replacement: idle past the TTL = scale-to-0");
+    assert.equal(pool.tracked().length, 0);
+    assert.equal(pool.demandMsAgo(), 61_000);
+
+    await pool.tick(); // and it STAYS empty
+    assert.deepEqual(h.booted, ["s1"]);
+  });
+
+  it("replaces TTL-expired standbys while the service is in use", async () => {
+    const h = harness(["s1", "s2"]);
+    const pool = createPool({ size: 1, ttlMs: 60_000 }, h.deps);
+    pool.markDemand();
     await pool.tick();
     h.healthy.add("s1");
     await pool.tick();
 
     h.clock.t += 61_000; // expire
+    pool.markDemand(); // …but a /boot just happened — warmth is armed
     await pool.tick();
     assert.deepEqual(h.destroyed, ["s1"]);
-    assert.deepEqual(h.booted, ["s1", "s2"]);
+    assert.deepEqual(h.booted, ["s1", "s2"], "in-use service keeps a warm standby");
+  });
+
+  it("a cold-started pool fills nothing until first use (scale-to-0 from boot)", async () => {
+    const h = harness(["s1"]);
+    const pool = createPool({ size: 1, ttlMs: 60_000 }, h.deps);
+    await pool.tick();
+    await pool.tick();
+    assert.deepEqual(h.booted, [], "never used → never warm");
+    assert.equal(pool.demandMsAgo(), Infinity);
+
+    pool.markDemand();
+    await pool.tick();
+    assert.deepEqual(h.booted, ["s1"], "first /boot arms warmth for the next arrival");
   });
 
   it("destroys warm standbys that stop answering health", async () => {
     const h = harness(["s1", "s2"]);
     const pool = createPool({ size: 1, ttlMs: 60_000 }, h.deps);
+    pool.markDemand();
     await pool.tick();
     h.healthy.add("s1");
     await pool.tick();
@@ -93,6 +129,7 @@ describe("warm-standby pool", () => {
   it("an assigned machine is never re-assigned or reaped — it left the pool", async () => {
     const h = harness(["s1", "s2"]);
     const pool = createPool({ size: 1, ttlMs: 60_000 }, h.deps);
+    pool.markDemand();
     await pool.tick();
     h.healthy.add("s1");
     await pool.tick();
@@ -112,11 +149,13 @@ describe("warm-standby pool", () => {
       h.destroyed.push(n);
     };
     const pool = createPool({ size: 1, ttlMs: 60_000 }, h.deps);
+    pool.markDemand();
     await pool.tick();
     h.healthy.add("s1");
     await pool.tick();
 
     h.clock.t += 61_000; // expire — destroy fails
+    pool.markDemand(); // service in use throughout
     await pool.tick();
     assert.deepEqual(h.destroyed, []);
     assert.equal(pool.tracked().length, 1, "still tracked: the retry owns it");
@@ -137,6 +176,7 @@ describe("warm-standby pool", () => {
       h.destroyed.push(n);
     };
     const pool = createPool({ size: 1, ttlMs: 60_000 }, h.deps);
+    pool.markDemand();
     await pool.tick();
     h.healthy.add("s1");
     await pool.tick(); // warm
@@ -163,10 +203,12 @@ describe("warm-standby pool", () => {
       h.destroyed.push(n);
     };
     const pool = createPool({ size: 1, ttlMs: 60_000, claimGraceMs: 600_000 }, h.deps);
+    pool.markDemand();
     pool.adoptForeign(["standby-9"]);
     assert.equal(pool.assign(), null, "foreign is never warm → never assignable");
 
     h.clock.t += 61_000; // past the pool TTL — the claim grace still holds
+    pool.markDemand(); // service in use — warmth stays armed
     await pool.tick();
     assert.deepEqual(h.destroyed, [], "NOT TTL-reaped: a user may be mid-session");
     assert.deepEqual(h.booted, ["s1"], "foreign does not consume the fill budget");
@@ -186,6 +228,7 @@ describe("warm-standby pool", () => {
     let mayFill = false;
     h.deps.canFill = () => mayFill;
     const pool = createPool({ size: 1, ttlMs: 60_000 }, h.deps);
+    pool.markDemand();
     await pool.tick();
     assert.deepEqual(h.booted, [], "no boot while the release window is open");
 
@@ -220,6 +263,7 @@ describe("warm-standby pool", () => {
       throw new Error("platform refused");
     };
     const pool = createPool({ size: 1, ttlMs: 60_000 }, h.deps);
+    pool.markDemand(); // arm warmth so the boot is actually attempted
     await pool.tick();
     assert.equal(pool.tracked().length, 0);
   });
@@ -262,6 +306,7 @@ it("tick destroys warm stock on a stale tag — the client's measurement pin wou
     now: () => Date.now(),
     log: () => undefined,
   });
+  pool.markDemand();
   await pool.tick(); // booting
   await pool.tick(); // warm (health true)
   await pool.tick(); // stale-tag reap (+ refill boot)
@@ -281,6 +326,8 @@ it("tick keeps warm stock whose tag matches expectedTag", async () => {
     now: () => Date.now(),
     log: () => undefined,
   });
+  pool.markDemand(); // arm warmth so stock actually exists to keep
   await pool.tick(); await pool.tick(); await pool.tick();
   assert.equal(destroyed.length, 0);
+  assert.equal(pool.tracked().length, 1, "warm stock alive, not vacuously empty");
 });

@@ -300,7 +300,7 @@ app.get("/health", async () => ({
   rows: table.countRows(),
   // Counts only — standby NAMES authorize the standby namespace in
   // allowedInstance, so they are not published unauthenticated.
-  pool: pool ? { size: POOL_SIZE, ttl_ms: STANDBY_TTL_MS, tracked: pool.tracked().length } : { size: 0 },
+  pool: pool ? { size: POOL_SIZE, ttl_ms: STANDBY_TTL_MS, tracked: pool.tracked().length, demand_ms_ago: pool.demandMsAgo() } : { size: 0 },
 }));
 
 /** Assign a warm standby: URL handout, nothing more — the user's secret
@@ -309,6 +309,7 @@ app.get("/health", async () => ({
 app.get("/assign", async (req, reply) => {
   if (!POOL_ENABLED || !pool) return reply.code(404).send({ error: "pool disabled" });
   if (!(await requireExternal(req, reply))) return reply;
+  pool?.markDemand(); // a claim is service use — arm pool warmth (scale-to-0 gate)
   const got = pool.assign();
   if (!got) return reply.code(404).send({ error: "no warm standby — use /wake" });
   /** A claim is bounded presence, not ownership: REPLACE the machine's
@@ -349,6 +350,7 @@ async function createInstance(name: string): Promise<void> {
 app.post<{ Body: BootRequest }>("/boot", async (req, reply) => {
   const sub = await requireJwtUser(req, reply);
   if (sub === null) return reply;
+  pool?.markDemand(); // any /boot is service use — arm pool warmth (scale-to-0 gate)
   // Observed-death wake: the client watched the old machine stop — its
   // name is dead weight in browser caches for up to the negative TTL;
   // a fresh mint sidesteps the poison entirely (blank machines are
@@ -539,6 +541,7 @@ app.post<{ Body: WakeRequest }>("/wake", async (req, reply) => {
   const { instance } = req.body ?? {};
   if (!allowedInstance(instance)) return reply.code(403).send({ error: "instance not allowed" });
   if (!(await requireExternal(req, reply))) return reply;
+  pool?.markDemand(); // a wake is service use too — arm pool warmth (scale-to-0 gate)
   // A user present means the machine should live: clear any pending stop.
   table.userWake(instance);
   try {
