@@ -9,3 +9,5 @@ data/
 # Evidence + smoke artifacts live local-only (the wake-proofs narrative is the exception)
 .pi/evidence/*
 !.pi/evidence/wake-proofs.md
+.pi/review/
+.pi/review-state.json
