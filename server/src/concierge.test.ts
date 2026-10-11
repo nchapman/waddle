@@ -87,3 +87,69 @@ it("a definitive 409 refusal is final — no retries burn the window", async () 
   assert.equal(n, 1, "one request — refusal is not retried");
 });
 
+
+it("a 401 on a table write drops the session — conciergeActive() must go false (the sleep gate reads it)", async () => {
+  stubFetch((url) =>
+    url.endsWith("/handshake")
+      ? { status: 200, json: { session_token: "t-live", instance: "waddle-uabcdef12-345678" } }
+      : { status: 401 },
+  );
+  assert.ok(await handshakeConcierge("bearer-x"));
+  const { conciergeActive, writeTimer } = await import("./concierge.js");
+  assert.equal(conciergeActive(), true);
+  assert.equal(await writeTimer({ action: "stop", dueMs: 5_000 }), false);
+  assert.equal(conciergeActive(), false, "a dead session must not fake wake cover");
+  // And with no session, writes are refused before any wire call.
+  assert.equal(await writeTimer({ action: "stop", dueMs: 5_000 }), false);
+});
+
+it("escrow verbs ride the given bearer (arm) and the session (postbox) with the right bodies", async () => {
+  const { armHandoff, postPostbox } = await import("./concierge.js");
+  stubFetch(() => ({ status: 200, json: { session_token: "t-live", instance: "waddle-uabcdef12-345678" } }));
+  assert.ok(await handshakeConcierge("bearer-x"));
+  const calls: Array<{ url: string; body: Record<string, unknown>; auth: string }> = [];
+  (globalThis as { fetch: unknown }).fetch = async (url: string, init?: { body?: string; headers?: Record<string, string> }) => {
+    calls.push({ url: String(url), body: JSON.parse(init?.body ?? "{}"), auth: init?.headers?.authorization ?? "" });
+    return { ok: true, status: 200, json: async () => ({ ok: true }) } as unknown as Response;
+  };
+  const cred = { secret: "s", schedules: [] };
+  assert.equal(await armHandoff(cred, "the-bearer", 3600_000), true);
+  assert.equal(await postPostbox("sealed-blob"), true);
+  const arm = calls.find((c) => c.url.endsWith("/handoff"))!;
+  assert.equal(arm.auth, "Bearer the-bearer", "arm rides the CALLER's bearer, not the session");
+  assert.deepEqual(arm.body.credential, cred);
+  assert.equal(arm.body.ttl_ms, 3600_000);
+  const post = calls.find((c) => c.url.endsWith("/handoff/post"))!;
+  assert.equal(post.body.blob, "sealed-blob");
+});
+
+it("postbox pull returns the sealed blob or null (no mail / unreachable — both normal)", async () => {
+  const { pullPostbox } = await import("./concierge.js");
+  stubFetch((url) =>
+    url.endsWith("/handshake")
+      ? { status: 200, json: { session_token: "t-live", instance: "waddle-uabcdef12-345678" } }
+      : { status: 200, json: { blob: "sealed" } },
+  );
+  assert.ok(await handshakeConcierge("bearer-x"), "pull is session-tier — mint first");
+  assert.equal(await pullPostbox(), "sealed");
+  stubFetch(() => ({ status: 404 }));
+  assert.equal(await pullPostbox(), null);
+  stubFetch(() => ({ status: 200, json: { blob: "" } })); // empty-string blob = nothing
+  assert.equal(await pullPostbox(), null);
+});
+
+it("a failed arm reports false — the sleep gate logs the degraded wake", async () => {
+  const { armHandoff } = await import("./concierge.js");
+  stubFetch(() => ({ status: 500 }));
+  assert.equal(await armHandoff({ secret: "s" }, "b", 1000), false);
+});
+
+it("pullHandoff survives refusals and malformed rows — null, never a throw", async () => {
+  const { pullHandoff } = await import("./concierge.js");
+  stubFetch(() => ({ status: 404 }));
+  assert.equal(await pullHandoff(), null);
+  stubFetch(() => ({ status: 200, json: { credential: "not-an-object" } }));
+  assert.equal(await pullHandoff(), null);
+  stubFetch(() => ({ status: 200, json: {} }));
+  assert.equal(await pullHandoff(), null);
+});

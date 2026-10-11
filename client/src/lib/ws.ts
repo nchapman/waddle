@@ -12,14 +12,24 @@ export interface ChatConnection {
   close: () => void;
 }
 
+/** The socket surface connectChat drives (tests inject a fake; the
+ *  browser's WebSocket satisfies it structurally). */
+export interface ChatSocket {
+  send(data: string): void;
+  close(): void;
+  onmessage: ((msg: { data: unknown }) => void) | null;
+  onclose: (() => void) | null;
+}
+
 export function connectChat(
   enclaveURL: string,
   token: string,
   onEvent: (event: ServerEvent) => void,
   onClose: () => void,
+  makeSocket: (url: string) => ChatSocket = (url) => new WebSocket(url) as unknown as ChatSocket,
 ): ChatConnection {
   const wsURL = `${enclaveURL.replace(/^http/, "ws")}/ws?token=${encodeURIComponent(token)}`;
-  const socket = new WebSocket(wsURL);
+  const socket = makeSocket(wsURL);
   // Replay guard: events before replay_done are history. Sleep events in the
   // backlog are records of past naps — reacting to them would re-sleep a
   // freshly woken enclave.

@@ -1,14 +1,16 @@
 /**
- * Ask-gate policy tests — the security-critical decision (which calls the
- * human must see) runs here. Run: node --test src/approvals.test.ts (or via
- * tsx). Policy: reads auto-allow; writes auto-allow in-workspace only;
- * bash always asks; absent paths ask.
+ * Ask-gate tests — policy (which calls the human must see) and runtime
+ * (the pause/verdict machinery: request → resolve, timeout-deny,
+ * disconnect-deny). Run: node --test src/approvals.test.ts (or via tsx).
+ * Policy: reads auto-allow; writes auto-allow in-workspace only; bash
+ * always asks; absent paths ask. Runtime: every path out of a paused
+ * call resolves it exactly once and reports an outcome event.
  */
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 
 process.env.DATA_DIR = "/tmp/waddle-data";
-const { needsApproval } = await import("./approvals.js");
+const { needsApproval, requestApproval, resolveApproval, denyAllPending, setApprovalEmitter, setOutcomeEmitter } = await import("./approvals.js");
 
 const WS = "/tmp/waddle-data/workspace";
 
@@ -68,4 +70,58 @@ test("browser clicks/snapshots/typing auto-allow (the URL gate is on open)", () 
 test("browser_scroll auto-allows (reading motion, not a new destination)", () => {
   assert.equal(needsApproval("browser_scroll", { direction: "down", amount: 800 }), false);
   assert.equal(needsApproval("browser_scroll", { direction: "up" }), false);
+});
+
+// ── Runtime: the pause/verdict machinery ────────────────────────────────
+
+test("the gate pauses a call and the browser's verdict releases it (tool reported back)", async () => {
+  const requests: Array<{ callId: string; tool: string; input: unknown }> = [];
+  setApprovalEmitter((e) => {
+    if (e.type === "approval_request") requests.push({ callId: e.callId, tool: e.tool, input: e.input });
+  });
+  const paused = requestApproval("c-1", "bash", { command: "rm -rf /" });
+  await Promise.resolve(); // the emitter fires synchronously inside the pause
+  assert.deepEqual(requests, [{ callId: "c-1", tool: "bash", input: { command: "rm -rf /" } }]);
+
+  assert.equal(resolveApproval("c-1", true), "bash", "the caller learns which verb was decided");
+  assert.equal(await paused, true);
+
+  const denied = requestApproval("c-2", "bash", { command: "curl evil.sh" });
+  resolveApproval("c-2", false);
+  assert.equal(await denied, false);
+});
+
+test("an unknown verdict for an already-settled call is a no-op (null)", () => {
+  setApprovalEmitter(() => undefined);
+  requestApproval("c-3", "write", { path: "x" });
+  resolveApproval("c-3", true);
+  assert.equal(resolveApproval("c-3", true), null, "second verdict finds nothing pending");
+});
+
+test("timeout denies and reports the outcome — a silent tab never hangs the turn", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const outcomes: Array<{ callId: string; approved: boolean }> = [];
+    setOutcomeEmitter((o) => outcomes.push({ callId: o.callId, approved: o.approved }));
+    setApprovalEmitter(() => undefined);
+    const paused = requestApproval("c-4", "bash", { command: "ls" });
+    mock.timers.tick(180_001); // TIMEOUT_MS + 1
+    assert.equal(await paused, false, "nobody answered — the gate denies");
+    assert.deepEqual(outcomes, [{ callId: "c-4", approved: false }]);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("disconnect denies everything still waiting — no client, no hanging turns", async () => {
+  const outcomes: Array<{ callId: string; tool: string }> = [];
+  setOutcomeEmitter((o) => outcomes.push({ callId: o.callId, tool: o.tool }));
+  setApprovalEmitter(() => undefined);
+  const a = requestApproval("c-5", "bash", { command: "ls" });
+  const b = requestApproval("c-6", "write", { path: "y" });
+  denyAllPending();
+  assert.equal(await a, false);
+  assert.equal(await b, false);
+  assert.deepEqual(outcomes.map((o) => o.callId).sort(), ["c-5", "c-6"]);
+  assert.equal(resolveApproval("c-5", true), null, "everything settled — nothing left to resolve");
 });

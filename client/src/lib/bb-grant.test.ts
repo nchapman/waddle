@@ -43,3 +43,62 @@ test("machineAnchorId matches the anchor actually shelved for the live prod proo
     "1c3bf4d6-3b1a-5ee6-a536-1cb68e5e2316",
   );
 });
+
+// ── resolveSyncEndpoint: discovery, cache, and the retry-on-failure seam ──
+// (localStorage + fetch stubbed; a fresh module import per case so the
+//  in-memory endpointPromise doesn't leak between them.)
+
+test("resolveSyncEndpoint: a failed discovery returns \"\" AND stays retryable", async () => {
+  installLocalStorageStub();
+  const calls: number[] = [];
+  stubFetch(() => {
+    calls.push(1);
+    throw new Error("discovery down");
+  });
+  const m = await import("./bb-grant.js?ep-fail=" + Date.now());
+  assert.equal(await m.resolveSyncEndpoint(), "");
+  // Second call retries the wire (the promise resets on failure) — also "".
+  assert.equal(await m.resolveSyncEndpoint(), "");
+  assert.equal(calls.length, 2);
+});
+
+test("resolveSyncEndpoint: discovery resolves the endpoint and caches it in localStorage", async () => {
+  const store = installLocalStorageStub();
+  stubFetch(() => ({ ok: true, status: 200, json: async () => ({ syncEndpoint: "https://sync.example.com/api/v1" }) }));
+  const m = await import("./bb-grant.js?ep-ok=" + Date.now());
+  assert.equal(await m.resolveSyncEndpoint(), "https://sync.example.com/api/v1");
+  assert.equal(store.get("waddle.bb-sync-endpoint"), "https://sync.example.com/api/v1");
+  // A second resolve reuses the in-flight promise — no new fetch.
+  assert.equal(await m.resolveSyncEndpoint(), "https://sync.example.com/api/v1");
+});
+
+test("resolveSyncEndpoint: a pre-seeded cache answers without any network", async () => {
+  installLocalStorageStub(new Map([["waddle.bb-sync-endpoint", "https://cached.example/api/v1"]]));
+  stubFetch(() => {
+    throw new Error("MUST NOT FETCH when cached");
+  });
+  const m = await import("./bb-grant.js?ep-cache=" + Date.now());
+  assert.equal(await m.resolveSyncEndpoint(), "https://cached.example/api/v1");
+});
+
+test("resolveSyncEndpoint: discovery without an endpoint is an honest failure", async () => {
+  installLocalStorageStub();
+  stubFetch(() => ({ ok: true, status: 200, json: async () => ({}) }));
+  const m = await import("./bb-grant.js?ep-empty=" + Date.now());
+  assert.equal(await m.resolveSyncEndpoint(), "");
+});
+
+/** localStorage stub (node has none). Returns the backing map. */
+function installLocalStorageStub(preseed?: Map<string, string>): Map<string, string> {
+  const store = preseed ?? new Map<string, string>();
+  (globalThis as unknown as { localStorage: unknown }).localStorage = {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => void store.set(k, v),
+    removeItem: (k: string) => void store.delete(k),
+  };
+  return store;
+}
+
+function stubFetch(handler: () => { ok: boolean; status: number; json: () => Promise<unknown> } | never): void {
+  (globalThis as { fetch: unknown }).fetch = async () => handler() as unknown as Response;
+}

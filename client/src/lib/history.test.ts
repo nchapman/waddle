@@ -86,3 +86,25 @@ test("rowsToUIMessages: adjacent calls of the same tool still pair correctly", (
   assert.equal(parts.length, 2);
   assert.equal((parts[1] as { output: unknown }).output, "two");
 });
+
+test("an orphan end row (start absent or consumed) still renders its result", () => {
+  const messages = rowsToUIMessages([toolEndRow("bash", "late result", false)]);
+  const parts = messages[0]!.parts.filter((p) => p.type === "dynamic-tool");
+  assert.equal(parts.length, 1);
+  const part = parts[0] as { state: string; input: unknown; output: unknown };
+  assert.equal(part.state, "output-available");
+  assert.deepEqual(part.input, {});
+  assert.equal(part.output, "late result");
+});
+
+test("parseToolText keeps malformed args/results as raw text — replay never crashes", () => {
+  // Start row whose args are not valid JSON: name survives, args stay raw.
+  assert.deepEqual(parseToolText("⚙️ read {not json}"), { name: "read", args: "{not json}" });
+  // End row whose result excerpt was truncated mid-JSON: keep the text.
+  const t = parseToolText('✔ read → {"path":"/a","con');
+  assert.equal(t!.name, "read");
+  assert.equal(t!.result, '{"path":"/a","con');
+  assert.equal(t!.isError, false);
+  // Plain prose is not a tool row.
+  assert.equal(parseToolText("just talking"), undefined);
+});

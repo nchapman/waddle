@@ -35,14 +35,18 @@ export async function machineAnchorId(spaceId: string): Promise<string> {
 const ENDPOINT_CACHE_KEY = "waddle.bb-sync-endpoint";
 let endpointPromise: Promise<string> | null = null;
 
+// Build-time env, read defensively — plain-node contexts (tests) get {}
+// (same convention as lib/config.ts; an unguarded read crashes there).
+const env = (import.meta as { env?: Record<string, string | undefined> }).env ?? {};
+
 export async function resolveSyncEndpoint(): Promise<string> {
-  const override = import.meta.env.VITE_BETTERBASE_SYNC_URL_ENCLAVE as string | undefined;
+  const override = env.VITE_BETTERBASE_SYNC_URL_ENCLAVE;
   if (override) return override;
   if (!endpointPromise) {
     endpointPromise = (async () => {
       const cached = localStorage.getItem(ENDPOINT_CACHE_KEY);
       if (cached) return cached;
-      const domain = (import.meta.env.VITE_BETTERBASE_DOMAIN as string | undefined) ?? "localhost:5377";
+      const domain = env.VITE_BETTERBASE_DOMAIN ?? "localhost:5377";
       const scheme = domain.endsWith(".localhost") || domain.startsWith("localhost") ? "http" : "https";
       const res = await fetch(`${scheme}://${domain}/.well-known/betterbase`);
       if (!res.ok) throw new Error(`discovery ${res.status}`);
