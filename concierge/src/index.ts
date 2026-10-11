@@ -358,8 +358,8 @@ app.post<{ Body: BootRequest }>("/boot", async (req, reply) => {
     const old = users.rebind(sub);
     if (old) {
       users.retire(old); // tombstoned — the platform scan must not resurrect it
-      void platform.rest(old).catch(() => undefined); // blank machine; nothing to keep
-      app.log.info({ user: hashSub(sub), instance: old }, "boot: fresh requested — old name retired");
+      void platform.destroy(old).catch(() => undefined); // DELETE: the user asked for fresh; the old machine is debris
+      app.log.info({ user: hashSub(sub), instance: old }, "boot: fresh requested — old name retired + destroyed");
     }
   }
   // Warm-first: a pool standby is already booted and measured — claiming
@@ -376,7 +376,7 @@ app.post<{ Body: BootRequest }>("/boot", async (req, reply) => {
       const tag = (await platform.statusRows().catch(() => new Map())).get(got.name)?.tag;
       if (tag && tag !== (STANDBY_CONFIG_TAG || tag)) {
         app.log.warn({ instance: got.name, tag, expected: STANDBY_CONFIG_TAG }, "boot: refusing stale-tag standby — destroying");
-        await platform.rest(got.name).catch(() => undefined);
+        await platform.destroy(got.name).catch(() => undefined);
         users.forget(got.name);
       } else {
         users.claim(sub, got.name);
@@ -685,14 +685,13 @@ const pool: Pool | null = POOL_CAPABLE
           await createInstance(name);
         },
         destroy: async (name) => {
+          // End-of-life is DELETE (a stopped machine is platform debris);
+          // the platform verb owns rest-then-delete. Errors PROPAGATE —
+          // the pool retries a failed destroy with the name still held
+          // (destroyMachine's contract); the name frees on every outcome.
           try {
-            await platform.rest(name);
-            await exec("tinfoil", ["container", "delete", name], { timeout: 60_000 });
+            await platform.destroy(name);
           } finally {
-            // The name frees on EVERY outcome — success or not-found both
-            // mean the machine is gone, and a failed destroy retries with
-            // the name still held; leaving it burned on the throw path
-            // drifted the recycled namespace (review finding).
             poolNames.delete(name);
           }
         },
@@ -770,13 +769,32 @@ if (BACKEND === "tinfoil") {
       .then((statuses) => {
         const adopted = users.adopt([...statuses.keys()]);
         if (adopted > 0) app.log.info({ adopted }, "user machines adopted from platform");
+        // ORPHAN JANITOR — the shared cleanup backstop. Every lifecycle
+        // path funnels destruction through platform.destroy, but any
+        // USER-machine that slips (a failed destroy, a forgot stray)
+        // ends up here: in OUR namespace, owned by no live bookkeeping.
+        // Standby names are EXCLUDED — the pool owns that namespace
+        // end-to-end (scanLeftovers adopts stock → TTL/claim-grace
+        // destroys); racing it here could delete warm stock (review
+        // finding). users.adopt ran above, same synchronous block —
+        // inherited sleepers are in known() before this loop sees them.
+        const spared = new Set([...users.known(), ...ALLOWED]);
+        for (const name of statuses.keys()) {
+          if (USER_NAME_RE.test(name) && !spared.has(name)) {
+            app.log.warn({ instance: name }, "janitor: orphan user machine — destroying");
+            void platform
+              .destroy(name)
+              .then(() => users.forget(name))
+              .catch(() => undefined); // retried next scan
+          }
+        }
       })
       .catch(() => undefined); // retried next interval
   void scanUsers();
   setInterval(() => void scanUsers(), envInt("POOL_SCAN_MS", 5 * 60_000, 10_000)).unref();
 }
 
-// ── Backstop sweep: managed instances gone quiet get stopped ─────────────
+// ── Backstop sweep: bound machines gone quiet get DESTROYED ───────────
 // Covers missed death-flares and our own post-reboot amnesia. Scoped to
 // ALLOWED — never the whole docker host or platform account.
 setInterval(
@@ -786,17 +804,26 @@ setInterval(
         app.log.warn({ err: String(e) }, "backstop list failed");
         return [] as string[];
       });
+      const bound = users.boundNames();
       for (const name of names) {
-        if (!allowedInstance(name)) continue;
+        if (!allowedInstance(name) || bound.has(name)) continue; // an owner is present — the machine's own idle gate owns it
+        if (POOL_ENABLED && poolNames.has(name)) continue; // pool stock — the pool's own TTL/health owns it
         const e = table.entry(name);
-        // Only reap what we've SEEN go quiet: an unseen instance may belong
-        // to a session that predates our reboot (memory wipe) — its own idle
-        // gate + the client's re-handshake own that healing, not a blind stop.
-        if (!e) continue;
-        const quietMs = Date.now() - e.lastContact;
+        const adopted = users.adoptedAt(name);
+        if (!e && !adopted) continue; // neither seen nor inherited — not ours to reap
+        // Two quiet clocks, one outcome: a machine we've SEEN go quiet
+        // (table lastContact), or a sleeper we INHERITED at a restart
+        // (adoption time) that nobody has re-bound since. Both mean
+        // abandoned — DELETE (a stopped machine is platform debris,
+        // overnight graveyard live-caught). Nothing unique is lost: the
+        // shelf is the state (proof 10: fresh mint + shelf restore); the
+        // tombstone blocks scan re-adoption of the dead name.
+        const quietMs = e ? Date.now() - e.lastContact : Date.now() - adopted;
         if (quietMs < HARD_STOP_MS) continue;
-        app.log.info({ instance: name, quiet_ms: quietMs }, "backstop: stopping silent managed instance");
-        await platform.rest(name).catch(() => undefined);
+        app.log.info({ instance: name, quiet_ms: quietMs }, "backstop: destroying abandoned managed instance");
+        await platform.destroy(name).catch((err) => app.log.warn({ err: String(err) }, "backstop destroy failed"));
+        users.retire(name);
+        users.forget(name);
       }
     })();
   },

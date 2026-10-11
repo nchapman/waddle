@@ -84,3 +84,20 @@ test("retire tombstones a name — the platform scan cannot resurrect it into re
   // and mint never collides with the tombstone
   assert.ok(!users.known().has(name));
 });
+
+test("boundNames distinguishes owned sleepers; adoptedAt is the inheritance clock", async () => {
+  const u = createUserMachines();
+  const mine = u.bind("sub-a");
+  assert.deepEqual([...u.boundNames()], [mine]);
+  assert.equal(u.adoptedAt(mine), 0, "minted, not adopted — no clock");
+  const before = Date.now();
+  const adopted = u.adopt(["waddle-u12345678-abcdef", "waddle-concierge"]);
+  assert.equal(adopted, 1, "shape-gated");
+  const at = u.adoptedAt("waddle-u12345678-abcdef");
+  assert.ok(at >= before && at <= Date.now(), "stamped at adoption");
+  assert.ok(!u.boundNames().has("waddle-u12345678-abcdef"), "adopted ≠ bound — the sweep may age it");
+  // claim converts adoption into ownership: the clock clears
+  u.claim("sub-b", "waddle-u12345678-abcdef");
+  assert.ok(u.boundNames().has("waddle-u12345678-abcdef"));
+  assert.equal(u.adoptedAt("waddle-u12345678-abcdef"), 0);
+});

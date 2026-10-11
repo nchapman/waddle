@@ -256,3 +256,19 @@ test("awaitDns: resolver-unreachable (transient codes) fails OPEN — Running ca
     assert.equal(await p.awaitDns("x.example.dev", 1), true, `${code} cannot-tell → open`);
   }
 });
+
+test("destroy = rest then delete; a not-found delete is a clean end-of-life, other errors propagate", async () => {
+  const { exec, calls } = fakeExec([
+    { args: ["container", "stop", "waddle-standby-1"], stdout: "stopped" },
+    { args: ["container", "delete", "waddle-standby-1"], stdout: "deleted" },
+    { args: ["container", "stop", "waddle-standby-2"], stdout: "stopped" },
+    { args: ["container", "delete", "waddle-standby-2"], err: "Error: instance not found" },
+    { args: ["container", "stop", "waddle-standby-3"], stdout: "stopped" },
+    { args: ["container", "delete", "waddle-standby-3"], err: "Error: 500 boom" },
+  ]);
+  const p = tinfoil(exec);
+  assert.equal(await p.destroy("waddle-standby-1"), "deleted");
+  assert.equal(await p.destroy("waddle-standby-2"), "(already gone)");
+  await assert.rejects(() => p.destroy("waddle-standby-3"), /500 boom/);
+  assert.deepEqual(calls[0], ["container", "stop", "waddle-standby-1"]);
+});

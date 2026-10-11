@@ -47,6 +47,8 @@ export interface Platform {
   ensure(instance: string, probeMs?: number, mode?: "user" | "fire"): Promise<string>;
   /** Stop-then-deploy at the configured tag (stale-tag recovery). */
   redeploy(instance: string): Promise<string>;
+  /** Stop-then-DELETE (end-of-life — stopped machines are debris). */
+  destroy(instance: string): Promise<string>;
   /** Wait via the platform API (NO DNS) until the instance reports
    *  Running — a fresh machine's DNS record lands ~when it goes Running,
    *  and handing the client the URL earlier lets its /health polls cache
@@ -106,6 +108,10 @@ export function createPlatform(opts: {
       },
       ensure: (instance: string) => start(instance), // docker start is already health-agnostic
       redeploy: (instance: string) => start(instance), // docker has no tags — a restart is the dance
+      destroy: async (instance: string) => {
+        await exec("docker", ["rm", "-f", instance], { timeout: 60_000 });
+        return "removed";
+      },
       waitRunning: (instance: string) => start(instance).then(() => true, () => false), // docker start is synchronous
       awaitDns: () => Promise.resolve(true), // docker-local hosts resolve via /etc/hosts — nothing to wait for
       probe, // the injected/real probe — same reachability check as tinfoil
@@ -238,6 +244,24 @@ export function createPlatform(opts: {
     return start(instance);
   }
 
+  /** Stop-then-DELETE an instance — the only honest end-of-life (a
+   *  stopped machine is platform debris: it lingers in every list, scan
+   *  and dashboard forever; live-caught as an overnight graveyard of
+   *  proof/retired machines). Blank stock and abandoned sleepers have no
+   *  unique state — the shelf is the state (proof 10: fresh mint + shelf
+   *  restore). */
+  async function destroy(instance: string): Promise<string> {
+    await rest(instance).catch(() => undefined);
+    try {
+      const { stdout } = await exec("tinfoil", ["container", "delete", instance], { timeout: 60_000 });
+      return tail(stdout);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/not found|no such/i.test(msg)) return "(already gone)";
+      throw e;
+    }
+  }
+
   async function waitRunning(instance: string, timeoutMs = 240_000): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     do {
@@ -294,5 +318,5 @@ export function createPlatform(opts: {
     return start(instance);
   }
 
-  return { start, rest, statuses, statusRows, list, ensure, redeploy, waitRunning, awaitDns, probe: (url, ms) => probe(url, ms ?? 5_000) };
+  return { start, rest, destroy, statuses, statusRows, list, ensure, redeploy, waitRunning, awaitDns, probe: (url, ms) => probe(url, ms ?? 5_000) };
 }
