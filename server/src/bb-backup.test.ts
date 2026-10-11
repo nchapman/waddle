@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -161,9 +161,15 @@ test("pruning keeps the manifest log and kills only old slots; restore walks dow
     writeFileSync(join(dir, "workspace", "state.bin"), b);
   };
   // Four generations: after gen 3 lands, gen 0's slot is pruned (log stays).
+  // The gate fingerprints path+size+whole-second mtime (tar's round-trip
+  // precision — see archive.ts), so these same-size, same-second writes
+  // need an explicit clock tick to register as distinct generations.
   for (let gen = 0; gen <= 3; gen++) {
     writeFileSync(join(dir, "log", "events.jsonl"), `v${gen}\n`);
     noise(gen);
+    const t = new Date(1_700_000_000_000 + gen * 1_000);
+    utimesSync(join(dir, "log", "events.jsonl"), t, t);
+    utimesSync(join(dir, "workspace", "state.bin"), t, t);
     const r = await bb.pushMachineBackup();
     assert.equal(r.gen, gen);
     await bb.pruneOldGens(gen); // deterministic in the test (fire-and-forget in prod)
