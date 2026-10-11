@@ -582,3 +582,33 @@ resolver chain served cached NXDOMAIN all through the machine's stopped
 hours — the browser could not connect before the 10.5-min locked-boot
 backstop would reap it. Structural (shared name + stop=teardown + 1800s
 negative TTL); the cattle plan (per-boot names) is the fix.
+
+## 2026-10-11 01:50–03:05Z — cattle discovery live-proven; the DNS class answered structurally
+
+**Proof 8 — discovery end-to-end (concierge v0.4.3):** browser (bb session) →
+auto-wake → `POST /boot` (JWT) → rebind `waddle-ud3b16438-777d2b` → deploy →
+concierge-side readiness (`/boot/ready`: Running + c-ares DNS) → the client's
+FIRST-EVER queries of the machine are 200s (`/health`: locked, v0.0.48) →
+attestation (pin held — same measurement) → **lock screen**. No manual DNS
+workarounds, no poisoned caches, no fallback to the legacy primary.
+
+**The class, finally named (user challenge: "still fighting DNS"):** the
+platform tears down a stopped machine's record and re-adds it seconds after
+boot; SOA negative TTL 1800s. Every machine name has a dead window, and any
+resolver querying inside it — Chrome's internal cache included (proved 02:30Z:
+record live on every resolver a shell can dig, browser still blind) — caches
+NXDOMAIN for 30min. Server-side gates narrow the window but cannot close it;
+the poison lands in caches we don't control. The shippable answer: **the
+browser never learns a machine name until the concierge proves it live**
+(/boot gates on Running + cache-free DNS; the client polls /boot/ready on the
+always-on concierge; a client that watched a machine die asks for a fresh
+name — its old one may sit poisoned in its own cache). The root answer is a
+platform ask: a wildcard zone record (stopped machines RST instead of
+NXDOMAIN; resolvers cache only positive answers) — drafted in PLAN.md.
+
+**Intermediate failures, for the record:** 01:53Z — fresh mint Running but
+browser-unreachable (the client's own boot polls poisoned the chain; fixed by
+/boot waiting on Running, v0.4.1); 02:30Z — rebind deploy returned before the
+record existed; Chrome's internal cache held the NXDOMAIN even as dig showed
+live records everywhere (fixed by concierge-side readiness + fresh-mint,
+v0.4.2/3).
