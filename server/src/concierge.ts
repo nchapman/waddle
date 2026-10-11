@@ -25,8 +25,11 @@ const CONCIERGE_URL = process.env.CONCIERGE_URL ?? "";
  *  the measurement). It starts on the baked/boot default and ADOPTS
  *  the name the concierge resolves for it — the registry row at
  *  handshake, or the escrow row at the wake-boot pull. Until adopted,
- *  pre-unlock verbs ride the legacy shared key (k=1, documented). */
-let INSTANCE = process.env.WADDLE_INSTANCE ?? "waddle";
+ *  pre-unlock verbs ride the legacy shared key (k=1, documented) — and identify as "unadopted", which the
+ * concierge's namespace gates refuse: an unnamed machine has no
+ * identity, by design. */
+export const UNADOPTED = "unadopted";
+let INSTANCE = process.env.WADDLE_INSTANCE ?? UNADOPTED;
 const NAME_SHAPE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 function adoptInstance(name: unknown): void {
   if (typeof name === "string" && NAME_SHAPE.test(name) && name !== INSTANCE) {
@@ -107,6 +110,13 @@ export async function handshakeConcierge(bearer: string, presented?: string): Pr
         sessionToken = null;
         return false;
       }
+      if (res.status === 403) {
+        // Definitive, not transient: the concierge refuses this identity
+        // (the unadopted sentinel by design; a wrong name at the gate).
+        // Retrying would burn the window re-asking a question already
+        // answered — fail fast, the caller's own clocks bound the boot.
+        return false;
+      }
       if (!res.ok) throw new Error(`status ${res.status}`);
       const r = (await res.json()) as HandshakeResponse;
       sessionToken = r.session_token ?? null;
@@ -140,8 +150,13 @@ export async function writeTimer(row: {
   return r?.ok === true;
 }
 
-/** Activity debounce — every contact pushes the backstop out. */
+/** Activity debounce — every contact pushes the backstop out.
+ *  NO-OP while unadopted: an identity-less boot has no row key the
+ *  concierge would accept (fail-closed by design), and its rows would
+ *  fire against nothing. Such boots are bounded by the concierge's
+ *  platform clocks instead (standby claim-grace / user 24h sweep). */
 export function renewIdleStop(): void {
+  if (INSTANCE === UNADOPTED) return;
   void writeTimer({ action: "stop", dueMs: stopBackstopMs() });
 }
 

@@ -19,7 +19,7 @@ function stubFetch(handler: (url: string, init?: { body?: string }) => { status:
 }
 
 it("starts on the baked default and adopts the handshake-resolved name", async () => {
-  assert.equal(currentInstance(), "waddle");
+  assert.equal(currentInstance(), "unadopted");
   stubFetch(() => ({ status: 200, json: { session_token: "t1", instance: "waddle-uabcdef12-345678" } }));
   assert.ok(await handshakeConcierge("bearer-x"));
   assert.equal(currentInstance(), "waddle-uabcdef12-345678");
@@ -86,3 +86,4 @@ it("a definitive 409 refusal is final — no retries burn the window", async () 
   assert.ok(!(await handshakeConcierge("bearer-x", "waddle-uzzzzzzzz-999999")));
   assert.equal(n, 1, "one request — refusal is not retried");
 });
+

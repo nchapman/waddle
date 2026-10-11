@@ -14,10 +14,11 @@
  *
  * Memory-only by design: a reboot wipes every row and every session token
  * (death is the strongest revocation). Clients/agents heal by
- * re-handshaking on their next boot. The backstop sweep stops MANAGED
- * instances (CONCIERGE_ALLOWED_INSTANCES — the operator's waddle names,
- * never the whole host/account) that went silent for HARD_STOP_MS — that
- * also covers our own amnesia after a reboot.
+ * re-handshaking on their next boot. The backstop sweep DESTROYS
+ * abandoned instances that went silent for HARD_STOP_MS (the user/
+ * standby namespaces carry the machines; CONCIERGE_ALLOWED_INSTANCES
+ * adds operator-named extras, default none) — that also covers our own
+ * amnesia after a reboot.
  *
  * Compromise costs availability and money, never confidentiality: a fresh
  * boot sits at its lock screen. Egress belongs on the controlplane (plus
@@ -60,9 +61,13 @@ const HARD_STOP_MS = envInt("CONCIERGE_HARD_STOP_MS", 24 * 3600_000, 60_000);
 /** Dev stand-in shared secret when JWKS isn't configured. */
 const SHARED_SECRET = process.env.CONCIERGE_TOKEN;
 /** The instances this concierge may touch, ever. Anything else on the
- *  platform — other containers, other accounts' work — is invisible. */
+ *  platform — other containers, other accounts' work — is invisible.
+ *  Default: NO operator-named instances — the user namespace
+ *  (waddle-u<hash>-<rand>, registry-gated) and the standby namespace
+ *  (pool-gated) are the whole fleet. The old shared "waddle" primary
+ *  died with the cattle design (identity is concierge-resolved). */
 const ALLOWED = new Set(
-  (process.env.CONCIERGE_ALLOWED_INSTANCES ?? "waddle")
+  (process.env.CONCIERGE_ALLOWED_INSTANCES ?? "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean),
@@ -303,29 +308,6 @@ app.get("/health", async () => ({
   pool: pool ? { size: POOL_SIZE, ttl_ms: STANDBY_TTL_MS, tracked: pool.tracked().length, demand_ms_ago: pool.demandMsAgo() } : { size: 0 },
 }));
 
-/** Assign a warm standby: URL handout, nothing more — the user's secret
- *  is what makes the machine theirs. The replacement boot hides behind
- *  the user's session (pool tick). */
-app.get("/assign", async (req, reply) => {
-  if (!POOL_ENABLED || !pool) return reply.code(404).send({ error: "pool disabled" });
-  if (!(await requireExternal(req, reply))) return reply;
-  pool?.markDemand(); // a claim is service use — arm pool warmth (scale-to-0 gate)
-  const got = pool.assign();
-  if (!got) return reply.code(404).send({ error: "no warm standby — use /wake" });
-  /** A claim is bounded presence, not ownership: REPLACE the machine's
-   *  boot-time stop row with a grace row (keyed by the machine's REAL name —
-   *  concierge-side, the only correct-identity rows a standby has: machines
-   *  self-report the config's shared identity and cannot know their own).
-   *  If the user unlocks, the machine's own renewals keep it alive; if they
-   *  abandon the claim, the machine dies within grace. Long by default: a
-   *  claimed machine's own idle-sleep flare mis-targets the shared identity
-   *  (open design item), so grace — not a flare — is what finally bounds an
-   *  abandoned claim. */
-  table.setStop(got.name, CLAIM_GRACE_MS);
-  void pool.tick().catch(() => undefined); // top the pool back up promptly
-  return got;
-});
-
 /** Create an instance from the committed config (pool standbys AND
  *  user machines — one create path, one measurement). NO --variable
  *  flags: env changes the MEASUREMENT (proven live — the client
@@ -365,8 +347,8 @@ app.post<{ Body: BootRequest }>("/boot", async (req, reply) => {
     }
   }
   // Warm-first: a pool standby is already booted and measured — claiming
-  // one saves the ~90s deploy. Same claim-grace contract as /assign: a
-  // claimed machine the user abandons dies within grace, not the pool TTL.
+  // one saves the ~90s deploy. The claim-grace contract: a claimed
+  // machine the user abandons dies within grace, not the pool TTL.
   let name = users.rebind(sub);
   if (!name && POOL_ENABLED && pool) {
     const got = pool.assign();
@@ -600,19 +582,21 @@ app.post<{ Body: HandoffArmRequest }>("/handoff", async (req, reply) => {
  *  normal locked ceremony. */
 app.post<{ Body: HandoffPullRequest }>("/handoff/pull", async (req, reply) => {
   const { instance } = req.body ?? {};
-  if (!allowedInstance(instance)) return reply.code(403).send({ error: "instance not allowed" });
+  // Secret FIRST — every pull is a machine-side call.
   if (!requireSecret(req, reply)) return reply;
   noStore(reply);
+  // CATTLE FALLBACK (k=1): a wake boot can't know its own name — it
+  // presents the baked sentinel ("unadopted", in NO dynamic namespace)
+  // under the legacy shared key. Only such a caller gets the fallback,
+  // and it MUST bypass the name gate (the gate would 403 exactly the
+  // caller the fallback exists for) — with exactly one fire window
+  // open anywhere, that fire's boot is this puller. A caller that DOES
+  // present a real shape gets the name gate + exact-key semantics
+  // only. k>1 ambiguity denies (platform ask).
+  const legacyCaller = typeof instance === "string" && !USER_NAME_RE.test(instance) && !STANDBY_NAME_RE.test(instance);
+  if (!legacyCaller && !allowedInstance(instance)) return reply.code(403).send({ error: "instance not allowed" });
   const res = handoff.release(instance);
   if ("notFound" in res) {
-    // CATTLE FALLBACK (k=1): a wake boot can't know its own name — it
-    // pulls under the legacy shared key. Only such a caller (a name in
-    // NO dynamic namespace) gets the fallback, and only when exactly
-    // one fire window is open anywhere — that fire's boot is this
-    // puller. Exposure is exactly today's (the legacy key was the
-    // fleet-wide key); a caller that DOES know a real name gets
-    // exact-key semantics only. k>1 ambiguity denies (platform ask).
-    const legacyCaller = !USER_NAME_RE.test(instance) && !STANDBY_NAME_RE.test(instance);
     const open = legacyCaller ? handoff.singleOpenWindow() : null;
     if (open) {
       const via = handoff.release(open);

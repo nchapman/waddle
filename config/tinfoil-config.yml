@@ -10,7 +10,6 @@ containers:
       - PORT: "8080"
       - NODE_ENV: "production"
       - CONCIERGE_URL: "https://waddle-concierge.ddg-waddle.containers.tinfoil.dev"
-      - WADDLE_INSTANCE: "waddle"
       - WADDLE_WAKE_AUTONOMY: "1"
       - WADDLE_IDLE_MS: "600000"
     secrets:

@@ -20,7 +20,7 @@ import { setBrowserEvents, browserLive, captureNow, userInput, releaseUserContro
 // debug GET /archive is gone — machine bytes never travel unsealed)
 import { setBbGrant, clearBbGrant, bbGrantActive, pushMachineBackup, pullMachineBackup, pruneOldGens } from "./bb-backup.js";
 import { createSchedule, listSchedules, cancelSchedule, markRun, dueSchedules, dueSoon, activeSchedules, nextDueMs, replaceAllSchedules, seedSchedules, type Schedule } from "./schedules.js";
-import { handshakeConcierge, conciergeActive, renewIdleStop, deathFlare, writeTimer, armHandoff, pullHandoff, postPostbox, pullPostbox } from "./concierge.js";
+import { handshakeConcierge, conciergeActive, renewIdleStop, deathFlare, writeTimer, armHandoff, pullHandoff, postPostbox, pullPostbox, currentInstance, UNADOPTED } from "./concierge.js";
 import { autonomyEnabled, armWakeCredential, readWakeCredential, clearWakeCredential } from "./wakeboot.js";
 import { sealPostbox, openPostbox, mergeSchedules, schedulableRows } from "./postbox.js";
 import { sealSnapshot, openSnapshot } from "./snapshot.js";
@@ -920,17 +920,24 @@ if (autonomyEnabled() && !lock.unlocked) {
 }
 
 // A boot that stays locked (wake row fired, but no credential survived the
-// fresh volume — or nobody came) must not burn compute forever: handshake
-// with the shared secret already in env and arm the stop backstop, so the
-// concierge reaps it one idle-window after boot. Unlock renews past it; a
-// user arriving late just triggers the normal wake path again.
+// fresh volume — or nobody came) must not burn compute forever. Two
+// bounds, honestly stated:
+//  - CARRIES IDENTITY (wake-boot: the escrow pull taught its name; or it
+//    later unlocks): real-name stop rows — the concierge reaps within an
+//    idle-window, unlock renews past it.
+//  - IDENTITY-LESS (locked, no escrow): the concierge's namespace gates
+//    refuse the sentinel by design — no rows, no fast reap. The platform
+//    clocks bound it instead: standby claim-grace (12h) or the user
+//    24h-quiet sweep. Bounded, not prompt — the k>1 fix is the platform
+//    instance-identity ask.
 // (No conciergeActive() here — that reads the session token, which a locked
 // boot cannot have yet. The env presence IS the wiring check.)
 if (!lock.unlocked && process.env.CONCIERGE_SHARED_SECRET && process.env.CONCIERGE_URL) {
   void handshakeConcierge(process.env.CONCIERGE_SHARED_SECRET).then((ok) => {
     if (ok) {
       renewIdleStop();
-      app.log.info("locked boot: stop backstop armed — reaped if nobody unlocks");
+      const armed = currentInstance() !== UNADOPTED;
+      app.log.info({ armed }, "locked boot: backstop handshake done (rows only when identity is known)");
     }
   });
 }

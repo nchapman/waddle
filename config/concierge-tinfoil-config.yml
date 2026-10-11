@@ -15,12 +15,11 @@ containers:
       - WARM_POOL_SIZE: "1"
       - STANDBY_TTL_MS: "3600000"
       - STANDBY_CONFIG_REPO: "nchapman/waddle-config"
-      - STANDBY_CONFIG_TAG: v0.0.51
+      - STANDBY_CONFIG_TAG: v0.0.52
       # fire→pull release window: 10 min — certificate issuance once
       # measured 5.4 min, closing the old hard 3-min window (v0.3.13)
       - WAKE_RELEASE_WINDOW_MS: "600000"
       - INSTANCE_DOMAIN_BASE: "ddg-waddle.containers.tinfoil.dev"
-      - CONCIERGE_ALLOWED_INSTANCES: "waddle"
       # Client auth: betterbase JWTs (signature+issuer+audience) on the
       # external tier — the per-user identity the cattle naming builds on
       - CONCIERGE_JWKS_URL: "https://accounts.betterbase.dev/.well-known/jwks.json"
