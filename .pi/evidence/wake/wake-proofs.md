@@ -612,3 +612,37 @@ browser-unreachable (the client's own boot polls poisoned the chain; fixed by
 record existed; Chrome's internal cache held the NXDOMAIN even as dig showed
 live records everywhere (fixed by concierge-side readiness + fresh-mint,
 v0.4.2/3).
+
+## Proof 9 — machine identity, live (2026-10-11 04:13–04:20Z, v0.0.50 / concierge v0.4.5)
+
+**The platform fact that killed the hostname route:** v0.0.49's `/health`
+exposes `os.hostname()` — the primary answered `"de89a38d6a10"`, and after
+the v0.0.50 redeploy `"36a9069e7862"`. Inner container IDs, random per
+boot, never the instance name. The identity must be resolved elsewhere.
+
+**The design, shipped:** the concierge resolves the machine at
+`/handshake` (bb JWT → the caller's registry row; the body's name is
+never trusted) and returns it — the machine adopts it and re-keys every
+later write. `/handoff/pull` serves a nameless wake boot under the
+legacy key via the single open fire window. Postbox/snapshot AAD went
+instance-free (v2) with a baked-name v1 fallback.
+
+**Live chain:** /boot hit while the ud3b machine was mid-stop →
+readiness correctly refused → the client fell back to the legacy primary
+wake → **TOFU re-pin (concierge v0.4.5 measurement) → attested · v0.0.50
+→ unlock with the stored secret → stream live → proof-6 session
+restored** on the primary. The unlock's JWT handshake ran through the new
+two-tier /handshake.
+
+**Bug found live (the tier-mix):** the legacy fallback put waddletest2's
+JWT on the PRIMARY; the new /handshake resolved the registry row
+(waddle-ud3b16438-777d2b — a STOPPED sibling) for it. Identity bound to
+the user, not the calling machine: the fallback path can teach the
+primary a dead sibling's name. Fix (next train): the client presents
+booted.name at unlock, the machine relays it at handshake, and the
+concierge adopts only on registry == presented; the real fix is cattle
+step 4 (delete the legacy fallback + the hardcoded primary).
+
+**Also observed:** the reload's /boot is shadowed while the primary
+answers unlocked (the client skips discovery when the enclave answers)
+— step 4 removes the shadow.
