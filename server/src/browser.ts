@@ -9,10 +9,10 @@
  * sealed into the log; the browser boots lazily and dies with the process.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, rmSync } from "node:fs";
+import { chownSync, lstatSync, mkdirSync, rmSync } from "node:fs";
 import WebSocket from "ws";
 import { toCdp, type UserInputEvent } from "./input-map.js";
-import { scrubEnv } from "./guard/policy.js";
+import { BROWSER_UID, playpenActive, scrubEnv } from "./guard/policy.js";
 
 const DATA_DIR = process.env.DATA_DIR ?? "/tmp/waddle-data";
 const PROFILE = `${DATA_DIR}/browser`;
@@ -33,6 +33,11 @@ const BROWSER_ENV = {
 };
 const DEBUG_PORT = 9222;
 const CHROMIUM = process.env.WADDLE_CHROMIUM_BIN ?? "chromium";
+// The playpen's browser uid (enforced at boot + after restores by
+// guard/playpen.ts): the profile — cookies are bearer tokens — is owned
+// 0700 by this uid, so the shell (agent uid) cannot read it. Dev hosts
+// (unprivileged) spawn without a uid.
+const BROWSER_SPAWN_UID = playpenActive() ? { uid: BROWSER_UID, gid: BROWSER_UID } : {};
 
 /** Wire events out of the runtime (broadcast-only; none are logged). */
 export interface BrowserEvents {
@@ -150,10 +155,43 @@ export async function ensureBrowser(): Promise<void> {
   if (browserLive()) return;
   if (booting) return booting;
   booting = (async () => {
-    mkdirSync(`${DATA_DIR}/home/.config`, { recursive: true });
-    mkdirSync(`${DATA_DIR}/home/.cache`, { recursive: true });
-    mkdirSync(`${DATA_DIR}/tmp`, { recursive: true });
-    mkdirSync(PROFILE, { recursive: true });
+    // The playpen pre-creates these with the right owner (guard/playpen.ts);
+    // the lazy path here is the fallback — mkdir under the 077 umask would
+    // leave them root-only and hand Chromium (browser uid) unwritable dirs,
+    // so hand them over when the playpen is active. Never create or chown
+    // through a symlinked playpen entry (a restored `home -> /etc` must
+    // not get an /etc/.config) — the playpen refuses and surfaces those.
+    const isLink = (p: string) => {
+      try {
+        return lstatSync(p).isSymbolicLink();
+      } catch {
+        return false;
+      }
+    };
+    // Guard the ANCESTORS, not just the leaves: lstat("…/home/.config")
+    // follows a symlinked `home`, so the leaf check alone would hand
+    // uid 1101 an outside directory (review-caught). A symlinked playpen
+    // entry is the playpen's to refuse and surface; here we just refuse
+    // to create or re-own anything through it.
+    const homeLink = isLink(`${DATA_DIR}/home`);
+    const profileLink = isLink(PROFILE);
+    if (!homeLink) {
+      mkdirSync(`${DATA_DIR}/home/.config`, { recursive: true });
+      mkdirSync(`${DATA_DIR}/home/.cache`, { recursive: true });
+    }
+    if (!isLink(`${DATA_DIR}/tmp`)) mkdirSync(`${DATA_DIR}/tmp`, { recursive: true });
+    if (!profileLink) mkdirSync(PROFILE, { recursive: true });
+    if (playpenActive()) {
+      for (const d of [`${DATA_DIR}/home/.config`, `${DATA_DIR}/home/.cache`, PROFILE]) {
+        if ((d === PROFILE ? profileLink : homeLink) || isLink(d)) continue;
+        try {
+          chownSync(d, BROWSER_UID, BROWSER_UID);
+        } catch {
+          /* missing or not ours to give: the playpen owns the discipline,
+             and a single un-chownable entry must not reject the boot */
+        }
+      }
+    }
     // Stale singleton locks from a previous container life would kill the
     // browser instantly on a persisted profile — clear them before boot.
     for (const f of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) {
@@ -176,17 +214,37 @@ export async function ensureBrowser(): Promise<void> {
           "--remote-allow-origins=*",
           "about:blank",
         ],
-        { stdio: "ignore", env: BROWSER_ENV },
+        { stdio: "ignore", env: BROWSER_ENV, ...BROWSER_SPAWN_UID },
       );
-      chromium.on("exit", () => {
-        chromium = null;
+      const child = chromium;
+      const failure = { error: null as Error | null };
+      // uid/gid 1101 spawn failures (missing uid on a foreign host, binary
+      // gone) arrive as an async 'error' event — unhandled it crashes the
+      // gateway, and a bound-but-dead handle wedges every later boot
+      // (review-caught). Clear the handle so the next ensureBrowser retries,
+      // and remember why for the failure message.
+      child.once("error", (err: Error) => {
+        failure.error = err;
+        if (chromium === child) chromium = null;
         cdp?.close();
         cdp = null;
       });
+      child.once("exit", () => {
+        if (chromium === child) chromium = null;
+        cdp?.close();
+        cdp = null;
+      });
+      // Poll the debug endpoint until the browser answers (body unused —
+      // /json/list is where the page targets live; we drive the first).
+      try {
+        await waitForJson(`http://127.0.0.1:${DEBUG_PORT}/json/version`, 20_000);
+      } catch (err) {
+        if (failure.error) throw new Error(`browser failed to start: ${failure.error.message}`);
+        throw err;
+      }
+    } else {
+      await waitForJson(`http://127.0.0.1:${DEBUG_PORT}/json/version`, 20_000);
     }
-    // Poll the debug endpoint until the browser answers (body unused —
-    // /json/list is where the page targets live; we drive the first).
-    await waitForJson(`http://127.0.0.1:${DEBUG_PORT}/json/version`, 20_000);
     await connectPage();
   })().finally(() => {
     booting = null;

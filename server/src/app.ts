@@ -30,6 +30,7 @@ import { createSchedule, listSchedules, cancelSchedule, markRun, dueSchedules, d
 import { handshakeConcierge, conciergeActive, renewIdleStop, deathFlare, writeTimer, armHandoff, pullHandoff, postPostbox, pullPostbox, currentInstance, UNADOPTED } from "./concierge.js";
 import { autonomyEnabled, armWakeCredential, readWakeCredential, clearWakeCredential } from "./wakeboot.js";
 import { registerSecret } from "./guard/policy.js";
+import { playpenReport } from "./guard/playpen.js";
 import { sealPostbox, openPostbox, mergeSchedules, schedulableRows } from "./postbox.js";
 import { sealSnapshot, openSnapshot } from "./snapshot.js";
 import { getPreferences, setPreferences, backgroundTasksEnabled } from "./preferences.js";
@@ -281,6 +282,9 @@ export function buildApp(): WaddleServer {
       // The platform fact the cattle identity keys on: does the enclave's
       // hostname equal its instance name? (Read once, live; harmless rest.)
       hostname: hostname(),
+      // The playpen's honest state: enforced (kernel boundary live) or the
+      // reason it is not (dev host). Null only before the boot sequence ran.
+      playpen: playpenReport(),
     }));
 
   // Platform facts (no user data): what the enclave runtime lets us do.

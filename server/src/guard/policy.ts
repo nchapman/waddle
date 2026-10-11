@@ -8,6 +8,7 @@
  * The agent is permissive inside its roots; the land — secrets in the
  * parent env, system state — is locked by construction, not by asking.
  */
+import { resolve } from "node:path";
 
 /**
  * Env keys a child process may inherit. Everything else is dropped —
@@ -68,6 +69,9 @@ export function registerBootSecrets(env: NodeJS.ProcessEnv = process.env): void 
  */
 export const DATA_DIR = process.env.DATA_DIR ?? "/tmp/waddle-data";
 
+/** Root-owned system entries: the sealed log, the TOFU verifier,
+ *  transcripts, schedules, preferences, pi's runtime config, and the
+ *  dev-only wake credential. Root-owned 0600/0700 (guard/playpen.ts). */
 export const SYSTEM_PATHS = [
   "log",
   "verifier.bin",
@@ -75,13 +79,56 @@ export const SYSTEM_PATHS = [
   "schedules.json",
   "preferences.json",
   "pi-agent",
-  "browser",
   "wake-credential.json",
 ] as const;
 
-/** Absolute forms of the system paths, for pattern matching. */
+/** The browser's own trees — the profile (cookies = bearer tokens) and
+ *  its HOME. Also not the agent's, but owned by the browser uid, not
+ *  root: the shell cannot read them, Chromium can write them. */
+export const BROWSER_PATHS = ["browser", "home"] as const;
+
+/** Every DATA_DIR entry that is not the agent's — the tripwire's
+ *  matching set. The agent's roots are workspace/ and the shared tmp/. */
+export const NON_AGENT_PATHS: readonly string[] = [...SYSTEM_PATHS, ...BROWSER_PATHS];
+
+/** Absolute forms of the system paths (root-owned), for enforcement. */
 export function systemAbsPaths(): string[] {
   return SYSTEM_PATHS.map((p) => `${DATA_DIR}/${p}`);
+}
+
+/** Absolute forms of every non-agent path, for tripwire matching. */
+export function nonAgentAbsPaths(): string[] {
+  return NON_AGENT_PATHS.map((p) => `${DATA_DIR}/${p}`);
+}
+
+/** The agent's writable root (bash cwd, file-tool base). */
+export const WORKSPACE = `${DATA_DIR}/workspace`;
+
+/** Resolve like the file tools do (relative paths are workspace-relative)
+ *  and test containment — traversal collapses, so ../ escapes fall out. */
+export function isWorkspacePath(path: string): boolean {
+  if (path === "" || path === "/") return false;
+  const full = resolve(WORKSPACE, path);
+  return full === WORKSPACE || full.startsWith(`${WORKSPACE}/`);
+}
+
+// ── The playpen's uids (slice 2: kernel separation) ────────────────────
+// The gateway stays root: it owns the system tree (umask 077 makes every
+// file it creates root-only) and re-owns restored trees. Children are
+// unprivileged: bash runs as the agent uid, Chromium as the browser uid —
+// so the shell cannot read the log, verifier, sessions, schedules, pi's
+// config, or the browser profile (cookies), and cannot ptrace the root
+// gateway (the "memory-only" master secret becomes actually unreachable).
+
+/** Numeric ids; overridable via env for compose/dev experiments. */
+export const AGENT_UID = Number(process.env.WADDLE_AGENT_UID ?? 1100);
+export const BROWSER_UID = Number(process.env.WADDLE_BROWSER_UID ?? 1101);
+
+/** The playpen needs root to chown/setuid children. On a dev host
+ *  (unprivileged) it degrades honestly: scrubbing and redaction stay,
+ *  the kernel boundary does not — /health says so. */
+export function playpenActive(): boolean {
+  return typeof process.getuid === "function" && process.getuid() === 0;
 }
 
 /** The guard's posture. Autonomous (scheduled) runs block what gray-area

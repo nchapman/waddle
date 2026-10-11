@@ -173,6 +173,40 @@
 - Waddle deploys take ~75-95s (platform-side); wake fire → restored+
   self-unlocked ≈ 80-96s (observed 79s at v0.0.47, 96s at v0.0.45).
 
+## The guard (2026-10-11, PLAN.md §3b — slices 1+2 shipped, 3–4 pending)
+
+Hard land, wild playpen: the agent is permissive inside its roots; the
+land is locked by construction. `server/src/guard/` — all pi-core changes
+ride the `waddle-guard` pi extension (never ad-hoc tool surgery).
+
+- **Env**: every child (bash, Chromium) spawns with a scrubbed env
+  (PATH/HOME/TMPDIR/locale/PI_* only) — no child ever carries
+  CONCIERGE_SHARED_SECRET or TINFOIL_API_KEY. `tool_result` redaction
+  scrubs registered secrets (see `registerSecret` sites) from every tool
+  result before the transcript.
+- **Uids**: gateway root + umask 077 (its files are root-only); bash runs
+  as `waddle-agent` (1100), Chromium as `waddle-browser` (1101, owns the
+  profile + HOME 0700). System tree (log, verifier.bin, sessions,
+  schedules.json, preferences.json, pi-agent, browser,
+  wake-credential.json) is root-only 0600/0700, re-tightened inside
+  `restoreArchive` — no archive widens the boundary. Gateway TMPDIR is
+  DATA_DIR/tmp (the enclave's /tmp is read-only; also the sticky shared
+  scratch — bash spools there root-0600).
+- **Ownership handoff**: the write/edit tools (in-process, root) hand
+  created workspace files to the agent uid — without it tool-written
+  files would be shell-unreachable. Restores re-chown via
+  `enforcePlaypen()` (guard/playpen.ts, idempotent; runs at boot too).
+- **Tripwire** (guard/tripwire.ts): egregious patterns — system-tree
+  destruction, gateway kills, concierge/CDP clients. UNWIRED until slice
+  3 (slice 3 replaces always-ask-bash with verdicts). CDP is on
+  localhost:9222 in the shared netns — uid separation cannot gate it; the
+  pattern is the mitigation, CDP-over-pipe is parked.
+- **Verification**: macOS dev cannot chown (playpen degrades honestly —
+  see /health `playpen` field). The kernel boundary is verified in the
+  container: `docker build -t waddle-guard-verify . && docker run --rm -v
+  "$PWD/scripts:/verify:ro" waddle-guard-verify node /verify/guard-verify.mjs`
+  (add the two -e secret vars to also exercise the env scrub).
+
 ## Browser-driving rules (Playwright MCP against the client)
 
 - Navigate ONCE per real URL change — every reload restarts client

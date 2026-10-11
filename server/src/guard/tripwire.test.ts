@@ -49,8 +49,10 @@ test("bash: destroying system state blocks", () => {
   block("bash", { command: "truncate -s 0 /data/log/events.jsonl" }, "log truncate");
   block("bash", { command: "dd if=/dev/zero of=/data/verifier.bin" }, "verifier dd");
   block("bash", { command: "chmod 777 /data/browser" }, "browser profile");
+  block("bash", { command: "rm -rf /data/home/.config" }, "browser HOME is not the agent's either");
   block("bash", { command: "rm -rf /data" }, "the DATA_DIR root itself");
   block("bash", { command: "rm -rf ../log" }, "relative escape from the workspace");
+  block("bash", { command: "cp secrets.txt ../browser/" }, "relative escape into the profile");
 });
 
 test("bash: redirects into the system tree block, redirects out of it allow", () => {
@@ -72,12 +74,20 @@ test("bash: the agent never talks to the concierge directly", () => {
   allow("bash", { command: "curl -s https://api.tinfoil.sh/models" }, "the wide web is the playpen's");
 });
 
+test("bash: the agent drives the browser through its tools, never raw CDP", () => {
+  block("bash", { command: "curl -s http://127.0.0.1:9222/json/list" }, "CDP enumeration");
+  block("bash", { command: "curl http://localhost:9222/json/version" }, "CDP probe");
+  allow("bash", { command: "curl -s https://example.com:9222/health" }, "a remote :9222 is not our CDP");
+  allow("bash", { command: "grep -r 9222 notes.txt" }, "a bare number mention is not CDP");
+});
+
 test("write/edit: system-tree targets block, workspace allows", () => {
   block("write", { path: "/data/schedules.json" }, "absolute system path");
   block("edit", { path: "../log/events.jsonl" }, "relative escape");
   block("edit", { path: "a/../../log/events.jsonl" }, "nested-dotdot escape");
   block("write", { path: "/data/workspace/a/../../pi-agent/auth.json" }, "nested-dotdot, absolute");
   block("write", { path: "/data" }, "the DATA_DIR root");
+  block("write", { path: "/data/home/.bashrc" }, "browser HOME");
   allow("write", { path: "notes.txt" });
   allow("edit", { path: "/data/workspace/src/app.ts" });
   allow("write", { path: "a/../notes.txt" }, "dotdots that stay inside the workspace");

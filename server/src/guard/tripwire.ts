@@ -13,7 +13,7 @@
  * autonomous mode blocks what interactive mode would ask).
  */
 import { resolve } from "node:path";
-import { DATA_DIR, SYSTEM_PATHS, systemAbsPaths } from "./policy.js";
+import { DATA_DIR, NON_AGENT_PATHS, nonAgentAbsPaths } from "./policy.js";
 
 export type TripwireVerdict =
   | { verdict: "allow" }
@@ -25,11 +25,13 @@ const CONCIERGE_ORIGIN = process.env.CONCIERGE_URL ?? "";
 /** Kill shots at the gateway or the browser bridge. */
 const KILL_PATTERN = /\b(?:pkill|killall)\b[^\n|;&]*\b(?:node|chromium|chrome|waddle)\b/;
 
-/** Commands that destroy or rewrite what they touch. */
-const DESTRUCTIVE_VERB = /\b(?:rm|rmdir|mv|chmod|chown|truncate|dd|shred|tee)\b/;
+/** Commands that write or rewrite what they touch (a mention of a
+ *  non-agent path + one of these = aimed at system state; reads like
+ *  cat/grep are deliberately absent — the kernel gates those). */
+const DESTRUCTIVE_VERB = /\b(?:rm|rmdir|mv|cp|ln|rsync|install|chmod|chown|truncate|dd|shred|tee)\b/;
 
 /** System tree mentioned relatively from the workspace (the bash cwd). */
-const RELATIVE_ESCAPE = new RegExp(`\\.\\./(?:${SYSTEM_PATHS.join("|")})\\b`);
+const RELATIVE_ESCAPE = new RegExp(`\\.\\./(?:${NON_AGENT_PATHS.join("|")})\\b`);
 
 /** DATA_DIR exactly (not as a prefix of an agent root like /data/workspace). */
 const DATA_DIR_EXACT = new RegExp(`${escapeRegex(DATA_DIR)}(?![\\w/])`);
@@ -37,12 +39,17 @@ const DATA_DIR_EXACT = new RegExp(`${escapeRegex(DATA_DIR)}(?![\\w/])`);
 /** Redirection whose TARGET is a system entry (`> /data/schedules.json`).
  *  DATA_DIR itself is excluded — redirects into /data/workspace are the
  *  playpen's business. */
-const REDIRECT_TO_SYSTEM = systemAbsPaths().map(
+const REDIRECT_TO_SYSTEM = nonAgentAbsPaths().map(
   (p) => new RegExp(`>\\s*["']?[^&|;>]*${escapeRegex(p)}`),
 );
 
-/** Network verbs — the concierge check only cares about these. */
+/** Network verbs — the concierge and CDP checks only care about these. */
 const NET_VERB = /\b(?:curl|wget|nc|ncat|socat)\b/;
+
+/** The browser's local CDP endpoint. The agent drives the browser through
+ *  its tools (which stand down for user takeover); speaking CDP directly
+ *  would bypass that gate — same class as the concierge rule. */
+const CDP_ENDPOINT = /(?:127\.0\.0\.1|localhost):9222\b/;
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -54,7 +61,7 @@ function escapeRegex(s: string): string {
 function aimsAtSystemTree(command: string): boolean {
   if (RELATIVE_ESCAPE.test(command)) return true;
   if (DATA_DIR_EXACT.test(command)) return true; // rm -rf /data itself
-  return systemAbsPaths().some((p) => command.includes(p));
+  return nonAgentAbsPaths().some((p) => command.includes(p));
 }
 
 function checkCommand(command: string): TripwireVerdict | null {
@@ -67,13 +74,13 @@ function checkCommand(command: string): TripwireVerdict | null {
   if (DESTRUCTIVE_VERB.test(command) && aimsAtSystemTree(command)) {
     return {
       verdict: "block",
-      reason: `refused: that touches waddle's system state (${DATA_DIR}/{${SYSTEM_PATHS.join(",")}}) — the log, verifier, transcripts, schedules, and browser profile are the system's, not the workspace's`,
+      reason: `refused: that touches waddle's system state (${DATA_DIR}/{${NON_AGENT_PATHS.join(",")}}) — the log, verifier, transcripts, schedules, profile, and browser home are the system's, not the workspace's`,
     };
   }
   if (REDIRECT_TO_SYSTEM.some((re) => re.test(command))) {
     return {
       verdict: "block",
-      reason: `refused: that redirects into waddle's system state (${DATA_DIR}/{${SYSTEM_PATHS.join(",")}}) — write to the workspace instead`,
+      reason: `refused: that redirects into waddle's system state (${DATA_DIR}/{${NON_AGENT_PATHS.join(",")}}) — write to the workspace instead`,
     };
   }
   if (CONCIERGE_ORIGIN && NET_VERB.test(command)) {
@@ -89,6 +96,12 @@ function checkCommand(command: string): TripwireVerdict | null {
         reason: "refused: the agent never talks to the concierge directly — that is the gateway's job",
       };
     }
+  }
+  if (NET_VERB.test(command) && CDP_ENDPOINT.test(command)) {
+    return {
+      verdict: "block",
+      reason: "refused: the agent drives the browser through its browser_* tools, never the CDP endpoint directly",
+    };
   }
   return null;
 }
@@ -110,7 +123,7 @@ function isSystemPath(path: string): boolean {
   if (full === DATA_DIR || full.startsWith(`${DATA_DIR}/`)) {
     const rest = full === DATA_DIR ? "" : full.slice(DATA_DIR.length + 1);
     const first = rest.split("/")[0] ?? "";
-    return rest === "" || (SYSTEM_PATHS as readonly string[]).includes(first);
+    return rest === "" || NON_AGENT_PATHS.includes(first);
   }
   return false;
 }
@@ -132,7 +145,7 @@ export function checkToolCall(
     if (path && isSystemPath(path)) {
       return {
         verdict: "block",
-        reason: `refused: ${path} is waddle system state, not workspace — the log, verifier, transcripts, schedules, and browser profile are the system's`,
+        reason: `refused: ${path} is waddle system state, not workspace — the log, verifier, transcripts, schedules, profile, and browser home are the system's`,
       };
     }
     return { verdict: "allow" };

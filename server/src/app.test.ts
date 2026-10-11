@@ -49,6 +49,10 @@ test("lock screen: /health answers pre-unlock with the platform shape", async ()
   assert.equal(body.storage, "disk");
   assert.equal(typeof body.hostname, "string");
   assert.equal(typeof body.version, "string");
+  // The kernel-boundary state is part of the contract: dev hosts degrade
+  // honestly (enforced:false), the container must say what it achieved.
+  assert.ok(body.playpen && typeof body.playpen.enforced === "boolean");
+  assert.ok(body.playpen.reason === undefined || typeof body.playpen.reason === "string");
 });
 
 test("/probe reports platform facts without touching user data", async () => {

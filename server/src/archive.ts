@@ -14,6 +14,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { DATA_DIR } from "./state.js";
+import { enforcePlaypen } from "./guard/playpen.js";
 
 const EXCLUDES = [
   // The wake credential is machine-local by design: it must never ride
@@ -217,5 +218,16 @@ function restoreFrom(slotPath: string): { files: number } {
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }
+  // The archive carries whatever ownership it was packed with — re-assert
+  // the playpen: agent workspace, browser profile, sticky tmp, root-only
+  // system tree. No restore, however old or hostile, widens the boundary.
+  // Re-assert the boundary over everything the archive just moved in —
+  // a hostile snapshot is exactly the place a symlinked system entry
+  // would come from. Deliberately not fatal: enforcePlaypen() has already
+  // moved entries in place by the time it reports, so throwing here would
+  // neither un-restore nor help — the report is live in /health (the call
+  // above updates it), and the arm-hygiene gate (slice 4) refuses to
+  // escrow secrets from a machine whose playpen isn't enforced.
+  enforcePlaypen();
   return { files: names.filter((n) => !n.endsWith("/")).length };
 }

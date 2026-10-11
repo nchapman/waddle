@@ -24,6 +24,11 @@ RUN pnpm --filter @waddle/sdk build \
 
 FROM node:24-slim
 ENV NODE_ENV=production
+# The playpen's uids (guard/playpen.ts): the gateway stays root and owns
+# the system tree; bash children run as waddle-agent, Chromium as
+# waddle-browser (profile cookies unreadable by the shell).
+RUN useradd --system --uid 1100 waddle-agent \
+ && useradd --system --uid 1101 waddle-browser
 # Runtime half of the browser stack: the browser binary + fonts (no build tools).
 # zstd: GNU tar shells out to the binary for --zstd (the shelf's slot codec).
 RUN apt-get update \
