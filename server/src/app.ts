@@ -29,6 +29,7 @@ import { setBbGrant, clearBbGrant, bbGrantActive, pushMachineBackup, pullMachine
 import { createSchedule, listSchedules, cancelSchedule, markRun, dueSchedules, dueSoon, activeSchedules, nextDueMs, replaceAllSchedules, seedSchedules, type Schedule } from "./schedules.js";
 import { handshakeConcierge, conciergeActive, renewIdleStop, deathFlare, writeTimer, armHandoff, pullHandoff, postPostbox, pullPostbox, currentInstance, UNADOPTED } from "./concierge.js";
 import { autonomyEnabled, armWakeCredential, readWakeCredential, clearWakeCredential } from "./wakeboot.js";
+import { registerSecret } from "./guard/policy.js";
 import { sealPostbox, openPostbox, mergeSchedules, schedulableRows } from "./postbox.js";
 import { sealSnapshot, openSnapshot } from "./snapshot.js";
 import { getPreferences, setPreferences, backgroundTasksEnabled } from "./preferences.js";
@@ -431,7 +432,13 @@ export function buildApp(): WaddleServer {
       // at sleep (machine state is at rest there); the escrow serves
       // schedules and has no other reason to stand.
       armSecret = secret;
+      registerSecret("master", secret);
       armInferenceKey = inferenceKey ?? null;
+      // Redaction belt-and-braces: the master secret is memory-only, but
+      // until uid separation (slice 2) a same-uid shell could still reach
+      // it (e.g. the dev wake-credential file). If it ever echoes through
+      // a tool result, the guard extension scrubs it at the transcript
+      // boundary.
       // The delegation preference rides the unlock (client is the source of
       // truth while the user is present; the snapshot carries it across boots).
       if (typeof background === "boolean" && background !== getPreferences().background) {
@@ -991,6 +998,7 @@ export function buildApp(): WaddleServer {
           }
           autonomous = true;
           armSecret = secret;
+          registerSecret("master", secret); // redaction belt-and-braces, see unlock path
           // The credential IS the opt-in evidence: the sleep gate arms only
           // when the background preference is on. A CONTEXT-FREE boot (no
           // snapshot — oversize degrade or seal failure) has no

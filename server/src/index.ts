@@ -8,6 +8,12 @@ import { serve } from "@hono/node-server";
 import type { Server } from "node:http";
 import { WebSocketServer } from "ws";
 import { buildApp } from "./app.js";
+import { registerBootSecrets } from "./guard/policy.js";
+
+// The platform secrets are the gateway's alone: register them for output
+// redaction before anything else runs (children never see them — their env
+// is scrubbed at spawn — but tool results get scrubbed as belt-and-braces).
+registerBootSecrets();
 
 const PORT = Number(process.env.PORT ?? 8080);
 

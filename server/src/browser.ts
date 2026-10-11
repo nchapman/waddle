@@ -12,17 +12,20 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";
 import WebSocket from "ws";
 import { toCdp, type UserInputEvent } from "./input-map.js";
+import { scrubEnv } from "./guard/policy.js";
 
 const DATA_DIR = process.env.DATA_DIR ?? "/tmp/waddle-data";
 const PROFILE = `${DATA_DIR}/browser`;
 // The enclave mounts / read-only (only the DATA_DIR tmpfs is writable).
 // Chromium writes TMPDIR/HOME/XDG state and crashpad's database at boot;
 // on a read-only root it dies with SIGTRAP before CDP ever answers.
-
+// The browser env is scrubbed: the shared secret and the inference key
+// are the gateway's, never a child's. A compromised renderer or a
+// page-driven chromium crash dump must not be able to printenv them.
 const HOME = `${DATA_DIR}/home`;
 const TMP = `${DATA_DIR}/tmp`;
 const BROWSER_ENV = {
-  ...process.env,
+  ...scrubEnv(process.env),
   HOME,
   TMPDIR: TMP,
   XDG_CONFIG_HOME: `${HOME}/.config`,

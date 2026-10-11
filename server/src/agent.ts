@@ -18,6 +18,8 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";import tinfoilProvider, { factoryError } from "./tinfoil-provider.js";
 import { needsApproval, requestApproval, setApprovalEmitter } from "./approvals.js";
+import { createGuardExtension } from "./guard/extension.js";
+import { registerSecret } from "./guard/policy.js";
 import { browserNavigate, browserSnapshot, browserClick, browserType, browserScroll } from "./browser.js";
 import { buildRestoreContext, type MemoryRow } from "./memory.js";
 import { Type } from "typebox";
@@ -76,6 +78,9 @@ export function setBlackbox(fn: (message: string) => void): void {
  *  so restore relays that arrive between unlock and first use are folded in. */
 export function initAgent(apiKey: string): void {
   process.env.TINFOIL_API_KEY = apiKey;
+  // Redaction registry: if this value ever echoes back through a tool
+  // result, the guard extension scrubs it at the transcript boundary.
+  registerSecret("inference-key", apiKey);
 }
 
 export function agentReady(): boolean {
@@ -302,7 +307,11 @@ async function boot() {
     },
   };
 
-  const loader = buildLoader(agentDir, [approvalGate, { name: "waddle-tinfoil", factory: tinfoilProvider }]);
+  // The guard extension rides with the ask-gate and the provider: it
+  // re-registers pi's bash tool with scrubbed child env and redacts
+  // secrets from every tool result at the transcript boundary.
+  const guardExtension = createGuardExtension(WORKSPACE);
+  const loader = buildLoader(agentDir, [approvalGate, guardExtension, { name: "waddle-tinfoil", factory: tinfoilProvider }]);
   await loader.reload();
 
   const resumeFrom = stagedRestore ?? newestSessionFile();
