@@ -93,6 +93,15 @@
   /handoff/pull, /handshake) are secret-ONLY from v0.3.19+ — they move
   the master secret and are machine verbs; the bb-JWT tier must never
   reach them.
+- **Cattle discovery is live (concierge v0.4.0)**: `POST /boot` (bb JWT
+  REQUIRED, 403 for the shared secret) warm-claims a standby or mints
+  `waddle-u<hash8>-<rand6>`; the client's live wakeCore is discovery-first
+  (legacy primary /wake is the fallback until the path is live-proven,
+  then the hardcoded name dies — PLAN.md step 4). k=1 BROADENED: every
+  signed-in app user can now mint a machine holding the shared secret +
+  inference key (same class as the standby pool, larger radius). The
+  jose `{payload}` unwrap in verifyExternal is load-bearing — a bare
+  read rejected every real JWT (review-caught pre-deploy).
 - **Egress-allowlist entries are RESOLVED at deploy time** — the
   platform builds the firewall by resolving each hostname. A zone apex
   (`ddg-waddle.containers.tinfoil.dev`) has no A record → "Firewall
