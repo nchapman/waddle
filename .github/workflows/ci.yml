@@ -25,8 +25,21 @@ jobs:
           repository: BetterbaseHQ/betterbase
           path: .bb-checkout
       - run: |
-          mkdir -p "${GITHUB_WORKSPACE}/../betterbase-dev/betterbase"
-          mv "$GITHUB_WORKSPACE/.bb-checkout/js" "${GITHUB_WORKSPACE}/../betterbase-dev/betterbase/js"
+          mkdir -p "${GITHUB_WORKSPACE}/../betterbase-dev"
+          mv "$GITHUB_WORKSPACE/.bb-checkout" "${GITHUB_WORKSPACE}/../betterbase-dev/betterbase"
+      # The js package's sources import wasm pkg/ artifacts from sibling
+      # crates/ — built, not committed. Build them the canonical way.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "../betterbase-dev/betterbase"
+      - run: bash scripts/build-wasm.sh
+        working-directory: ../betterbase-dev/betterbase/js
       - uses: pnpm/action-setup@v4 # reads packageManager from package.json
       - uses: actions/setup-node@v4
         with:
