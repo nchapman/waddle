@@ -428,8 +428,20 @@ app.post<{ Body: BootRequest }>("/boot", async (req, reply) => {
   // timer writes replace the row once the user actually unlocks).
   table.userWake(name);
   if (POOL_ENABLED && pool && STANDBY_NAME_RE.test(name)) table.setStop(name, CLAIM_GRACE_MS);
+  // Stale-tag gate: a RUNNING machine on any tag but the current
+  // release is dead weight — the client verifies against the LATEST
+  // signed release and refuses it (live-proven: "Code measurement
+  // mismatch", v0.0.51 vs a v0.0.50 user machine). Redeploy (the
+  // treadmill dance); state is sealed + shelfed. The client's readiness
+  // poll covers the ~90s.
+  const row = (await platform.statusRows().catch(() => new Map())).get(name);
+  const expectedTag = DEPLOY_TAG || STANDBY_CONFIG_TAG; // what deploys actually boot
+  const staleTag = row?.status === "Running" && expectedTag && row.tag && row.tag !== expectedTag;
   try {
-    const detail = await platform.ensure(name);
+    const detail = staleTag
+      ? await platform.redeploy(name)
+      : await platform.ensure(name);
+    if (staleTag) app.log.info({ instance: name, tag: row!.tag, expected: expectedTag }, "boot: stale tag — redeployed");
     const dns = await platform.awaitDns(`${name}.${DOMAIN_BASE}`, 120_000).catch(() => false);
     const running = detail.startsWith("already running");
     app.log.info({ user: hashSub(sub), instance: name, detail, dns }, "boot");

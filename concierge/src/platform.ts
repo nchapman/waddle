@@ -45,6 +45,8 @@ export interface Platform {
    *  "fire" (wake rows) stop+redeploys a silent one while its release
    *  window is open. */
   ensure(instance: string, probeMs?: number, mode?: "user" | "fire"): Promise<string>;
+  /** Stop-then-deploy at the configured tag (stale-tag recovery). */
+  redeploy(instance: string): Promise<string>;
   /** Wait via the platform API (NO DNS) until the instance reports
    *  Running — a fresh machine's DNS record lands ~when it goes Running,
    *  and handing the client the URL earlier lets its /health polls cache
@@ -103,6 +105,7 @@ export function createPlatform(opts: {
         return stdout.split("\n").map((s) => s.trim()).filter(Boolean);
       },
       ensure: (instance: string) => start(instance), // docker start is already health-agnostic
+      redeploy: (instance: string) => start(instance), // docker has no tags — a restart is the dance
       waitRunning: (instance: string) => start(instance).then(() => true, () => false), // docker start is synchronous
       awaitDns: () => Promise.resolve(true), // docker-local hosts resolve via /etc/hosts — nothing to wait for
       probe, // the injected/real probe — same reachability check as tinfoil
@@ -270,5 +273,16 @@ export function createPlatform(opts: {
     return false;
   }
 
-  return { start, rest, statuses, statusRows, list, ensure, waitRunning, awaitDns, probe: (url, ms) => probe(url, ms ?? 5_000) };
+  /** Stop-then-deploy at the configured tag (the treadmill dance). A
+   *  RUNNING machine on a stale tag is dead weight: every client verifies
+   *  against the LATEST signed release and refuses it (live-proven:
+   *  "Code measurement mismatch"). State is sealed + shelfed; the
+   *  redeploy is recovery, not loss. start() owns the stop-settle
+   *  polling (its zombie path). */
+  async function redeploy(instance: string): Promise<string> {
+    await rest(instance).catch(() => undefined);
+    return start(instance);
+  }
+
+  return { start, rest, statuses, statusRows, list, ensure, redeploy, waitRunning, awaitDns, probe: (url, ms) => probe(url, ms ?? 5_000) };
 }

@@ -204,12 +204,17 @@ export function App() {
       // error screen — waking can't help those (and a spurious /wake would
       // stop-and-redeploy a healthy machine via zombie recovery).
       if (!DEV && !discoveryTriedRef.current) {
-        // Auto-retry ONLY on genuine unreachability: a machine that
-        // answers /health but fails attestation/config is live-but-wrong
-        // — the error screen (an ensure() on it is the zombie-redeploy
-        // class). Unreachable = the machine died mid-flow — ONE retry
-        // via discovery (rebind/re-mint), then the honest error. The
-        // tried-ref breaks the loop.
+        // Auto-retry on NO machine yet (first load — nothing to verify)
+        // or genuine unreachability: a machine that answers /health but
+        // fails attestation/config is live-but-wrong — the error screen
+        // (an ensure() on it is the zombie-redeploy class). Unreachable
+        // = the machine died mid-flow — ONE retry via discovery
+        // (rebind/re-mint), then the honest error. The tried-ref breaks
+        // the loop.
+        if (!activeEnclave) {
+          void wakeCore("no machine yet — discovering");
+          return;
+        }
         let unreachable = false;
         try {
           await fetch(`${activeEnclave}/health`, { signal: AbortSignal.timeout(2500) });
