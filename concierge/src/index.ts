@@ -129,12 +129,13 @@ const table = createTable(
     // it, and the agent is asleep); the stale window just expires in 3min.
     handoff.markWakeFired(instance);
     const retryKey = `${instance}:${jobId}`;
-    // 150s probe budget: a replacement boot takes ~90s to reach /health
-    // — the fire must out-wait a booting replacement that WILL pull the
-    // credential in-window and become the scheduled boot on its own; the
-    // dance is only for machines that never answer. (10-min window
-    // comfortably covers probe + dance + boot.)
-    void platform.ensure(instance, 150_000, "fire")
+    // 90s probe budget: a healthy machine answers within one boot (~90s)
+    // of probe start; a booting replacement that pulls in-window becomes
+    // the scheduled boot on its own. In prod the probe egress is blocked
+    // by the platform firewall (instance hosts can't be allowlisted —
+    // NXDOMAIN while stopped), so fires degrade to always-dance: probe
+    // 90s + dance ~4min + boot ~90s ≈ 7min, inside the 10-min window.
+    void platform.ensure(instance, 90_000, "fire")
       .then((detail) => {
         wakeRetries.delete(retryKey); // budget is per failure-chain, not per schedule lifetime
         app.log.info({ instance, jobId, detail }, "wake row fired — deploy ok");
