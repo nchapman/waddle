@@ -26,7 +26,7 @@ jobs:
           path: .bb-checkout
       - run: |
           mkdir -p "${GITHUB_WORKSPACE}/../betterbase-dev/betterbase"
-          mv "$GITHUB_WORKSPACE/.bb-checkout" "${GITHUB_WORKSPACE}/../betterbase-dev/betterbase/js"
+          mv "$GITHUB_WORKSPACE/.bb-checkout/js" "${GITHUB_WORKSPACE}/../betterbase-dev/betterbase/js"
       - uses: pnpm/action-setup@v4 # reads packageManager from package.json
       - uses: actions/setup-node@v4
         with:
