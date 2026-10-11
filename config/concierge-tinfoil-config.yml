@@ -4,7 +4,7 @@ memory: 2048
 
 containers:
   - name: "waddle-concierge"
-    image: "ghcr.io/nchapman/waddle-concierge@sha256:0d0ae92bc92f5378613164b481395b34e195feb67d9c95ad29dd0883182e443a"
+    image: "ghcr.io/nchapman/waddle-concierge@sha256:32b2912be4a0fb1fe95c966f98834cdfac811b139d8de034d7f04115fbafe246"
     networks: [control]
     env:
       - CONCIERGE_PORT: "8081"
