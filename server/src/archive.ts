@@ -94,7 +94,12 @@ export function machineFingerprint(): string {
         continue; // vanished mid-walk (Chromium singleton churn) — skip
       }
       if (st.isDirectory()) walk(join(abs, name.name), childRel);
-      else h.update(`${childRel}:${st.size}:${st.mtimeMs};`);
+      // mtime is hashed at whole-second precision: that's what tar round-
+      // trips. GNU tar (the production enclave, and CI) stores seconds —
+      // hashing ms meant every restored tree "changed" and the gate
+      // re-pushed a spurious generation after each restore (caught by CI
+      // on ubuntu; macOS bsdtar preserves ns, masking it locally).
+      else h.update(`${childRel}:${st.size}:${Math.floor(st.mtimeMs / 1000)};`);
     }
   };
   walk(DATA_DIR, ".");
