@@ -43,6 +43,16 @@
   the fire→pull gap is ~90s normally, but certificate issuance stalled to
   5.4 min once, closing the hard 3-min window before the boot's pull
   (v0.3.13 makes it `WAKE_RELEASE_WINDOW_MS`, set to 10 min in config).
+- **Drain standbys before deploying the concierge** — a concierge restart
+  loses all pool memory, so leftover Running stock adopts as FOREIGN
+  (unknown claim status) and burns the full CLAIM_GRACE_MS (12h) even
+  under scale-to-0 — the demand gate only stops NEW fills. `tinfoil
+  container delete waddle-standby-N` for each Running standby BEFORE
+  `tinfoil container update waddle-concierge`; v0.4.9+ cold-starts the
+  pool empty (first /boot re-arms), so draining loses nothing.
+  (Live-caught at v0.4.9: two stranded standbys burned until manual
+  delete; /health tracked:N can also read stale — foreign rows age in
+  memory to their condemn before self-freeing on not-found destroys.)
 - **The shim `paths` list is an exact-match ingress allowlist** — every new
   endpoint path must be added to the concierge config's shim or it 404s at
   the gateway (bit us three times: /handoff, /handoff/pull, /handoff/post + /handoff/post/pull — all in as of concierge v0.3.12).
