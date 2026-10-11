@@ -93,11 +93,15 @@
   /handoff/pull, /handshake) are secret-ONLY from v0.3.19+ — they move
   the master secret and are machine verbs; the bb-JWT tier must never
   reach them.
-- **Concierge updates can wedge on the platform's certificate stage**
-  (2026-10-10 night: five consecutive `update` failures at
-  "starting: certificate", ~40min; the old version keeps serving —
-  blue-green, no outage). `container cancel` clears the wedged update;
-  retry later. Smells like ACME rate-limiting after the first failure.
+- **Egress-allowlist entries are RESOLVED at deploy time** — the
+  platform builds the firewall by resolving each hostname. A zone apex
+  (`ddg-waddle.containers.tinfoil.dev`) has no A record → "Firewall
+  setup failed" on a fresh deploy, and the SAME poison surfaces as a
+  vague "starting: certificate" failure on blue-green `update` (bit
+  2026-10-10 23:10Z–01:10Z: six failed updates blamed on ACME; it was
+  the v0.3.18 config's zone-apex entry). Entries must be concrete,
+  resolvable hosts. The cattle plan (per-boot names) needs a wildcard/
+  IP-allowlist answer (PLAN.md).
 - ATC (atc.tinfoil.sh) 500s intermittently ("Failed to build attestation
   bundle") — blocks client verification, fail-closed; recovers on retry in
   minutes. `curl -X POST https://atc.tinfoil.sh/attestation` is the probe.
