@@ -36,7 +36,12 @@ networks:
     allow:
       - api.tinfoil.sh   # the only verb surface: container deploy/stop/list
       - accounts.betterbase.dev   # JWKS fetch (client JWT verification)
-      - ddg-waddle.containers.tinfoil.dev   # instance /health probes (ensure's zombie check)
+      # instance /health probes (ensure's zombie check). The platform resolves
+      # each entry at deploy time — a ZONE APEX (ddg-waddle.containers...) has no
+      # A record and poisons the firewall build (the 23:10Z–01:10Z wedge).
+      # Concrete instance hosts only; the cattle plan (per-boot names) needs a
+      # wildcard/IP-allowlist answer — parked in PLAN.md.
+      - waddle.ddg-waddle.containers.tinfoil.dev
 
 
 shim:
