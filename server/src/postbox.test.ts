@@ -91,12 +91,3 @@ it("v2 seals are instance-free — a wake boot that hasn't learned its name stil
   // The opener may still carry the baked default — v2 opens don't care.
   assert.deepEqual(openPostbox(MASTER, blob), { events: [], schedules: [] });
 });
-
-const LEGACY_V1_AAD = `waddle-postbox-v1:${process.env.WADDLE_INSTANCE ?? "waddle"}`; // mirrors the module constant
-
-it("legacy v1 blobs (sealed instance-bound before the cutover) still open via fallback", () => {
-  const MASTER = randomBytes(32).toString("base64");
-  const key = derive(Buffer.from(MASTER, "base64"), "waddle/postbox");
-  const legacy = seal(key, Buffer.from(JSON.stringify({ events: [], schedules: [] })), LEGACY_V1_AAD).toString("base64");
-  assert.deepEqual(openPostbox(MASTER, legacy), { events: [], schedules: [] });
-});

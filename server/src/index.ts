@@ -237,7 +237,7 @@ app.get("/probe", async () => {
 // boots. The client is a pipe — it never opens the blob.
 app.addContentTypeParser("application/octet-stream", { parseAs: "buffer" }, (_req, body, done) => done(null, body));
 app.post("/unlock", async (request, reply) => {
-  const { secret, nonce, inferenceKey, bb, background } = (request.body ?? {}) as UnlockRequest;
+  const { secret, nonce, inferenceKey, bb, background, instance } = (request.body ?? {}) as UnlockRequest;
   if (!secret || !nonce) return reply.code(400).send({ error: "secret and nonce required" });
   try {
     const { token, enrolled } = lock.unlock(secret, nonce);
@@ -314,7 +314,12 @@ app.post("/unlock", async (request, reply) => {
     // worked is what a wake-boot should re-try, so resolve it first.
     const sharedSecret = process.env.CONCIERGE_SHARED_SECRET;
     const bearer = await (async () => {
-      if (bb?.token && (await handshakeConcierge(bb.token))) return bb.token;
+      // The client names its machine; the concierge mints only on
+      // registry ≡ presented (fail-closed). With a presented name there
+      // is NO secret-tier fallback — a refusal means wrong machine /
+      // stale registry: re-boot (the claim-grace row still reaps this
+      // boot; an unlocked user simply lacks delegation until then).
+      if (bb?.token && instance) return (await handshakeConcierge(bb.token, instance)) ? bb.token : undefined;
       if (sharedSecret && (await handshakeConcierge(sharedSecret))) return sharedSecret;
       return undefined;
     })();

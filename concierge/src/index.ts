@@ -475,10 +475,12 @@ app.get<{ Querystring: { instance?: string } }>("/boot/ready", async (req, reply
 app.post<{ Body: HandshakeRequest }>("/handshake", async (req, reply) => {
   // CATTLE IDENTITY: the session's table key is resolved HERE, never
   // trusted from the body. Two tiers:
-  //  - bb JWT (the unlock handshake): the caller's registry row names the
-  //    machine. A JWT holder gets rows for THEIR machine only — strictly
-  //    narrower than the shared-secret tier, so accepting JWTs here does
-  //    not re-open the fire-gate the session rule closed.
+  //  - bb JWT + presented name: the caller's registry row must MATCH the
+  //    name the client stated at unlock (two independent sources — the
+  //    client's /boot and the concierge's registry — must agree).
+  //    Mismatch = a stale or wrong machine talking: 409, re-boot. This
+  //    is fail-closed by design; there is no mint-for-presented middle
+  //    tier (the legacy fallback that needed it is deleted).
   //  - shared secret (autonomous boot, dev): the body name is validated
   //    against the known set; an autonomous boot passes the name its
   //    /handoff/pull taught it (the concierge's own record).
@@ -486,14 +488,18 @@ app.post<{ Body: HandshakeRequest }>("/handshake", async (req, reply) => {
   if (id?.kind === "jwt") {
     const resolved = users.rebind(id.sub);
     if (!resolved) return reply.code(404).send({ error: "no machine for user — POST /boot first" });
+    const presented = req.body?.presented_instance;
+    if (presented !== resolved) {
+      app.log.warn({ user: hashSub(id.sub), presented, resolved }, "handshake: presented name ≠ registry — refusing");
+      return reply.code(409).send({ error: "presented instance does not match the user's machine — re-boot" });
+    }
     const sessionToken = table.mintSession(resolved);
     return { session_token: sessionToken, instance: resolved };
   }
   const { instance } = req.body ?? {};
   if (!allowedInstance(instance)) return reply.code(403).send({ error: "instance not allowed" });
-  // SECRET-ONLY fallback (review): machines always hold the shared
-  // secret (their handshake bearer); nothing legitimate loses access.
-  // Constant-time, as everywhere the secret is compared.
+  // SECRET-ONLY fallback (autonomous boots, dev): machines hold the
+  // shared secret. Constant-time, as everywhere the secret is compared.
   if (!requireSecret(req, reply)) return reply;
   const sessionToken = table.mintSession(instance);
   return { session_token: sessionToken, instance };

@@ -8,6 +8,7 @@
  * the wire protocol does not change when it does.
  */
 import type { BbGrant, UnlockResponse, StateResponse } from "@waddle/sdk";
+import { DEV } from "./config";
 
 /** Structural: the attested SecureClient in prod, plain fetch in dev parity mode. */
 export type VerifiedFetcher = { fetch: typeof fetch };
@@ -62,6 +63,12 @@ export async function unlock(
       ...(inferenceKey ? { inferenceKey } : {}),
       ...(bb ? { bb } : {}),
       ...(background !== undefined ? { background } : {}),
+      // The machine's name (first hostname label of the enclave URL):
+      // the concierge's handshake mints only when this matches the
+      // user's registry row — the caller must name its machine. Dev
+      // (compose, localhost) has no registry — omit and use the
+      // shared-secret tier like always.
+      ...(DEV ? {} : { instance: new URL(enclaveURL).hostname.split(".")[0] }),
     }),
   });
   const body = (await res.json()) as UnlockResponse & { background?: boolean; error?: string };

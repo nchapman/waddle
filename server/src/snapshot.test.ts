@@ -48,14 +48,3 @@ test("snapshot key domain is distinct from postbox (no cross-use)", async () => 
   const postboxKey = derive(master, "waddle/postbox");
   assert.notEqual(snapKey.toString("base64"), postboxKey.toString("base64"));
 });
-
-const LEGACY_V1_AAD = `waddle-snapshot-v1:${process.env.WADDLE_INSTANCE ?? "waddle"}`; // mirrors the module constant
-
-test("v2 snapshot seals are instance-free; legacy v1 opens via fallback", () => {
-  const MASTER = randomBytes(32).toString("base64");
-  const blob = sealSnapshot(MASTER, Buffer.from("ctx"));
-  assert.equal(openSnapshot(MASTER, blob).toString(), "ctx"); // baked name opener
-  const key = derive(Buffer.from(MASTER, "base64"), "waddle/snapshot");
-  const legacy = seal(key, Buffer.from("old"), LEGACY_V1_AAD).toString("base64");
-  assert.equal(openSnapshot(MASTER, legacy).toString(), "old");
-});

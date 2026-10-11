@@ -33,12 +33,14 @@ import { frameBus } from "./lib/frame-bus";
 import { WaddleChatTransport } from "./lib/waddle-transport";
 import { DEV, ENCLAVE_URL, CONFIG_REPO, BB_CLIENT_ID, BB_DOMAIN, ZONE } from "./lib/config";
 import { eventsToRows, rowsToUIMessages, toolStartRow, toolEndRow, approvalRow, historyRow, type ChatMessage } from "./lib/history";
-import { wakeInstance, pollUntilHealthy, assignStandby, bootInstance, pollBootReady } from "./lib/concierge";
+import { pollUntilHealthy, bootInstance, pollBootReady } from "./lib/concierge";
 
 /** The machine this session talks to: the primary, or a warm standby
  *  handed out by the concierge's pool (same config repo → same
  *  measurement → the TOFU pin travels with it). */
-let activeEnclave = ENCLAVE_URL;
+/** The machine /boot gave us — the ONLY live enclave target (no baked
+ *  URL: a hardcoded primary was the tier-mix root, proof 9). */
+let activeEnclave = DEV ? ENCLAVE_URL : "";
 
 type State =
   | { phase: "verifying" }
@@ -63,17 +65,7 @@ type State =
 
 const fp = (s: string) => `${s.slice(0, 16)}…${s.slice(-8)}`;
 
-/** The standby must live in the operator's zone: the TOFU pin travels
- *  by measurement, so it cannot catch a host switch. Derived from the
- *  CONCIERGE's host (not the enclave's — discovery must not depend on a
- *  baked machine URL); empty when the concierge is a bare localhost —
- *  the caller then skips standby assignment. Leading dot: a SUFFIX
- *  match (`.ddg-waddle.containers.tinfoil.dev`), not an exact one. */
-function standbyZone(): string {
-  return ZONE ? `.${ZONE}` : "";
-}
 
-/** Dev parity: a structural stand-in so session/unlock code paths run unchanged. */
 const DEV_RESULT = {
   ok: true,
   client: { fetch: (...a: Parameters<typeof fetch>) => fetch(...a) },
@@ -114,7 +106,6 @@ export function App() {
   // rows are in the seed, so ingesting them again would duplicate history.
   const suppressReplayRef = useRef(false);
   const frameLiveRef = useRef(false);
-  const autoWokeRef = useRef(false);
   /** Discovery ran this page load. A machine that fails verification
    *  AFTER discovery gets the error screen, not another discovery —
    *  /boot would hand back the same failing machine and loop forever
@@ -138,7 +129,16 @@ export function App() {
    *  beds in — and is the whole story in dev parity. */
   async function wakeCore(note: string) {
     setState({ phase: "asleep", waking: true, note });
-    if (!DEV) {
+    if (DEV) {
+      // Dev compose is always-on: no concierge, no boot — just the agent.
+      const healthy = await pollUntilHealthy(activeEnclave, 30, (i) =>
+        setState((st) => (st.phase === "asleep" ? { ...st, note: `waiting for the agent… (${i})` } : st)),
+      );
+      if (healthy) void run();
+      else setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: "compose stack not answering — docker compose up?" } : st));
+      return;
+    }
+    {
       const booted = await bootInstance(conciergeAuth, 300_000, undefined, machineDiedRef.current);
       if (booted.ok && booted.url) {
         discoveryTriedRef.current = true;
@@ -167,28 +167,18 @@ export function App() {
         setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: "gave up waiting — try again" } : st));
         return;
       }
-      // No session is a dead end (same as legacy wake); anything else —
-      // concierge down, refused, out-of-zone — falls back to the legacy
-      // primary wake so a concierge hiccup can't brick the client.
+      // Discovery is the ONLY live path (no legacy primary fallback — the
+      // fallback was the tier-mix bug: a bb JWT on the primary taught it a
+      // dead sibling's name, proof 9). A /boot failure means what it says:
+      // no session is a dead end; anything else (concierge down, refused,
+      // out-of-zone) is an honest operator-visible error.
       if (booted.detail?.startsWith("no betterbase session")) {
         setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: booted.detail } : st));
         return;
       }
-    }
-    activeEnclave = ENCLAVE_URL; // the wake path always targets the primary
-    const woke = await wakeInstance(conciergeAuth);
-    if (!woke.ok) {
-      setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: woke.detail } : st));
+      setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: booted.detail ?? "boot failed" } : st));
       return;
     }
-    const healthy = await pollUntilHealthy(activeEnclave, 60, (i) =>
-      setState((st) => (st.phase === "asleep" ? { ...st, note: `waiting for the enclave… (${i})` } : st)),
-    );
-    if (healthy) {
-      void run();
-      return;
-    }
-    setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: "gave up waiting — try again" } : st));
   }
 
   const run = useCallback(async () => {
@@ -213,40 +203,21 @@ export function App() {
       // /health. Attestation/config failures with a live enclave go to the
       // error screen — waking can't help those (and a spurious /wake would
       // stop-and-redeploy a healthy machine via zombie recovery).
-      if (!DEV) {
-        // A non-primary enclave that fails verification must not strand
-        // the session — ONE retry via the discovery path (which rebinds
-        // or re-mints the machine), then the honest error screen. The
-        // tried-ref breaks the loop: discovery hands back the same
-        // machine it just bound, so retrying it changes nothing.
-        if (activeEnclave !== ENCLAVE_URL && !discoveryTriedRef.current) {
-          autoWokeRef.current = true;
-          void wakeCore("standby failed verification — discovering my machine");
-          return;
-        }
-      }
-      if (!DEV && !autoWokeRef.current) {
+      if (!DEV && !discoveryTriedRef.current) {
+        // Auto-retry ONLY on genuine unreachability: a machine that
+        // answers /health but fails attestation/config is live-but-wrong
+        // — the error screen (an ensure() on it is the zombie-redeploy
+        // class). Unreachable = the machine died mid-flow — ONE retry
+        // via discovery (rebind/re-mint), then the honest error. The
+        // tried-ref breaks the loop.
         let unreachable = false;
         try {
-          await fetch(`${ENCLAVE_URL}/health`, { signal: AbortSignal.timeout(2500) });
+          await fetch(`${activeEnclave}/health`, { signal: AbortSignal.timeout(2500) });
         } catch {
           unreachable = true;
         }
         if (unreachable) {
-          autoWokeRef.current = true;
-          // Pool first: a warm standby means ~7s to live (attest + unlock)
-          // instead of a ~75s deploy. Same measured config → the pin holds
-          // (assignStandby zone-binds the URL so the pin CAN hold). A
-          // malformed ENCLAVE_URL skips the standby path — the wake path
-          // (which resets activeEnclave) is still the honest fallback.
-          const zone = standbyZone();
-          const standby = zone ? await assignStandby(conciergeAuth, zone) : null;
-          if (standby) {
-            activeEnclave = standby;
-            void run(); // verify the standby; its unlock flow continues there
-            return;
-          }
-          void wakeCore("auto-wake: enclave unreachable on load");
+          void wakeCore("enclave unreachable — discovering my machine");
           return;
         }
       }

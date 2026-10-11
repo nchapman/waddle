@@ -17,60 +17,6 @@ async function authHeaders(auth: ConciergeAuth): Promise<Record<string, string>>
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-/** Wake the primary instance through the concierge. The request is
- *  synchronous by design: the concierge runs the deploy (75–95s) before
- *  answering — the timeout only bounds a truly-stalled connection. */
-export async function wakeInstance(
-  auth: ConciergeAuth,
-  timeoutMs = 150_000,
-): Promise<{ ok: boolean; detail?: string }> {
-  const headers = await authHeaders(auth);
-  if (!headers.Authorization) {
-    return { ok: false, detail: "no betterbase session — connect your store to wake the enclave" };
-  }
-  try {
-    const res = await fetch(`${CONCIERGE_URL}/wake`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...headers },
-      body: JSON.stringify({ instance: "waddle" }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (res.ok) return { ok: true };
-    const body = await res.text().catch(() => "");
-    return { ok: false, detail: `concierge refused (${res.status}) ${body.slice(0, 120)}` };
-  } catch (e) {
-    const stalled = e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");
-    return {
-      ok: false,
-      detail: stalled
-        ? `concierge stalled — wake gave up after ${Math.round(timeoutMs / 1000)}s (deploy still running?)`
-        : "concierge unreachable — is it running?",
-    };
-  }
-}
-
-/** Ask the pool for a warm standby URL — null when none, or when the
- *  handed-out host is outside the zone (the TOFU pin travels by
- *  measurement, so it cannot catch a host switch). */
-export async function assignStandby(auth: ConciergeAuth, zone: string): Promise<string | null> {
-  if (!zone) return null; // no zone to bind to — never accept a host unbound
-  const z = zone.replace(/^\.+/, ""); // callers pass `.zone` or `zone` — normalize
-  try {
-    const res = await fetch(`${CONCIERGE_URL}/assign`, {
-      headers: await authHeaders(auth),
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return null;
-    const m = (await res.json().catch(() => null)) as { url?: string } | null;
-    const host = m && typeof m.url === "string" ? new URL(m.url).hostname : "";
-    // Label boundary: `evil<tinfoil.dev>` must not pass a suffix check.
-    return host === z || host.endsWith(`.${z}`) ? m!.url! : null;
-  } catch {
-    return null; // concierge unreachable — caller falls back to /wake
-  }
-}
-
-/** Poll the enclave's /health until it answers (~2s per attempt). */
 export async function pollUntilHealthy(
   url: string,
   attempts = 60,
@@ -90,13 +36,6 @@ export async function pollUntilHealthy(
   return false;
 }
 
-/** Discovery (live): "my machine, running". The concierge mints or
- *  rebinds a per-user cattle machine, warms from the pool when it can,
- *  and returns its URL — zone-bound here, HARD (a handed-out host outside
- *  the concierge's own zone is a misdirection, refused; discovery with no
- *  derivable zone — dev — never runs, the wake path is the whole story
- *  there). `waking` says the
- *  machine was just deployed and needs its ~90s boot. */
 export async function bootInstance(
   auth: ConciergeAuth,
   timeoutMs = 300_000,

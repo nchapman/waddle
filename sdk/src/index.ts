@@ -80,6 +80,11 @@ export interface UnlockRequest {
   bb?: BbGrant;
   /** The delegation preference (client is source of truth while present). */
   background?: boolean;
+  /** The machine the CLIENT believes it is unlocking — the /boot-given
+   *  enclave's first hostname label. The machine relays it at the
+   *  concierge handshake, which mints only when it matches the user's
+   *  registry row (fail-closed: mismatch = wrong machine, re-boot). */
+  instance?: string;
 }
 
 export interface UnlockResponse {
@@ -151,6 +156,10 @@ export interface ErrorEvent {
 
 export interface HandshakeRequest {
   instance: string;
+  /** The machine's name as the CLIENT stated it (from /boot). The JWT
+   *  tier mints only when this matches the caller's registry row —
+   *  fail-closed against a stale/wrong caller. */
+  presented_instance?: string;
 }
 export interface HandshakeResponse {
   session_token: string;

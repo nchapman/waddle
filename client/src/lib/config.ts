@@ -3,7 +3,10 @@
 const env = (import.meta as { env?: Record<string, string | undefined> }).env ?? {};
 
 export const DEV = env.VITE_DEV === "1";
-export const ENCLAVE_URL = env.VITE_ENCLAVE_URL ?? "https://waddle.ddg-waddle.containers.tinfoil.dev";
+/** Dev-only: the compose-stack target. Live NEVER bakes a machine URL —
+ *  /boot discovery is the only source (a baked primary was the tier-mix
+ *  root, proof 9). */
+export const ENCLAVE_URL = env.VITE_ENCLAVE_URL ?? "http://localhost:8080";
 export const CONFIG_REPO = env.VITE_CONFIG_REPO ?? "nchapman/waddle-config";
 export const CONCIERGE_URL = env.VITE_CONCIERGE_URL ?? "http://localhost:5390";
 /** The zone machines live in, derived from the concierge's own host

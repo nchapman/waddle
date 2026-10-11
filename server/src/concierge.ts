@@ -36,9 +36,9 @@ function adoptInstance(name: unknown): void {
 }
 
 /** The machine's current name — adopted from the concierge when known,
- *  the baked/boot default until then. Test-facing (module state) and
- *  used by every POST body this module sends; the AAD seals are
- *  instance-free v2 with a baked-name v1 fallback (postbox/snapshot). */
+ *  the baked/boot default until then. Test-facing (module state); every
+ *  POST body this module sends keys on it. The seal AADs are
+ *  instance-free constants (postbox/snapshot v2). */
 export function currentInstance(): string {
   return INSTANCE;
 }
@@ -82,14 +82,46 @@ async function post<T>(path: string, body: object, bearer: string): Promise<T | 
   }
 }
 
-/** Handshake at unlock — `bearer` is the (fresh) betterbase grant token.
- *  The response carries the concierge-resolved machine name; adopting
- *  it here re-keys every later write (arm, timers) to the real machine. */
-export async function handshakeConcierge(bearer: string): Promise<boolean> {
-  const r = await post<HandshakeResponse>("/handshake", {}, bearer);
-  sessionToken = r?.session_token ?? null;
-  if (sessionToken && r?.instance) adoptInstance(r.instance);
-  return sessionToken !== null;
+/** Handshake at unlock — `bearer` is the (fresh) betterbase grant token,
+ *  `presented` the machine's name as the CLIENT stated it (from /boot).
+ *  The concierge mints only when presented ≡ the user's registry row —
+ *  the response's instance is then that confirmed name; adopting it
+ *  re-keys every later write (arm, timers) to the real machine. */
+export async function handshakeConcierge(bearer: string, presented?: string): Promise<boolean> {
+  const body = presented ? { presented_instance: presented } : {};
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const res = await fetch(`${CONCIERGE_URL}/handshake`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
+        body: JSON.stringify({ instance: INSTANCE, ...body }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      log("POST /handshake", { status: res.status });
+      if (res.status === 409 || res.status === 404) {
+        // Definitive refusal: wrong machine / no registry row. No retry,
+        // no secret-tier fallback — the client must re-boot.
+        return false;
+      }
+      if (res.status === 401) {
+        sessionToken = null;
+        return false;
+      }
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      const r = (await res.json()) as HandshakeResponse;
+      sessionToken = r.session_token ?? null;
+      if (sessionToken && r.instance) adoptInstance(r.instance);
+      return sessionToken !== null;
+    } catch (e) {
+      // Transient (network/5xx): a blip must not read as an identity
+      // refusal — the session's idle-stop/delegation ride on this.
+      if (attempt >= 3) {
+        log("handshake failed after retries", { err: String(e) });
+        return false;
+      }
+      await new Promise((r) => setTimeout(r, 1000 * attempt));
+    }
+  }
 }
 
 export function conciergeActive(): boolean {

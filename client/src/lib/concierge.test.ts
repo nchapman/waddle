@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { wakeInstance, pollUntilHealthy, assignStandby, bootInstance, pollBootReady } from "./concierge.js";
+import { pollUntilHealthy, bootInstance, pollBootReady } from "./concierge.js";
 
 type Responder = { ok?: boolean; body?: unknown; throwErr?: Error };
 
@@ -29,68 +29,10 @@ const bearer = (call: { init?: RequestInit }): string => {
   return h.Authorization ?? "";
 };
 
-test("wakeInstance posts the verb with the auth token (bb token wins)", async () => {
-  const { calls } = stubFetch(() => ({ ok: true }));
-  const r = await wakeInstance(async () => "bb-token");
-  assert.deepEqual(r, { ok: true });
-  assert.match(calls[0]!.url, /\/wake$/);
-  assert.equal(bearer(calls[0]!), "Bearer bb-token");
-});
 
-test("wakeInstance with no session (live shape) says so instead of sending a bare request", async () => {
-  const { calls } = stubFetch(() => ({ ok: true }));
-  const r = await wakeInstance(async () => null);
-  assert.equal(r.ok, false);
-  assert.match(r.detail!, /no betterbase session/);
-  assert.equal(calls.length, 0, "no request left without credentials");
-});
 
-test("wakeInstance bounds a silent stall by its abort signal", async () => {
-  // Never settles on its own — only the AbortSignal can end it. The
-  // rejection carries the real abort name so the stall branch matches.
-  globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) =>
-    new Promise((_resolve, reject) => {
-      init?.signal?.addEventListener("abort", () =>
-        reject(Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" })));
-    })) as typeof fetch;
-  const t0 = Date.now();
-  const r = await wakeInstance(async () => "tok", 25);
-  assert.equal(r.ok, false);
-  assert.match(r.detail!, /stalled/);
-  assert.ok(Date.now() - t0 < 5_000, "returned at the timeout, not never");
-});
 
-test("wakeInstance reports a failed concierge call as unreachable", async () => {
-  // The structural timeout guard (AbortSignal on the /wake fetch) bounds a
-  // SILENT stall — the abort test above covers it; this pins the loud path.
-  stubFetch(() => ({ throwErr: new Error("ECONNREFUSED") }));
-  const r = await wakeInstance(async () => "tok");
-  assert.equal(r.ok, false);
-  assert.match(r.detail!, /concierge unreachable/);
-});
 
-test("assignStandby zone-binds: a URL outside the primary's domain is rejected", async () => {
-  stubFetch(() => ({ ok: true, body: { name: "waddle-standby-1", url: "https://evil.example.net" } }));
-  const got = await assignStandby(async () => null, ".containers.tinfoil.dev");
-  assert.equal(got, null); // never hand out a host the TOFU pin cannot cover
-});
-
-test("assignStandby returns the URL when the host is inside the zone", async () => {
-  const { calls } = stubFetch(() => ({
-    ok: true,
-    body: { name: "waddle-standby-1", url: "https://waddle-standby-1.containers.tinfoil.dev" },
-  }));
-  const got = await assignStandby(async () => "bb-token", ".containers.tinfoil.dev");
-  assert.equal(got, "https://waddle-standby-1.containers.tinfoil.dev");
-  assert.match(calls[0]!.url, /\/assign$/);
-});
-
-test("assignStandby: non-ok or unreachable → null (caller falls back to /wake)", async () => {
-  stubFetch(() => ({ ok: false }));
-  assert.equal(await assignStandby(async () => null, ".z"), null);
-  stubFetch(() => ({ throwErr: new Error("timeout") }));
-  assert.equal(await assignStandby(async () => null, ".z"), null);
-});
 
 test("pollUntilHealthy ticks and gives up after the attempts run out", async () => {
   stubFetch(() => ({ ok: false }));
@@ -175,11 +117,6 @@ test("bootInstance reports a silent stall as a stall, not unreachable", async ()
   assert.match(r.detail!, /stalled/);
 });
 
-test("assignStandby label boundary — a suffix that is not a label does not pass", async () => {
-  stubFetch(() => ({ ok: true, body: { url: "https://evilcontainers.tinfoil.dev" } }));
-  // zone ".containers.tinfoil.dev": host must be exactly that or end ".containers.tinfoil.dev"
-  assert.equal(await assignStandby(async () => "tok", ".containers.tinfoil.dev"), null);
-});
 
 test("pollBootReady asks the CONCIERGE (never the machine) and returns on its 200", async () => {
   const { calls } = stubFetch((url) => ({ ok: url.includes("ready") }));
