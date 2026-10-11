@@ -89,7 +89,6 @@ setInterval(() => {
 
 const PORT = Number(process.env.PORT ?? 8080);
 const VERSION = pkg.version;
-const INSTANCE = process.env.WADDLE_INSTANCE ?? "waddle";
 /** Idle gate: no ACTIVITY for this long → sleep. A dev override shortens it. */
 const IDLE_MS = Number(process.env.WADDLE_IDLE_MS ?? 600_000); // 10 min
 
@@ -332,7 +331,7 @@ app.post("/unlock", async (request, reply) => {
           // Raw secret both sides: sealPostbox/openPostbox each derive
           // HKDF(secret,"waddle/postbox") internally — feeding a derived
           // key here would double-derive and never open (review catch).
-          const payload = openPostbox(secret, INSTANCE, blob);
+          const payload = openPostbox(secret, blob);
           for (const e of payload.events) log?.append(e);
           replaceAllSchedules(mergeSchedules(listSchedules(), payload.schedules, payload.cancelledIds ?? []));
           log?.append({ type: "message", role: "user", text: `[system] postbox merged — ${payload.events.length} events from the unattended run delivered`, at: nowIso() });
@@ -554,7 +553,7 @@ async function postAutonomousMail(): Promise<void> {
     // are the no-re-fire / no-resurrect contract.
     const cancelledIds = [...bootSeededIds].filter((id) => !listSchedules().some((r) => r.id === id));
     let payload: { events: typeof events; schedules: ReturnType<typeof listSchedules>; cancelledIds: string[] } = { events, schedules: listSchedules(), cancelledIds };
-    let blob = sealPostbox(armSecret, INSTANCE, payload);
+    let blob = sealPostbox(armSecret, payload);
     if (blob.length > MAX_BLOB) {
       // A single pathological event can outsize the count cap — drop
       // the transcript, keep the schedule truth, and say so in the mail.
@@ -563,7 +562,7 @@ async function postAutonomousMail(): Promise<void> {
         schedules: payload.schedules,
         cancelledIds: payload.cancelledIds,
       };
-      blob = sealPostbox(armSecret, INSTANCE, payload);
+      blob = sealPostbox(armSecret, payload);
     }
     const ok = await postPostbox(blob);
     if (ok) app.log.info({ events: payload.events.length, bytes: blob.length, cancelled: cancelledIds.length }, "postbox posted (sealed) at autonomous sleep");
@@ -597,7 +596,7 @@ async function rearmEscrow(): Promise<void> {
     // profile alone is tens of MiB — over any body limit — and an
     // unattended run needs log/workspace/verifier, not logins; the
     // shelf keeps serving full-profile restores when attended).
-    const sealed = sealSnapshot(armSecret, INSTANCE, createArchive(true).body);
+    const sealed = sealSnapshot(armSecret, createArchive(true).body);
     // The concierge's /handoff takes the default body limit (1MiB) —
     // a lived-in machine's archive can outgrow it. Oversize → arm
     // context-free (the run still fires, state degrades honestly).
@@ -850,7 +849,7 @@ if (autonomyEnabled() && !lock.unlocked) {
       // so the same secret re-enrolls identically either way).
       if (cred.snapshot) {
         try {
-          const r = restoreArchive(openSnapshot(secret, INSTANCE, cred.snapshot));
+          const r = restoreArchive(openSnapshot(secret, cred.snapshot));
           app.log.info({ files: r.files }, "autonomous boot: snapshot restored");
         } catch (e) {
           app.log.warn({ err: String(e) }, "autonomous boot: snapshot restore failed — booting context-free");

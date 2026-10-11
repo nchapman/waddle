@@ -20,7 +20,28 @@ import type {
 } from "@waddle/sdk";
 
 const CONCIERGE_URL = process.env.CONCIERGE_URL ?? "";
-const INSTANCE = process.env.WADDLE_INSTANCE ?? "waddle";
+/** CATTLE IDENTITY: the machine cannot know its own name (hostname is
+ *  the inner container id — live-proven v0.0.49; per-boot env changes
+ *  the measurement). It starts on the baked/boot default and ADOPTS
+ *  the name the concierge resolves for it — the registry row at
+ *  handshake, or the escrow row at the wake-boot pull. Until adopted,
+ *  pre-unlock verbs ride the legacy shared key (k=1, documented). */
+let INSTANCE = process.env.WADDLE_INSTANCE ?? "waddle";
+const NAME_SHAPE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+function adoptInstance(name: unknown): void {
+  if (typeof name === "string" && NAME_SHAPE.test(name) && name !== INSTANCE) {
+    log("instance adopted", { instance: name });
+    INSTANCE = name;
+  }
+}
+
+/** The machine's current name — adopted from the concierge when known,
+ *  the baked/boot default until then. Test-facing (module state) and
+ *  used by every POST body this module sends; the AAD seals are
+ *  instance-free v2 with a baked-name v1 fallback (postbox/snapshot). */
+export function currentInstance(): string {
+  return INSTANCE;
+}
 /** Stop-row backstop offset: the stop row is a zombie backstop, never
  *  the primary sleep path — arm it just past the idle gate (idle +
  *  margin) from the last contact; activity renews, the gate's death
@@ -61,10 +82,13 @@ async function post<T>(path: string, body: object, bearer: string): Promise<T | 
   }
 }
 
-/** Handshake at unlock — `bearer` is the (fresh) betterbase grant token. */
+/** Handshake at unlock — `bearer` is the (fresh) betterbase grant token.
+ *  The response carries the concierge-resolved machine name; adopting
+ *  it here re-keys every later write (arm, timers) to the real machine. */
 export async function handshakeConcierge(bearer: string): Promise<boolean> {
   const r = await post<HandshakeResponse>("/handshake", {}, bearer);
   sessionToken = r?.session_token ?? null;
+  if (sessionToken && r?.instance) adoptInstance(r.instance);
   return sessionToken !== null;
 }
 
@@ -138,6 +162,9 @@ export async function pullHandoff(): Promise<PulledCredential | null> {
     if (!res.ok) return null;
     const row = (await res.json()) as HandoffPullResponse;
     if (!row.credential || typeof row.credential !== "object") return null;
+    // The served row's name is this machine's identity — adopted before
+    // the caller touches the credential (the arm + handshake re-key on it).
+    adoptInstance(row.instance);
     return row.credential;
   } catch (e) {
     log("POST /handoff/pull failed", { err: String(e) });

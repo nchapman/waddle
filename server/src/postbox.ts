@@ -12,7 +12,7 @@
  * done-markers): merging the table is what stops the next unlock from
  * re-firing a schedule the unattended run already completed.
  */
-import { derive, seal, open } from "./keys.js";
+import { derive, seal, openAny } from "./keys.js";
 import type { Schedule } from "./schedules.js";
 
 export interface PostboxPayload {
@@ -25,18 +25,27 @@ export interface PostboxPayload {
   cancelledIds?: string[];
 }
 
-const AAD = (instance: string) => `waddle-postbox-v1:${instance}`;
+/** AAD v2: instance-free. v1 bound the machine name, but a wake boot
+ *  opens blobs BEFORE it can know its name (the adoption happens at
+ *  the pull/handshake) — v1 seals would fail their own opens. The AEAD
+ *  key already derives from the master secret (the actual boundary);
+ *  the v1 fallback uses the BAKED boot name — the only name any
+ *  pre-cutover machine ever sealed under. */
+const AAD_V2 = "waddle-postbox-v2";
+const LEGACY_INSTANCE = process.env.WADDLE_INSTANCE ?? "waddle";
+const AAD_V1 = `waddle-postbox-v1:${LEGACY_INSTANCE}`;
 
-export function sealPostbox(secretB64: string, instance: string, payload: PostboxPayload): string {
+export function sealPostbox(secretB64: string, payload: PostboxPayload): string {
   const key = derive(Buffer.from(secretB64, "base64"), "waddle/postbox");
-  return seal(key, Buffer.from(JSON.stringify(payload)), AAD(instance)).toString("base64");
+  return seal(key, Buffer.from(JSON.stringify(payload)), AAD_V2).toString("base64");
 }
 
-/** Throws on wrong key / tampered blob / wrong instance — callers warn and
- *  drop; mail is already consumed by the pull. */
-export function openPostbox(secretB64: string, instance: string, blobB64: string): PostboxPayload {
+/** Throws on wrong key / tampered blob — callers warn and drop; mail is
+ *  already consumed by the pull. */
+export function openPostbox(secretB64: string, blobB64: string): PostboxPayload {
   const key = derive(Buffer.from(secretB64, "base64"), "waddle/postbox");
-  return JSON.parse(open(key, Buffer.from(blobB64, "base64"), AAD(instance)).toString()) as PostboxPayload;
+  const plain = openAny(key, Buffer.from(blobB64, "base64"), [AAD_V2, AAD_V1]);
+  return JSON.parse(plain.toString()) as PostboxPayload;
 }
 
 /** Merge schedule tables as an id-UNION with tombstones: postbox rows are

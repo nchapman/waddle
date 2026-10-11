@@ -88,3 +88,40 @@ describe("wake handoff store", () => {
     assert.ok(!JSON.stringify(s.status("waddle")).includes("ak_s3cret"));
   });
 });
+
+it("armed() lists armed row names — the /handoff/pull k=1 fallback resolver", () => {
+  const h = createHandoffStore({ now: () => 1_000 });
+  assert.deepEqual(h.armed(), []);
+  h.arm("waddle-ud3b16438-777d2b", { secret: "x" });
+  h.arm("waddle", { secret: "y" });
+  assert.deepEqual(h.armed().sort(), ["waddle", "waddle-ud3b16438-777d2b"]);
+});
+
+it("armed() prunes expired rows — the count is 'armed NOW', not 'armed ever'", () => {
+  let t = 1_000;
+  const h = createHandoffStore({ now: () => t, ttlMs: 60_000 });
+  h.arm("waddle-uaaaaaaaa-111111", { secret: "x" });
+  t += 61_000; // past ttl
+  h.arm("waddle-ubbbbbbbb-222222", { secret: "y" });
+  assert.deepEqual(h.armed(), ["waddle-ubbbbbbbb-222222"]);
+});
+
+it("singleOpenWindow serves only an unambiguous window; anyWindowOpen feeds the pool's fill deferral", () => {
+  let t = 1_000;
+  const h = createHandoffStore({ now: () => t, releaseWindowMs: 180_000 });
+  assert.equal(h.singleOpenWindow(), null);
+  assert.equal(h.anyWindowOpen(), false);
+  h.arm("waddle-uaaaaaaaa-111111", { secret: "x" });
+  h.markWakeFired("waddle-uaaaaaaaa-111111");
+  assert.equal(h.singleOpenWindow(), "waddle-uaaaaaaaa-111111");
+  assert.equal(h.anyWindowOpen(), true);
+  // Two open windows = ambiguity = deny (k>1 residual)
+  h.arm("waddle-ubbbbbbbb-222222", { secret: "y" });
+  h.markWakeFired("waddle-ubbbbbbbb-222222");
+  assert.equal(h.singleOpenWindow(), null);
+  assert.equal(h.anyWindowOpen(), true);
+  // Window closed by time
+  t += 181_000;
+  assert.equal(h.singleOpenWindow(), null);
+  assert.equal(h.anyWindowOpen(), false);
+});

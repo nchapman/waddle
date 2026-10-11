@@ -35,6 +35,20 @@ export function open(key: Buffer, sealed: Buffer, aad: string): Buffer {
   return Buffer.concat([decipher.update(sealed.subarray(12, sealed.length - 16)), decipher.final()]);
 }
 
+/** Open with AAD fallbacks (v2 constant first, legacy v1 instance-bound):
+ *  throws the LAST error when every candidate fails. */
+export function openAny(key: Buffer, sealed: Buffer, aads: string[]): Buffer {
+  let lastError: unknown;
+  for (const aad of aads) {
+    try {
+      return open(key, sealed, aad);
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  throw lastError;
+}
+
 export function hmac(key: Buffer, data: string): string {
   return createHmac("sha256", key).update(data).digest("base64url");
 }

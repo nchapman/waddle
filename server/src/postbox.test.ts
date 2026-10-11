@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { sealPostbox, openPostbox, mergeSchedules, schedulableRows } from "./postbox.js";
-import { derive } from "./keys.js";
+import { derive, seal } from "./keys.js";
 import type { Schedule } from "./schedules.js";
 
 const MASTER = randomBytes(64).toString("base64");
@@ -18,41 +18,45 @@ describe("postbox key (master domain)", () => {
     // Production: index.ts seals with the raw master at re-sleep and
     // opens with the raw master at unlock. A derived key fed to either
     // side double-derives and the mail never opens — this pins that.
-    const blob = sealPostbox(MASTER, INSTANCE, { events: [], schedules: [] });
-    const back = openPostbox(MASTER, INSTANCE, blob);
+    const blob = sealPostbox(MASTER, { events: [], schedules: [] });
+    const back = openPostbox(MASTER, blob);
     assert.deepEqual(back.schedules, []);
     // And the failure mode that shipped briefly: a pre-derived key must
     // NOT open a raw-secret-sealed blob.
     const derived = derive(Buffer.from(MASTER, "base64"), "waddle/postbox").toString("base64");
-    assert.throws(() => openPostbox(derived, INSTANCE, blob));
+    assert.throws(() => openPostbox(derived, blob));
   });
 
   it("raw-secret convention: wrong master cannot open the mail", () => {
-    const blob = sealPostbox(MASTER, INSTANCE, { events: [], schedules: [] });
-    assert.throws(() => openPostbox(OTHER, INSTANCE, blob));
+    const blob = sealPostbox(MASTER, { events: [], schedules: [] });
+    assert.throws(() => openPostbox(OTHER, blob));
   });
 });
 
 describe("postbox seal/open (raw-secret convention)", () => {
   it("round-trips events + schedules", () => {
-    const blob = sealPostbox(MASTER, INSTANCE, {
+    const blob = sealPostbox(MASTER, {
       events: [{ type: "message", role: "assistant", text: "SIGN ok" }],
       schedules: [row("j1")],
     });
-    const got = openPostbox(MASTER, INSTANCE, blob);
+    const got = openPostbox(MASTER, blob);
     assert.equal(got.events.length, 1);
     assert.equal((got.events[0] as { text?: string }).text, "SIGN ok");
     assert.equal(got.schedules[0]?.id, "j1");
   });
 
   it("rejects the wrong key (rotated master cannot read old mail)", () => {
-    const blob = sealPostbox(MASTER, INSTANCE, { events: [], schedules: [] });
-    assert.throws(() => openPostbox(OTHER, INSTANCE, blob));
+    const blob = sealPostbox(MASTER, { events: [], schedules: [] });
+    assert.throws(() => openPostbox(OTHER, blob));
   });
 
-  it("rejects a blob posted for another instance (AAD binding)", () => {
-    const blob = sealPostbox(MASTER, "waddle", { events: [], schedules: [] });
-    assert.throws(() => openPostbox(MASTER, "waddle-standby-1", blob));
+  it("v2: instance is no longer the AAD — same-secret sibling machines share mail lineage", () => {
+    // v1 asserted cross-instance failure, but every machine sealed as
+    // "waddle" — the binding never separated users. v2: the master-secret
+    // key IS the boundary (wrong key still fails, above); a wake boot
+    // that hasn't learned its name must open its own mail.
+    const blob = sealPostbox(MASTER, { events: [], schedules: [] });
+    assert.deepEqual(openPostbox(MASTER, blob), { events: [], schedules: [] });
   });
 });
 
@@ -79,4 +83,20 @@ describe("schedule merge (the no-re-fire contract)", () => {
     assert.deepEqual(rows.map((r) => r.id), ["j1"]);
     assert.equal(JSON.parse(JSON.stringify(rows)).length, 1, "serializes cleanly into the credential");
   });
+});
+
+it("v2 seals are instance-free — a wake boot that hasn't learned its name still opens its mail", () => {
+  const MASTER = randomBytes(32).toString("base64");
+  const blob = sealPostbox(MASTER, { events: [], schedules: [] });
+  // The opener may still carry the baked default — v2 opens don't care.
+  assert.deepEqual(openPostbox(MASTER, blob), { events: [], schedules: [] });
+});
+
+const LEGACY_V1_AAD = `waddle-postbox-v1:${process.env.WADDLE_INSTANCE ?? "waddle"}`; // mirrors the module constant
+
+it("legacy v1 blobs (sealed instance-bound before the cutover) still open via fallback", () => {
+  const MASTER = randomBytes(32).toString("base64");
+  const key = derive(Buffer.from(MASTER, "base64"), "waddle/postbox");
+  const legacy = seal(key, Buffer.from(JSON.stringify({ events: [], schedules: [] })), LEGACY_V1_AAD).toString("base64");
+  assert.deepEqual(openPostbox(MASTER, legacy), { events: [], schedules: [] });
 });

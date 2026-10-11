@@ -473,17 +473,30 @@ app.get<{ Querystring: { instance?: string } }>("/boot/ready", async (req, reply
  *  agent boot; re-running returns the SAME token (shared identity —
  *  the machine cannot tell a reboot from a re-handshake). */
 app.post<{ Body: HandshakeRequest }>("/handshake", async (req, reply) => {
+  // CATTLE IDENTITY: the session's table key is resolved HERE, never
+  // trusted from the body. Two tiers:
+  //  - bb JWT (the unlock handshake): the caller's registry row names the
+  //    machine. A JWT holder gets rows for THEIR machine only — strictly
+  //    narrower than the shared-secret tier, so accepting JWTs here does
+  //    not re-open the fire-gate the session rule closed.
+  //  - shared secret (autonomous boot, dev): the body name is validated
+  //    against the known set; an autonomous boot passes the name its
+  //    /handoff/pull taught it (the concierge's own record).
+  const id = await verifyExternal(bearer(req));
+  if (id?.kind === "jwt") {
+    const resolved = users.rebind(id.sub);
+    if (!resolved) return reply.code(404).send({ error: "no machine for user — POST /boot first" });
+    const sessionToken = table.mintSession(resolved);
+    return { session_token: sessionToken, instance: resolved };
+  }
   const { instance } = req.body ?? {};
   if (!allowedInstance(instance)) return reply.code(403).send({ error: "instance not allowed" });
-  // SECRET-ONLY (review): the general external tier also accepts bb
-  // JWTs, but a handshake mints a session and sessions write table rows
-  // — letting any JWT holder reach /timer re-opens the decorative
-  // fire-gate the session-tier rule closed. Machines always hold the
-  // shared secret (their handshake bearer); nothing legitimate loses
-  // access. Constant-time, as everywhere the secret is compared.
+  // SECRET-ONLY fallback (review): machines always hold the shared
+  // secret (their handshake bearer); nothing legitimate loses access.
+  // Constant-time, as everywhere the secret is compared.
   if (!requireSecret(req, reply)) return reply;
   const sessionToken = table.mintSession(instance);
-  return { session_token: sessionToken };
+  return { session_token: sessionToken, instance };
 });
 
 /** The table write. Replace semantics ARE the policy:
@@ -571,11 +584,27 @@ app.post<{ Body: HandoffPullRequest }>("/handoff/pull", async (req, reply) => {
   noStore(reply);
   const res = handoff.release(instance);
   if ("notFound" in res) {
+    // CATTLE FALLBACK (k=1): a wake boot can't know its own name — it
+    // pulls under the legacy shared key. Only such a caller (a name in
+    // NO dynamic namespace) gets the fallback, and only when exactly
+    // one fire window is open anywhere — that fire's boot is this
+    // puller. Exposure is exactly today's (the legacy key was the
+    // fleet-wide key); a caller that DOES know a real name gets
+    // exact-key semantics only. k>1 ambiguity denies (platform ask).
+    const legacyCaller = !USER_NAME_RE.test(instance) && !STANDBY_NAME_RE.test(instance);
+    const open = legacyCaller ? handoff.singleOpenWindow() : null;
+    if (open) {
+      const via = handoff.release(open);
+      if (!("notFound" in via)) {
+        app.log.info({ asked: instance, serving: open }, "wake handoff pull resolved via open fire window");
+        return { credential: via.cred, instance: open };
+      }
+    }
     app.log.info({ instance, reason: res.reason }, "wake handoff pull denied");
     return reply.code(404).send({ error: `no handoff (${res.reason})` });
   }
   app.log.info({ instance, armed_ms_ago: res.armed_ms_ago, keys: Object.keys(res.cred) }, "wake handoff released to schedule-boot");
-  return { credential: res.cred };
+  return { credential: res.cred, instance };
 });
 
 /** Post a sealed blob — an autonomous machine's return mail at re-sleep.
@@ -664,7 +693,9 @@ const pool: Pool | null = POOL_CAPABLE
         // Never boot a replacement while a handoff release window is
         // open for ANY allowed instance: a replacement boot racing the
         // intended pull is the standby-steal path (SME review).
-        canFill: () => ![...ALLOWED].some((i) => handoff.windowOpen(i)),
+        // Keys are runtime-minted names (post-adoption) — a static set
+        // can't enumerate them. Any open window defers fills.
+        canFill: () => !handoff.anyWindowOpen(),
       },
     )
   : null;

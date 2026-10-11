@@ -154,6 +154,10 @@ export interface HandshakeRequest {
 }
 export interface HandshakeResponse {
   session_token: string;
+  /** The concierge-resolved machine name — the session's table key.
+   *  The machine adopts it (cattle identity: machines are shared-secret
+   *  twins; only the caller's registry row distinguishes them). */
+  instance?: string;
 }
 
 /** POST /timer — the table write. Replace semantics ARE the policy:
@@ -195,6 +199,9 @@ export interface HandoffPullRequest {
 }
 export interface HandoffPullResponse {
   credential: Record<string, unknown>;
+  /** The served row's machine name — a wake boot adopts it (it can't
+   *  know its own name; the escrow row is the concierge's own record). */
+  instance?: string;
 }
 
 /** POST /handoff/post — sealed return mail from an autonomous run. */

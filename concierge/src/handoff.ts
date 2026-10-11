@@ -81,6 +81,34 @@ export function createHandoffStore(opts: HandoffOptions = {}) {
     return fired !== undefined && now() - fired <= releaseWindowMs;
   }
 
+  /** Armed row names, EXPIRED PRUNED — the /handoff/pull k=1 fallback
+   *  resolver and the pool's fill deferral read this; the count must be
+   *  "armed NOW", not "armed ever". */
+  function armed(): string[] {
+    const live: string[] = [];
+    for (const [name, row] of rows) {
+      if (row.expiresAt <= now()) rows.delete(name);
+      else live.push(name);
+    }
+    return live;
+  }
+
+  /** Any open release window — the pool defers standby fills while one
+   *  is. Window keys are runtime-minted machine names; no static set
+   *  can enumerate them, so "any open window" is the honest form. */
+  function anyWindowOpen(): boolean {
+    return armed().some((n) => windowOpen(n));
+  }
+
+  /** The single armed row with an open fire window, or null when none
+   *  or several — the k=1 pull fallback serves ONLY an unambiguous
+   *  window; ambiguity denies (k>1 residual, gated on the platform
+   *  instance-identity ask). */
+  function singleOpenWindow(): string | null {
+    const open = armed().filter((n) => windowOpen(n));
+    return open.length === 1 ? open[0]! : null;
+  }
+
   /** One-shot release: gated on a recent fire and a live row. Returns the
    *  whole opaque payload — the concierge never looks inside it. */
   function release(instance: string): { cred: HandoffCredential; armed_ms_ago: number } | { notFound: true; reason: "no-fire" | "window" | "expired" | "absent" } {
@@ -113,6 +141,6 @@ export function createHandoffStore(opts: HandoffOptions = {}) {
     return { armed: !!row && row.expiresAt > now(), armed_ms_ago: row ? now() - row.armedAt : null };
   }
 
-  return { arm, markWakeFired, windowOpen, release, clear, status };
+  return { arm, markWakeFired, windowOpen, armed, anyWindowOpen, singleOpenWindow, release, clear, status };
 }
 
