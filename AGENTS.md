@@ -124,8 +124,10 @@
   bound is the platform clocks (standby claim-grace 12h / user 24h
   sweep). The old "waddle"-keyed rows were a silent no-op since the
   cattle rename anyway.
-- **GET /assign DELETED (v0.4.10)** — /boot owns the claim contract
-  (warm-first + claim-grace rows); the client never called /assign.
+- **GET /assign DELETED (v0.4.10)**; **POST /wake DELETED (v0.4.11)** —
+  /boot owns both contracts (discovery, warm claim, claim-grace rows,
+  userWake); the client called neither. The shim allowlist matches the
+  real route set.
 - **Client /wake + /assign 401s FIXED (v0.3.16–17)**: the external tier
   now verifies betterbase JWTs (CONCIERGE_JWKS_URL + ISSUER + AUDIENCE in
   the config, egress-allowed for the JWKS fetch — note prod tokens stamp

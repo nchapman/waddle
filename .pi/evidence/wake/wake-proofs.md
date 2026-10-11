@@ -714,3 +714,20 @@ behave as designed under v0.4.9. Approvals note: the History grep needed
 an interactive bash approval mid-turn (agent stalled on the dialog until
 approved — expected restricted-mode behavior, worth remembering for
 unattended runs: read-only bash still prompts).
+
+### Proof 11 addendum — audit fixes + drain (2026-10-11, later)
+
+Full-repo four-way audit (concierge/server/client/configs) after the
+"waddle"-name retirement found the class three more times, headline:
+fresh mints booted-but-never-unlocked had NO reap bound at all (claim
+grace rows were standby-only; the sweep's bound-skip fired before the
+quiet clocks). Fixed in concierge v0.4.11 (fresh-mint grace rows,
+unknown≠dead pool reaps, /wake + /assign fully deleted incl. shim +
+SDK types, table.forget, tier-map truth) with the client's first-load
+hydration race fixed in-tree and server env-conflation fixes staged
+for the next machine release. Standby-3 was manually drained at
+16:07Z (pre-TTL) rather than letting the watcher observe the TTL fire
+— the TTL mechanics remain unit-proven; platform returned to
+concierge-only + one sleeping user machine. Both release workflows now
+refuse broken digest pins (v0.0.52's empty digest was caught pre-deploy
+same day; strike-three prevention).
