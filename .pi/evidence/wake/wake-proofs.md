@@ -646,3 +646,34 @@ step 4 (delete the legacy fallback + the hardcoded primary).
 **Also observed:** the reload's /boot is shadowed while the primary
 answers unlocked (the client skips discovery when the enclave answers)
 — step 4 removes the shadow.
+
+## Proof 10 — the greenfield chain, end to end (2026-10-11 05:00–05:05Z, v0.0.51 / concierge v0.4.7)
+
+No fallbacks anywhere in this chain — every leg is the cattle path:
+
+1. **Pure discovery boot**: page load with no machine (activeEnclave
+   empty — no baked URL exists anymore) → discovery → `/boot` → rebind
+   `waddle-ud3b16438-777d2b`.
+2. **The stale-tag gate, live**: the machine was Running at v0.0.50
+   against the v0.0.51 signed release — the client had refused it
+   ("Code measurement mismatch", an unrecoverable dead end pre-v0.4.7:
+   /boot handed the stale machine back forever). v0.4.7's gate caught
+   it and ran the treadmill dance (stop → settle → deploy --tag
+   v0.0.51). First attempt hit the Stopping-race (502, recovered on
+   the settled retry — redeploy now settle-waits).
+3. **Readiness → attestation → TOFU re-pin** (v0.0.51's measurement) →
+   lock screen.
+4. **Fresh-enrollment unlock with the stored secret**: shelf restore of
+   the proof-6 session (the cattle state model — a blank machine
+   becomes yours by restoring your store), stream live.
+5. **The fail-closed identity handshake, proven**: the machine's ring
+   logs `"ok":true,"via":"jwt"` — a line that can only exist when the
+   client-presented name (derived from the enclave URL) EQUALS the
+   user's registry row. presented ≡ registry → session minted for the
+   real machine → adopted. The proof-9 tier-mix class is structurally
+   dead: no fallback path exists to carry a JWT onto the wrong machine,
+   and a mismatched name is a 409, not a silent mis-binding.
+
+Also proven tonight by absence: the primary stopped itself on the idle
+gate (unlocked-then-abandoned at 04:15, reaped ~10.5 min later) and
+nothing in the client ever noticed — it has no path to the primary.

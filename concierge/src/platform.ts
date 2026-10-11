@@ -281,6 +281,16 @@ export function createPlatform(opts: {
    *  polling (its zombie path). */
   async function redeploy(instance: string): Promise<string> {
     await rest(instance).catch(() => undefined);
+    // Settle: the platform accepts deploy only once the stop has LANDED
+    // (live-caught: deploy at "Stopping" 502s with a different error than
+    // start()'s zombie-retry matches). Bounded wait, then start() owns
+    // any residual race.
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      const st = (await listRows().catch(() => new Map<string, { status?: string }>())).get(instance)?.status;
+      if (st === "Stopped" || st === undefined) break;
+      await new Promise((r) => setTimeout(r, 3_000));
+    }
     return start(instance);
   }
 
