@@ -109,8 +109,7 @@ export class Lock {
     }
     return true;
   }
-
-  }
+}
 
 export function freshNonce(): string {
   return randomBytes(16).toString("base64");

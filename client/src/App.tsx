@@ -35,9 +35,6 @@ import { DEV, ENCLAVE_URL, CONFIG_REPO, BB_CLIENT_ID, BB_DOMAIN, ZONE } from "./
 import { eventsToRows, rowsToUIMessages, toolStartRow, toolEndRow, approvalRow, historyRow, type ChatMessage } from "./lib/history";
 import { pollUntilHealthy, bootInstance, pollBootReady } from "./lib/concierge";
 
-/** The machine this session talks to: the primary, or a warm standby
- *  handed out by the concierge's pool (same config repo → same
- *  measurement → the TOFU pin travels with it). */
 /** The machine /boot gave us — the ONLY live enclave target (no baked
  *  URL: a hardcoded primary was the tier-mix root, proof 9). */
 let activeEnclave = DEV ? ENCLAVE_URL : "";
@@ -94,7 +91,7 @@ export function App() {
   bbLoadingRef.current = bb.isLoading;
   // Same for the session object: `run`'s empty-deps closure would otherwise
   // pin a first-render null forever — concierge auth would silently fall
-  // back to the shared secret on every auto-wake/assign.
+  // back to the shared secret on every auto-boot.
   const bbSessionRef = useRef(bb.session);
   bbSessionRef.current = bb.session;
   const conciergeAuth = useCallback(
@@ -137,65 +134,62 @@ export function App() {
       else setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: "compose stack not answering — docker compose up?" } : st));
       return;
     }
-    {
-      // Wait for the betterbase session to hydrate (audit critical):
-      // App's mount effect runs BEFORE AuthProvider's restore, so a
-      // first-load /boot would deterministically fire with no token and
-      // die on "no betterbase session" while the footer says connected.
-      // Same ≤3s settle doUnlock uses for the identical race.
-      if (bbLoadingRef.current) {
-        await new Promise<void>((resolve) => {
-          const settle = () => {
-            clearInterval(poll);
-            clearTimeout(t);
-            resolve();
-          };
-          const t = setTimeout(settle, 3_000);
-          const poll = setInterval(() => {
-            if (!bbLoadingRef.current) settle();
-          }, 100);
-        });
-      }
-      const booted = await bootInstance(conciergeAuth, 300_000, undefined, machineDiedRef.current);
-      if (booted.ok && booted.url) {
-        discoveryTriedRef.current = true;
-        machineDiedRef.current = false;
-        activeEnclave = booted.url;
-        // Waking: poll the CONCIERGE for readiness — never the machine
-        // (its record may not exist yet; an early query poisons the
-        // browser's resolver for 30min). Ready → the record is live →
-        // the agent poll below is safe (failures are refusals, not
-        // NXDOMAIN — nothing cacheable-negative).
-        const ready = booted.waking && booted.instance
-          ? await pollBootReady(conciergeAuth, booted.instance, 90, (i) =>
-              setState((st) => (st.phase === "asleep" ? { ...st, note: `waiting for the enclave… (${i})` } : st)),
-            )
-          : true;
-        const healthy = ready
-          ? await pollUntilHealthy(activeEnclave, 30, (i) =>
-              setState((st) => (st.phase === "asleep" ? { ...st, note: `waking the agent… (${i})` } : st)),
-            )
-          : false;
-        if (healthy) {
-          void run();
-          return;
-        }
-        machineDiedRef.current = true; // never reached health — assume the worst for the next wake
-        setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: "gave up waiting — try again" } : st));
+    // Wait for the betterbase session to hydrate (audit critical):
+    // App's mount effect runs BEFORE AuthProvider's restore, so a
+    // first-load /boot would deterministically fire with no token and
+    // die on "no betterbase session" while the footer says connected.
+    // Same ≤3s settle doUnlock uses for the identical race.
+    if (bbLoadingRef.current) {
+      await new Promise<void>((resolve) => {
+        const settle = () => {
+          clearInterval(poll);
+          clearTimeout(t);
+          resolve();
+        };
+        const t = setTimeout(settle, 3_000);
+        const poll = setInterval(() => {
+          if (!bbLoadingRef.current) settle();
+        }, 100);
+      });
+    }
+    const booted = await bootInstance(conciergeAuth, 300_000, undefined, machineDiedRef.current);
+    if (booted.ok && booted.url) {
+      discoveryTriedRef.current = true;
+      machineDiedRef.current = false;
+      activeEnclave = booted.url;
+      // Waking: poll the CONCIERGE for readiness — never the machine
+      // (its record may not exist yet; an early query poisons the
+      // browser's resolver for 30min). Ready → the record is live →
+      // the agent poll below is safe (failures are refusals, not
+      // NXDOMAIN — nothing cacheable-negative).
+      const ready = booted.waking && booted.instance
+        ? await pollBootReady(conciergeAuth, booted.instance, 90, (i) =>
+            setState((st) => (st.phase === "asleep" ? { ...st, note: `waiting for the enclave… (${i})` } : st)),
+          )
+        : true;
+      const healthy = ready
+        ? await pollUntilHealthy(activeEnclave, 30, (i) =>
+            setState((st) => (st.phase === "asleep" ? { ...st, note: `waking the agent… (${i})` } : st)),
+          )
+        : false;
+      if (healthy) {
+        void run();
         return;
       }
-      // Discovery is the ONLY live path (no legacy primary fallback — the
-      // fallback was the tier-mix bug: a bb JWT on the primary taught it a
-      // dead sibling's name, proof 9). A /boot failure means what it says:
-      // no session is a dead end; anything else (concierge down, refused,
-      // out-of-zone) is an honest operator-visible error.
-      if (booted.detail?.startsWith("no betterbase session")) {
-        setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: booted.detail } : st));
-        return;
-      }
-      setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: booted.detail ?? "boot failed" } : st));
+      machineDiedRef.current = true; // never reached health — assume the worst for the next wake
+      setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: "gave up waiting — try again" } : st));
       return;
     }
+    // Discovery is the ONLY live path (no legacy primary fallback — the
+    // fallback was the tier-mix bug: a bb JWT on the primary taught it a
+    // dead sibling's name, proof 9). A /boot failure means what it says:
+    // no session is a dead end; anything else (concierge down, refused,
+    // out-of-zone) is an honest operator-visible error.
+    if (booted.detail?.startsWith("no betterbase session")) {
+      setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: booted.detail } : st));
+      return;
+    }
+    setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: booted.detail ?? "boot failed" } : st));
   }
 
   const run = useCallback(async () => {
@@ -218,7 +212,7 @@ export function App() {
     } catch (e) {
       // Auto-wake only on genuine unreachability: a network-level probe of
       // /health. Attestation/config failures with a live enclave go to the
-      // error screen — waking can't help those (and a spurious /wake would
+      // error screen — waking can't help those (and a spurious /boot would
       // stop-and-redeploy a healthy machine via zombie recovery).
       if (!DEV && !discoveryTriedRef.current) {
         // Auto-retry on NO machine yet (first load — nothing to verify)

@@ -15,10 +15,12 @@ export class EventLog {
   private seq = 0;
   private file: string;
 
-  /** `fileName` separates key domains over one volume: the user's log is
-   *  master-sealed; an autonomous session's log is subkey-sealed and MUST
-   *  not touch the same file (a dev-persisted volume would otherwise try
-   *  to read master-sealed lines with the subkey and crash the boot). */
+  /** `fileName` separates key domains over one volume: two logs sealed
+   *  under different keys MUST not share a file (a restored volume would
+   *  try to read one domain's lines with the other key and crash the
+   *  boot). Today every session — attended or autonomous — seals with
+   *  the master-derived key and uses the default name; the seam stays
+   *  for any future key-domain split (and its test). */
   constructor(
     private logKey: Buffer,
     private storage: "disk" | "memory" = "disk",

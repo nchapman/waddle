@@ -16,8 +16,9 @@ import { EventLog } from "./log.js";
 import { initAgent, chat, agentReady, stageSessionJsonl, stageHistoryRows, setBlackbox, setSink, getSessionJsonl } from "./agent.js";
 import { resolveApproval, denyAllPending, setOutcomeEmitter } from "./approvals.js";
 import { setBrowserEvents, browserLive, captureNow, userInput, releaseUserControl, setControlNotifier, stopBrowser } from "./browser.js";
-// (createArchive/restoreArchive live behind bb-backup.ts now; the old
-// debug GET /archive is gone — machine bytes never travel unsealed)
+// (Machine backup is bb-backup.ts + archive.ts — the enclave shelves
+// itself over betterbase; the old debug GET /archive is gone, machine
+// bytes never travel unsealed)
 import { setBbGrant, clearBbGrant, bbGrantActive, pushMachineBackup, pullMachineBackup, pruneOldGens } from "./bb-backup.js";
 import { createSchedule, listSchedules, cancelSchedule, markRun, dueSchedules, dueSoon, activeSchedules, nextDueMs, replaceAllSchedules, seedSchedules, type Schedule } from "./schedules.js";
 import { handshakeConcierge, conciergeActive, renewIdleStop, deathFlare, writeTimer, armHandoff, pullHandoff, postPostbox, pullPostbox, currentInstance, UNADOPTED } from "./concierge.js";
@@ -236,11 +237,6 @@ app.get("/probe", async () => {
   };
 });
 
-// The whole-machine backup: opaque tar.gz of the working directory.
-// GET (session-gated) for the client's sleep/periodic shelf-run; POST
-// (session-gated, fresh-log-only) restores a machine before anything
-// boots. The client is a pipe — it never opens the blob.
-app.addContentTypeParser("application/octet-stream", { parseAs: "buffer" }, (_req, body, done) => done(null, body));
 app.post("/unlock", async (request, reply) => {
   const { secret, nonce, inferenceKey, bb, background, instance } = (request.body ?? {}) as UnlockRequest;
   if (!secret || !nonce) return reply.code(400).send({ error: "secret and nonce required" });

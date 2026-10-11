@@ -1,9 +1,9 @@
 /**
- * Concierge calls: wake / standby-assign / health-poll. Pure async
- * functions — App supplies the auth token thunk (the betterbase session
- * hydrates async; a first-render closure would pin a dead null forever).
- * Auth prefers the betterbase session token (the TEE'd concierge verifies
- * it); dev falls back to the shared-secret env.
+ * Concierge calls: /boot discovery, readiness polls, health polls. Pure
+ * async functions — App supplies the auth token thunk (the betterbase
+ * session hydrates async; a first-render closure would pin a dead null
+ * forever). Auth prefers the betterbase session token (the TEE'd
+ * concierge verifies it); dev falls back to the shared-secret env.
  */
 import { CONCIERGE_TOKEN, CONCIERGE_URL, ZONE } from "./config";
 

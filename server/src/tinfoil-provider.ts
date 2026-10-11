@@ -51,27 +51,27 @@ const MODELS: {
 export let factoryError: string | null = null;
 
 export default async function tinfoilProvider(pi: ExtensionAPI): Promise<void> {
- try {
-  const secureClient = new SecureClient();
-  await secureClient.ready(); // loud: boot dies with the verification error
-  const resolved = secureClient.getBaseURL();
-  if (!resolved) throw new Error("SecureClient: no base URL after verification");
-  const baseUrl = resolved.replace(/\/+$/, "");
+  try {
+    const secureClient = new SecureClient();
+    await secureClient.ready(); // loud: boot dies with the verification error
+    const resolved = secureClient.getBaseURL();
+    if (!resolved) throw new Error("SecureClient: no base URL after verification");
+    const baseUrl = resolved.replace(/\/+$/, "");
 
-  const base = openAICompletionsApi();
-  const simple = base.streamSimple;
-  if (!simple) throw new Error("openAICompletionsApi: no streamSimple");
-  pi.registerProvider("tinfoil", {
-    baseUrl,
-    apiKey: "$TINFOIL_API_KEY",
-    api: "openai-completions",
-    models: [...MODELS],
-    streamSimple: (model, context, options) =>
-      lazyStream(model, async () =>
-        simple(model, context, { ...options, fetch: secureClient.fetch }),
-      ),
-  });
- } catch (e) {
-  factoryError = e instanceof Error ? `${e.message}\n${e.stack ?? ""}`.slice(0, 800) : String(e);
- }
+    const base = openAICompletionsApi();
+    const simple = base.streamSimple;
+    if (!simple) throw new Error("openAICompletionsApi: no streamSimple");
+    pi.registerProvider("tinfoil", {
+      baseUrl,
+      apiKey: "$TINFOIL_API_KEY",
+      api: "openai-completions",
+      models: [...MODELS],
+      streamSimple: (model, context, options) =>
+        lazyStream(model, async () =>
+          simple(model, context, { ...options, fetch: secureClient.fetch }),
+        ),
+    });
+  } catch (e) {
+    factoryError = e instanceof Error ? `${e.message}\n${e.stack ?? ""}`.slice(0, 800) : String(e);
+  }
 }

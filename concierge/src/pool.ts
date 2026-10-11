@@ -63,7 +63,7 @@ export interface PoolConfig {
 }
 
 export interface Pool {
-  /** A user just used the service (/boot, /wake) — (re)arm warmth for
+  /** A user just used the service (/boot) — (re)arm warmth for
    *  the next TTL window. With no demand inside a TTL, the pool stays
    *  EMPTY (scale-to-0): idle time burns nothing but the concierge. */
   markDemand(): void;

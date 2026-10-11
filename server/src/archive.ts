@@ -139,11 +139,9 @@ export function createArchive(withoutBrowser = false): Archive {
   throw new Error("archive: unreachable");
 }
 
-/**
- * Validate + restore an archive into the working directory, replacing what
- * is there (bb-backup calls this only onto a fresh enclave — the wipe is
- * the point: the machine comes back exactly as it went down).
- */
+/** Decode the zstd'd tar body (the pack path's mirror). Throws on a
+ *  non-zstd body. (The decoded tar goes through a temp FILE downstream,
+ *  not stdin — macOS bsdtar cannot pipe through stdin reliably.) */
 function detarBody(body: Buffer): Buffer {
   // Slots are zstd'd tar — the pack path's mirror. The body goes
   // through a temp FILE, not stdin — macOS bsdtar cannot pipe through
@@ -157,6 +155,9 @@ function detarBody(body: Buffer): Buffer {
   return dec.stdout;
 }
 
+/** Validate + restore an archive into the working directory, replacing
+ *  what is there (callers restore only onto a fresh enclave — the wipe is
+ *  the point: the machine comes back exactly as it went down). */
 export function restoreArchive(body: Buffer): { files: number } {
   // The slot lands in DATA_DIR, never os.tmpdir(): tinfoil mounts /tmp
   // read-only, and a restore that can't stage its slot dies with EROFS

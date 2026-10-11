@@ -10,7 +10,7 @@
  *                   (its own checkpoint-exit already happened; this is the
  *                   platform-level stop that ends billing + zombie state)
  *   scheduled work→ agent writes a wake row (one-shot, job-keyed)
- *   user appears  → client calls the one immediate verb: /wake
+ *   user appears  → client POSTs /boot (discovery: ensure MY machine)
  *
  * Memory-only by design: a reboot wipes every row and every session token
  * (death is the strongest revocation). Clients/agents heal by
@@ -113,9 +113,9 @@ const USER_NAME_RE = userNameRe();
 
 // ── Platform verbs (the only shell-outs live in platform.ts) ────────────
 
-/** The tag every deploy boots — the pool's tag by default, so /wake and
- *  standby creates can never skew from what the client verifies (latest
- *  release of the config repo). */
+/** The tag every deploy boots — the pool's tag by default, so /boot
+ *  deploys and standby creates can never skew from what the client
+ *  verifies (latest release of the config repo). */
 const DEPLOY_TAG = process.env.CONCIERGE_DEPLOY_TAG ?? (STANDBY_CONFIG_TAG || "");
 const platform = createPlatform({
   backend: BACKEND as "docker" | "tinfoil",
@@ -203,9 +203,6 @@ const wakeRetries = new Map<string, number>();
 function bearer(req: { headers: { authorization?: string } }): string | undefined {
   return req.headers.authorization?.replace(/^Bearer\s+/i, "");
 }
-
-/** Verify a betterbase JWT or the shared secret — the external tier,
- *  factored into auth.ts (tested there). */
 
 function allowedInstance(instance: string | undefined): instance is string {
   if (typeof instance !== "string") return false;

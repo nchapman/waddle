@@ -1,11 +1,11 @@
 /**
  * The postbox — memory-only return mail for unattended runs.
  *
- * An autonomous machine (schedule-boot, subkey-unlocked) cannot push its
- * transcript to the user's shelf: the shelf path needs a betterbase grant
- * that only a client unlock supplies. So at re-sleep it drops a SEALED
- * blob here — the machine that finds it is the one holding the key
- * (any unlock derives it: master → autonomy subkey → postbox key). The
+ * An autonomous machine (schedule-boot, unlocked from the escrowed master
+ * secret) cannot push its transcript to the user's shelf: the shelf path
+ * needs a betterbase grant that only a client unlock supplies. So at
+ * re-sleep it drops a SEALED blob here — the machine that finds it is the
+ * one holding the key (any unlock derives it: master → postbox key). The
  * concierge stores ciphertext only; AEAD integrity binds instance + tag.
  *
  * Delivery is pull-and-clear at the next unlock. Nothing persists: a

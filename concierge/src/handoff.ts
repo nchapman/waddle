@@ -19,9 +19,11 @@
 
 /** The escrowed payload is an opaque bag — the concierge never
  *  interprets key material. Today the machine arms
- *  `{ autonomyKey, schedules[] }`: a schedule-scoped derived key (never
- *  the master secret) plus the due work itself (every deploy is a fresh
- *  volume, so the credential carries what the boot must run). */
+ *  `{ secret, schedules[], snapshot? }`: the master secret (full
+ *  delegation, per the warned background-tasks opt-in), the due work
+ *  itself (every deploy is a fresh volume, so the credential carries
+ *  what the boot must run), and a sealed whole-machine snapshot so the
+ *  boot restores its state before running. */
 export type HandoffCredential = Record<string, unknown>;
 
 interface HandoffRow {

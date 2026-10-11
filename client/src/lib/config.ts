@@ -22,9 +22,9 @@ export const ZONE = (() => {
     return "";
   }
 })();
-/** Concierge bearer for the wake/assign verbs. DEV-only: dev parity
- *  runs against a local concierge whose token is public by nature
- *  (compose `devsecret`). Live builds compile NOTHING — the shared
+/** Concierge bearer for the dev verbs (/boot, /boot/ready). DEV-only:
+ *  dev parity runs against a local concierge whose token is public by
+ *  nature (compose `devsecret`). Live builds compile NOTHING — the shared
  *  secret must never ride the browser bundle; live auth is the
  *  betterbase JWT (see lib/concierge.ts). */
 export const CONCIERGE_TOKEN = DEV ? (env.VITE_CONCIERGE_TOKEN ?? "devsecret") : "";

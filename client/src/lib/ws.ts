@@ -22,7 +22,7 @@ export function connectChat(
   const socket = new WebSocket(wsURL);
   // Replay guard: events before replay_done are history. Sleep events in the
   // backlog are records of past naps — reacting to them would re-sleep a
-  // freshly woken enclave (and re-fire the stop relay).
+  // freshly woken enclave.
   let replayed = false;
   socket.onmessage = (msg) => {
     const event = JSON.parse(String(msg.data)) as ServerEvent;

@@ -10,6 +10,7 @@
  * The gate pauses the turn: pi's tool_call handler awaits our promise,
  * which the browser resolves (or the timeout denies).
  */
+import { resolve } from "node:path";
 
 export interface ApprovalRequest {
   type: "approval_request";
@@ -29,13 +30,11 @@ export interface ApprovalOutcome {
 
 type Emit = (event: ApprovalRequest | (ApprovalOutcome & { at: string })) => void;
 
-// requestApproval signature keeps tool; the pending map stores it for outcomes.
-
-import { resolve } from "node:path";
-
 const WORKSPACE = resolve(process.env.DATA_DIR ?? "/tmp/waddle-data", "workspace");
 const TIMEOUT_MS = 180_000;
 
+// The pending map keeps the tool name so approval outcomes can report
+// which verb was decided (and the timer so a resolved call stops it).
 const pending = new Map<string, { tool: string; resolve: (ok: boolean) => void; timer: ReturnType<typeof setTimeout> }>();
 let emit: Emit = () => undefined;
 
