@@ -238,8 +238,11 @@ export interface BootResponse {
  *  CONCIERGE (always-on, its name never poisoned) instead of the booting
  *  machine: the browser must not query the machine's name until the
  *  record is live, or it poisons its own resolver for the negative TTL.
- *  200 = the machine is Running AND its DNS resolves AND its /health
- *  answers (concierge-side, cache-free); 503 = not yet. */
+ *  200 = the machine is Running (tinfoil) AND its DNS resolves
+ *  (concierge-side, cache-free c-ares); 503 = not yet. The /health
+ *  reachability check is deliberately NOT here — the concierge's egress
+ *  cannot reach instance hosts; the client does it once the record is
+ *  live, when a failure is a refusal, never a cacheable NXDOMAIN. */
 export interface BootReadyResponse {
   instance: string;
   ready: boolean;

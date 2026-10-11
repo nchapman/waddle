@@ -30,6 +30,13 @@ function rand6(): string {
 }
 
 export interface UserMachines {
+  /** Retire a name permanently (this process): the platform scan must
+   *  not resurrect it via adopt — a fresh-mint retire is exactly the
+   *  "browser cache holds this name dead" case. Memory-only; after a
+   *  concierge restart the map (which points at the NEW machine)
+   *  dominates rebind, so a resurrected old name is at worst a second
+   *  restart away — k=1 residue, documented. */
+  retire(name: string): void;
   /** The user's current machine, minted if none is bound. Records the
    *  name in the known-set (the namespace authority for
    *  allowedInstance/sweep) even on a rebind of an adopted name. */
@@ -51,8 +58,14 @@ export interface UserMachines {
 export function createUserMachines(): UserMachines {
   const map = new Map<string, string>(); // sub -> current machine name
   const known = new Set<string>();
+  const retired = new Set<string>();
   const re = userNameRe();
   return {
+    retire(name: string): void {
+      retired.add(name);
+      known.delete(name);
+      for (const [sub, n] of map) if (n === name) map.delete(sub);
+    },
     bind(sub: string): string {
       const existing = map.get(sub);
       if (existing && known.has(existing)) return existing;
@@ -60,7 +73,7 @@ export function createUserMachines(): UserMachines {
       let name = existing; // stale-but-known? mint fresh; names are cattle
       do {
         name = `${prefix}${rand6()}`;
-      } while (known.has(name));
+      } while (known.has(name) || retired.has(name));
       map.set(sub, name);
       known.add(name);
       return name;
@@ -85,7 +98,7 @@ export function createUserMachines(): UserMachines {
     adopt(names: Iterable<string>): number {
       let n = 0;
       for (const name of names) {
-        if (re.test(name) && !known.has(name)) {
+        if (re.test(name) && !known.has(name) && !retired.has(name)) {
           known.add(name);
           n++;
         }

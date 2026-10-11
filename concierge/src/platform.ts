@@ -4,7 +4,7 @@
  * Backends are ~25 lines each by design: a seam, not a code fork.
  */
 import { execFile } from "node:child_process";
-import { resolve4 } from "node:dns/promises";
+import { resolve4 as realResolve4 } from "node:dns/promises";
 import { promisify } from "node:util";
 
 /** One shell-out. Injectable so tests pin the CLI-output contracts. */
@@ -69,6 +69,9 @@ export function createPlatform(opts: {
   deployTag?: string;
   exec?: Exec;
   probe?: Probe;
+  /** Override the DNS lookup (tests); default is c-ares resolve4 —
+   *  cache-free, unlike getaddrinfo. */
+  resolve?: (host: string) => Promise<string[]>;
   /** The zone instance domains live under (INSTANCE_DOMAIN_BASE) — the
    *  probe fallback when a `container list` row lacks its DOMAIN column. */
   domainBase?: string;
@@ -76,6 +79,7 @@ export function createPlatform(opts: {
   const { backend, deployTag } = opts;
   const exec = opts.exec ?? realExec;
   const probe = opts.probe ?? realProbe;
+  const resolve4 = opts.resolve ?? realResolve4;
   const domainBase = opts.domainBase ? opts.domainBase.replace(/^\.+/, "") : "";
 
   if (backend === "docker") {
@@ -229,9 +233,11 @@ export function createPlatform(opts: {
   }
 
   /** Distinguish "the record is not there" (ENOTFOUND/ENODATA — keep
-   *  waiting) from "I cannot ask" (resolver unreachable — the runtime
-   *  egress allowlist may not carry DNS; treat as live and let the
-   *  platform's Running status carry the signal). */
+   *  waiting) from "I cannot ask" (transient resolver codes — EAI_AGAIN,
+   *  ETIMEOUT, ECONNREFUSED — the runtime egress allowlist may not carry
+   *  DNS; treat as live and let the platform's Running status carry the
+   *  signal). Any OTHER code is also fail-open — a fail-closed gate on
+   *  an unexpected error bricks every boot. */
   async function dnsLive(host: string): Promise<boolean> {
     try {
       return (await resolve4(host)).length > 0;

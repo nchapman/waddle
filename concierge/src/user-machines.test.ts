@@ -72,3 +72,15 @@ test("rebind prefers the MAP: a claimed standby stays the user's machine across 
   reborn.adopt([name]);
   assert.equal(reborn.rebind("user-2"), name);
 });
+
+test("retire tombstones a name — the platform scan cannot resurrect it into rebind", async () => {
+  const users = createUserMachines();
+  const name = users.bind("user-1");
+  users.retire(name);
+  assert.equal(users.adopt([name]), 0, "retired names are not adopted back");
+  assert.equal(users.rebind("user-1"), null);
+  const fresh = users.bind("user-1");
+  assert.notEqual(fresh, name);
+  // and mint never collides with the tombstone
+  assert.ok(!users.known().has(name));
+});

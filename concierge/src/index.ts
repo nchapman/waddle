@@ -357,7 +357,8 @@ app.post<{ Body: BootRequest }>("/boot", async (req, reply) => {
   if (wantFresh) {
     const old = users.rebind(sub);
     if (old) {
-      users.forget(old);
+      users.retire(old); // tombstoned — the platform scan must not resurrect it
+      void platform.rest(old).catch(() => undefined); // blank machine; nothing to keep
       app.log.info({ user: hashSub(sub), instance: old }, "boot: fresh requested — old name retired");
     }
   }
@@ -400,8 +401,8 @@ app.post<{ Body: BootRequest }>("/boot", async (req, reply) => {
     // machine is browser-unreachable for 30min from its own boot polls
     // (caught live 01:5xZ). Timeout still responds waking (honest — the
     // machine boots; a rare cert stall just means a slower client poll).
-    const running = await platform.waitRunning(name, 240_000);
-    const dns = running ? await platform.awaitDns(`${name}.${DOMAIN_BASE}`, 120_000) : false;
+    const running = await platform.waitRunning(name, 180_000);
+    const dns = running ? await platform.awaitDns(`${name}.${DOMAIN_BASE}`, 25_000) : false;
     app.log.info({ user: hashSub(sub), instance: name, running, dns }, "boot: fresh machine created");
     return reply.code(202).send({
       instance: name,
@@ -442,8 +443,12 @@ app.get<{ Querystring: { instance?: string } }>("/boot/ready", async (req, reply
   if (!(await requireExternal(req, reply))) return reply;
   const { instance } = req.query ?? {};
   if (!instance || !allowedInstance(instance)) return reply.code(403).send({ error: "instance not allowed" });
-  const st = (await platform.statuses().catch(() => new Map())).get(instance);
-  if (st !== "Running") return reply.code(503).send({ instance, ready: false, why: "status" });
+  // docker has no status feed (statuses() is empty) — discovery there is
+  // dev-parity only; treat the machine as running once asked.
+  if (BACKEND === "tinfoil") {
+    const st = (await platform.statuses().catch(() => new Map())).get(instance);
+    if (st !== "Running") return reply.code(503).send({ instance, ready: false, why: "status" });
+  }
   // NO /health probe leg: the concierge's egress cannot reach instance
   // hosts (firewall model — hostname allowlists can't express them). The
   // client probes /health itself once ready — by then the record is live,

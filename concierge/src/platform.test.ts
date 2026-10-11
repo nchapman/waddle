@@ -30,7 +30,8 @@ const tinfoil = (
   exec: Exec,
   deployTag = "v1",
   probe?: (url: string, timeoutMs: number) => Promise<boolean>,
-) => createPlatform({ backend: "tinfoil", deployTag, exec, probe });
+  resolve?: (host: string) => Promise<string[]>,
+) => createPlatform({ backend: "tinfoil", deployTag, exec, probe, resolve });
 
 test("statuses parses `container list` (header skipped, name → status)", async () => {
   const { exec } = fakeExec([{ args: ["container", "list"], stdout: LIST_OUTPUT }]);
@@ -231,4 +232,27 @@ test("waitRunning times out honestly (false — the machine still boots)", async
   const exec: Exec = async (_c, args) =>
     args[1] === "list" ? { stdout: LIST_OUTPUT.replace("Running", "Starting") } : { stdout: "ok" };
   assert.equal(await tinfoil(exec).waitRunning("waddle", 1), false);
+});
+
+test("awaitDns: NXDOMAIN keeps waiting; a resolving host returns immediately", async () => {
+  const codes: (string | undefined)[] = ["ENOTFOUND", "ENODATA", "ENOTFOUND"];
+  const { exec } = fakeExec([]);
+  const p = tinfoil(exec, "v1", async () => true, async (host) => {
+    if (host === "live.example.dev") return ["1.2.3.4"];
+    const code = codes.shift();
+    throw Object.assign(new Error("dns"), { code });
+  });
+  void p;
+  assert.equal(await p.awaitDns("live.example.dev", 1_000), true);
+  assert.equal(await p.awaitDns("dead.example.dev", 1), false, "NXDOMAIN never counts as live");
+});
+
+test("awaitDns: resolver-unreachable (transient codes) fails OPEN — Running carries the signal", async () => {
+  for (const code of ["EAI_AGAIN", "ETIMEOUT", "ECONNREFUSED", "something-new"]) {
+    const { exec } = fakeExec([]);
+    const p = tinfoil(exec, "v1", async () => true, async () => {
+      throw Object.assign(new Error("dns"), { code });
+    });
+    assert.equal(await p.awaitDns("x.example.dev", 1), true, `${code} cannot-tell → open`);
+  }
 });
