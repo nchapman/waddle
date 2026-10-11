@@ -194,7 +194,11 @@ closed — no bb changes.
   shared secret as identity proxy, shared "waddle" instance name,
   poison-arm overwrite, captured-release-is-the-secret; /handshake→/timer
   stays open to secret-holders until then.
-- User decisions pending: pool overnight economics (one warm standby always
-  burning); restricted-mode scope for real scheduled work (read-only proven
-  live — browser? with which approvals? still open); optional
-  CONCIERGE_SHARED_SECRET rotation.
+- User decisions pending: restricted-mode scope for real scheduled work
+  (read-only proven live — browser? with which approvals? still open);
+  optional CONCIERGE_SHARED_SECRET rotation.
+- ~~Pool overnight economics~~ DECIDED (v0.4.9): scale-to-0. Warmth is
+  demand-gated — /boot//wake//assign stamp demand; standbys exist only
+  inside STANDBY_TTL_MS (1h) after real use. Cold start fills nothing;
+  an idle hour drains the pool to zero and it stays there. /health
+  `demand_ms_ago` (null = never) makes an empty pool legible.
