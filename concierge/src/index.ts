@@ -37,6 +37,7 @@ import type {
   PostboxPullRequest,
   TimerRequest,
   WakeRequest,
+  BootRequest,
 } from "@waddle/sdk";
 import pkg from "../package.json" with { type: "json" };
 import { createTable } from "./table.js";
@@ -345,9 +346,21 @@ async function createInstance(name: string): Promise<void> {
  *  warm standby (seconds to live), then boots fresh (~90s). Later boots
  *  return the existing machine, ensured (user mode: a healthy Running
  *  machine is never stopped; a stopped one deploys). */
-app.post("/boot", async (req, reply) => {
+app.post<{ Body: BootRequest }>("/boot", async (req, reply) => {
   const sub = await requireJwtUser(req, reply);
   if (sub === null) return reply;
+  // Observed-death wake: the client watched the old machine stop — its
+  // name is dead weight in browser caches for up to the negative TTL;
+  // a fresh mint sidesteps the poison entirely (blank machines are
+  // cattle; the shelf holds all state).
+  const wantFresh = req.body?.fresh === true;
+  if (wantFresh) {
+    const old = users.rebind(sub);
+    if (old) {
+      users.forget(old);
+      app.log.info({ user: hashSub(sub), instance: old }, "boot: fresh requested — old name retired");
+    }
+  }
   // Warm-first: a pool standby is already booted and measured — claiming
   // one saves the ~90s deploy. Same claim-grace contract as /assign: a
   // claimed machine the user abandons dies within grace, not the pool TTL.
@@ -388,7 +401,8 @@ app.post("/boot", async (req, reply) => {
     // (caught live 01:5xZ). Timeout still responds waking (honest — the
     // machine boots; a rare cert stall just means a slower client poll).
     const running = await platform.waitRunning(name, 240_000);
-    app.log.info({ user: hashSub(sub), instance: name, running }, "boot: fresh machine created");
+    const dns = running ? await platform.awaitDns(`${name}.${DOMAIN_BASE}`, 120_000) : false;
+    app.log.info({ user: hashSub(sub), instance: name, running, dns }, "boot: fresh machine created");
     return reply.code(202).send({
       instance: name,
       url: `https://${name}.${DOMAIN_BASE}`,
@@ -404,8 +418,9 @@ app.post("/boot", async (req, reply) => {
   if (POOL_ENABLED && pool && STANDBY_NAME_RE.test(name)) table.setStop(name, CLAIM_GRACE_MS);
   try {
     const detail = await platform.ensure(name);
+    const dns = await platform.awaitDns(`${name}.${DOMAIN_BASE}`, 120_000).catch(() => false);
     const running = detail.startsWith("already running");
-    app.log.info({ user: hashSub(sub), instance: name, detail }, "boot");
+    app.log.info({ user: hashSub(sub), instance: name, detail, dns }, "boot");
     return reply.code(running ? 200 : 202).send({
       instance: name,
       url: `https://${name}.${DOMAIN_BASE}`,
@@ -415,6 +430,27 @@ app.post("/boot", async (req, reply) => {
   } catch (e) {
     return reply.code(502).send({ error: e instanceof Error ? e.message : String(e) });
   }
+});
+
+/** The readiness poll (see sdk BootReadyResponse): the client asks the
+ *  CONCIERGE — never the booting machine — until the machine is really
+ *  reachable: Running + DNS live (c-ares, cache-free) + /health answers.
+ *  Only then does the browser learn the machine's name, so its first
+ *  query is a positive answer and no cache in its chain ever sees the
+ *  name dead. */
+app.get<{ Querystring: { instance?: string } }>("/boot/ready", async (req, reply) => {
+  if (!(await requireExternal(req, reply))) return reply;
+  const { instance } = req.query ?? {};
+  if (!instance || !allowedInstance(instance)) return reply.code(403).send({ error: "instance not allowed" });
+  const st = (await platform.statuses().catch(() => new Map())).get(instance);
+  if (st !== "Running") return reply.code(503).send({ instance, ready: false, why: "status" });
+  // NO /health probe leg: the concierge's egress cannot reach instance
+  // hosts (firewall model — hostname allowlists can't express them). The
+  // client probes /health itself once ready — by then the record is live,
+  // so a slow agent is a connection refusal, never a cacheable NXDOMAIN.
+  const dns = await platform.awaitDns(`${instance}.${DOMAIN_BASE}`, 6_000).catch(() => false);
+  if (!dns) return reply.code(503).send({ instance, ready: false, why: "dns" });
+  return { instance, ready: true };
 });
 
 /** Handshake: betterbase JWT (or dev secret) → session token. Once per

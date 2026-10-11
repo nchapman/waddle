@@ -33,7 +33,7 @@ import { frameBus } from "./lib/frame-bus";
 import { WaddleChatTransport } from "./lib/waddle-transport";
 import { DEV, ENCLAVE_URL, CONFIG_REPO, BB_CLIENT_ID, BB_DOMAIN, ZONE } from "./lib/config";
 import { eventsToRows, rowsToUIMessages, toolStartRow, toolEndRow, approvalRow, historyRow, type ChatMessage } from "./lib/history";
-import { wakeInstance, pollUntilHealthy, assignStandby, bootInstance } from "./lib/concierge";
+import { wakeInstance, pollUntilHealthy, assignStandby, bootInstance, pollBootReady } from "./lib/concierge";
 
 /** The machine this session talks to: the primary, or a warm standby
  *  handed out by the concierge's pool (same config repo → same
@@ -120,6 +120,12 @@ export function App() {
    *  /boot would hand back the same failing machine and loop forever
    *  (review-caught). */
   const discoveryTriedRef = useRef(false);
+  /** The client WATCHED a machine die in-session (unreachable mid-flow,
+  *  or its boot poll gave up): its name may sit poisoned in the
+  *  browser's DNS cache for the negative TTL — the next wake asks for a
+  *  FRESH name instead of rebinding into the poison. Blank machines are
+  *  cattle; the shelf holds all state. */
+  const machineDiedRef = useRef(false);
   if (!transportRef.current) transportRef.current = new WaddleChatTransport();
 
   /** Wake through the concierge: POST the verb, poll the enclave, re-run
@@ -133,19 +139,31 @@ export function App() {
   async function wakeCore(note: string) {
     setState({ phase: "asleep", waking: true, note });
     if (!DEV) {
-      const booted = await bootInstance(conciergeAuth);
+      const booted = await bootInstance(conciergeAuth, 300_000, undefined, machineDiedRef.current);
       if (booted.ok && booted.url) {
         discoveryTriedRef.current = true;
+        machineDiedRef.current = false;
         activeEnclave = booted.url;
-        const healthy = booted.waking
-          ? await pollUntilHealthy(activeEnclave, 75, (i) =>
+        // Waking: poll the CONCIERGE for readiness — never the machine
+        // (its record may not exist yet; an early query poisons the
+        // browser's resolver for 30min). Ready → the record is live →
+        // the agent poll below is safe (failures are refusals, not
+        // NXDOMAIN — nothing cacheable-negative).
+        const ready = booted.waking && booted.instance
+          ? await pollBootReady(conciergeAuth, booted.instance, 90, (i) =>
               setState((st) => (st.phase === "asleep" ? { ...st, note: `waiting for the enclave… (${i})` } : st)),
             )
           : true;
+        const healthy = ready
+          ? await pollUntilHealthy(activeEnclave, 30, (i) =>
+              setState((st) => (st.phase === "asleep" ? { ...st, note: `waking the agent… (${i})` } : st)),
+            )
+          : false;
         if (healthy) {
           void run();
           return;
         }
+        machineDiedRef.current = true; // never reached health — assume the worst for the next wake
         setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: "gave up waiting — try again" } : st));
         return;
       }

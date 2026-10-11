@@ -101,6 +101,7 @@ export async function bootInstance(
   auth: ConciergeAuth,
   timeoutMs = 300_000,
   zone = ZONE,
+  fresh = false,
 ): Promise<{ ok: boolean; url?: string; instance?: string; waking?: boolean; detail?: string }> {
   const z = zone.replace(/^\.+/, "");
   const headers = await authHeaders(auth);
@@ -111,7 +112,7 @@ export async function bootInstance(
     const res = await fetch(`${CONCIERGE_URL}/boot`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...headers },
-      body: "{}",
+      body: JSON.stringify({ fresh }),
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) {
@@ -138,4 +139,33 @@ export async function bootInstance(
         : "concierge unreachable — is it running?",
     };
   }
+}
+
+/** Readiness poll — against the CONCIERGE, never the booting machine.
+ *  The machine's DNS record doesn't exist until seconds after it goes
+ *  Running; polling it early teaches every cache in the browser's
+ *  resolver chain a 30-minute NXDOMAIN for a machine that's about to be
+ *  fine (caught live, 2026-10-11). The concierge gates on Running + DNS
+ *  (cache-free c-ares) and says when the coast is clear. */
+export async function pollBootReady(
+  auth: ConciergeAuth,
+  instance: string,
+  attempts = 90,
+  onTick?: (attempt: number) => void,
+  intervalMs = 2_000,
+): Promise<boolean> {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetch(`${CONCIERGE_URL}/boot/ready?instance=${encodeURIComponent(instance)}`, {
+        headers: await authHeaders(auth),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) return true;
+    } catch {
+      /* concierge hiccup — retry */
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+    onTick?.(i + 1);
+  }
+  return false;
 }

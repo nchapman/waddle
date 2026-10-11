@@ -219,6 +219,31 @@ export interface WakeResponse {
   status: "waking";
   detail: string;
 }
+
+/** POST /boot — the client's discovery verb: "my machine, running".
+ *  `fresh: true` = the client watched the previous machine die (it stops
+ *  mid-session) — mint a new name rather than rebind: the old name's
+ *  NXDOMAIN may sit in the browser's own DNS cache for the SOA negative
+ *  TTL, and a blank machine is cheap (the shelf holds all state). */
+export interface BootRequest {
+  fresh?: boolean;
+}
+export interface BootResponse {
+  instance: string;
+  url: string;
+  status: "running" | "waking";
+  detail: string;
+}
+/** GET /boot/ready?instance=X — the client's readiness poll. It hits the
+ *  CONCIERGE (always-on, its name never poisoned) instead of the booting
+ *  machine: the browser must not query the machine's name until the
+ *  record is live, or it poisons its own resolver for the negative TTL.
+ *  200 = the machine is Running AND its DNS resolves AND its /health
+ *  answers (concierge-side, cache-free); 503 = not yet. */
+export interface BootReadyResponse {
+  instance: string;
+  ready: boolean;
+}
 export interface AssignResponse {
   name: string;
   url: string;

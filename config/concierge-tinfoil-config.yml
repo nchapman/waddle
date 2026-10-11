@@ -52,6 +52,7 @@ shim:
     - /wake
     - /assign
     - /boot
+    - /boot/ready
     - /handoff
     - /handoff/pull
     - /handoff/post

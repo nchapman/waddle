@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { wakeInstance, pollUntilHealthy, assignStandby, bootInstance } from "./concierge.js";
+import { wakeInstance, pollUntilHealthy, assignStandby, bootInstance, pollBootReady } from "./concierge.js";
 
 type Responder = { ok?: boolean; body?: unknown; throwErr?: Error };
 
@@ -179,4 +179,23 @@ test("assignStandby label boundary — a suffix that is not a label does not pas
   stubFetch(() => ({ ok: true, body: { url: "https://evilcontainers.tinfoil.dev" } }));
   // zone ".containers.tinfoil.dev": host must be exactly that or end ".containers.tinfoil.dev"
   assert.equal(await assignStandby(async () => "tok", ".containers.tinfoil.dev"), null);
+});
+
+test("pollBootReady asks the CONCIERGE (never the machine) and returns on its 200", async () => {
+  const { calls } = stubFetch((url) => ({ ok: url.includes("ready") }));
+  const r = await pollBootReady(async () => "tok", "waddle-u12345678-dead42", 3, undefined, 1);
+  assert.equal(r, true);
+  assert.match(calls[0]!.url, /\/boot\/ready\?instance=/);
+});
+
+test("pollBootReady gives up after its attempt budget", async () => {
+  stubFetch(() => ({ ok: false }));
+  const r = await pollBootReady(async () => "tok", "x", 2, undefined, 1);
+  assert.equal(r, false);
+});
+
+test("bootInstance forwards fresh=true when the client watched a machine die", async () => {
+  const { calls } = stubFetch(() => ({ ok: true, body: { url: "https://waddle-u12345678-dead42.ddg-waddle.containers.tinfoil.dev", status: "waking" } }));
+  await bootInstance(async () => "tok", 150_000, "ddg-waddle.containers.tinfoil.dev", true);
+  assert.deepEqual(JSON.parse(String(calls[0]!.init!.body)), { fresh: true });
 });

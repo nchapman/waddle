@@ -4,6 +4,7 @@
  * Backends are ~25 lines each by design: a seam, not a code fork.
  */
 import { execFile } from "node:child_process";
+import { resolve4 } from "node:dns/promises";
 import { promisify } from "node:util";
 
 /** One shell-out. Injectable so tests pin the CLI-output contracts. */
@@ -48,6 +49,16 @@ export interface Platform {
    *  class, caught live 2026-10-11). False on timeout — the caller
    *  reports honestly; the machine still boots. */
   waitRunning(instance: string, timeoutMs?: number): Promise<boolean>;
+  /** Poll DNS (c-ares — NO local cache) until the instance's hostname
+   *  resolves. The platform re-adds a stopped machine's record some
+   *  seconds AFTER the deploy CLI returns / Running flips — a client
+   * handed the URL in that gap poisons ITS OWN resolver cache with
+   *  NXDOMAIN for the SOA negative TTL (caught live twice 02:30Z:
+   *  Chrome, and before it the local chain). False on timeout — the
+   *  caller reports honestly. */
+  awaitDns(host: string, timeoutMs?: number): Promise<boolean>;
+  /** One /health probe (bounded) — the readiness endpoint's final check. */
+  probe(url: string, timeoutMs?: number): Promise<boolean>;
 }
 
 /** Last few lines of CLI output, pipe-joined — deploy details for logs. */
@@ -86,6 +97,8 @@ export function createPlatform(opts: {
       },
       ensure: (instance: string) => start(instance), // docker start is already health-agnostic
       waitRunning: (instance: string) => start(instance).then(() => true, () => false), // docker start is synchronous
+      awaitDns: () => Promise.resolve(true), // docker-local hosts resolve via /etc/hosts — nothing to wait for
+      probe, // the injected/real probe — same reachability check as tinfoil
     };
   }
 
@@ -215,5 +228,28 @@ export function createPlatform(opts: {
     return false;
   }
 
-  return { start, rest, statuses, list, ensure, waitRunning };
+  /** Distinguish "the record is not there" (ENOTFOUND/ENODATA — keep
+   *  waiting) from "I cannot ask" (resolver unreachable — the runtime
+   *  egress allowlist may not carry DNS; treat as live and let the
+   *  platform's Running status carry the signal). */
+  async function dnsLive(host: string): Promise<boolean> {
+    try {
+      return (await resolve4(host)).length > 0;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException)?.code;
+      if (code === "ENOTFOUND" || code === "ENODATA") return false;
+      return true; // EAI_AGAIN / ETIMEOUT / blocked — cannot tell
+    }
+  }
+
+  async function awaitDns(host: string, timeoutMs = 30_000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      if (await dnsLive(host)) return true;
+      await new Promise((r) => setTimeout(r, 3_000));
+    } while (Date.now() < deadline);
+    return false;
+  }
+
+  return { start, rest, statuses, list, ensure, waitRunning, awaitDns, probe: (url, ms) => probe(url, ms ?? 5_000) };
 }
