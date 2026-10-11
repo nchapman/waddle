@@ -105,10 +105,13 @@
   which we don't use); DNS is stripped either way. So sleep ≠ data
   retention — the shelf is the ONLY state; sleep is decision latency
   (instant billing pause, reversible) + one-verb wake against the
-  saved spec. The browser profile dies on every sleep (too big for
-  escrow's 768KiB arm cap); encrypted volumes (survive stop AND delete
-  as unattached disks) keyed under the user's escrow secret are the
-  parked fix — PLAN.md territory.
+  saved spec. Restore paths differ by tier: shelf snapshots carry the
+  full Chromium profile (attended unlocks restore logins — PLAN.md
+  "every boot is a restore"), while the tier-2 escrow arm can't
+  (`shelf archive minus browser/`, 768KiB cap) — unattended boots run
+  without logins. Encrypted volumes (survive stop AND delete as
+  unattached disks) keyed under the user's escrow secret are the
+  parked fix for the unattended gap — PLAN.md territory.
 - **A deployed-but-unattended machine lives ~10.5min by design**: the
   locked-boot stop backstop (WADDLE_IDLE_MS+30s) reaps boots nobody
   unlocks, and the concierge's 24h-quiet sweep reaps machines its table
