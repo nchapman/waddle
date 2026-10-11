@@ -14,12 +14,22 @@ jobs:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
     steps:
       - uses: actions/checkout@v4
+      # The client's betterbase dep is a link: to a sibling checkout
+      # (../../betterbase-dev) — fetch it so the link resolves. Tracks the
+      # upstream default branch.
+      - uses: actions/checkout@v4
+        with:
+          repository: BetterbaseHQ/betterbase
+          path: ../betterbase-dev
       - uses: pnpm/action-setup@v4 # reads packageManager from package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # betterbase/js is linked as TypeScript source; its own deps must be
+      # present for the client's typecheck to resolve its imports.
+      - run: pnpm -C ../betterbase-dev/betterbase/js install --frozen-lockfile
       - run: pnpm check # typecheck (+ sdk build) across all packages
       - run: pnpm test # 255 unit tests: sdk, server (incl. real-socket ws), concierge, client
       - run: pnpm build # client vite build catches bundling/import breakage
