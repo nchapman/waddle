@@ -14,6 +14,12 @@ export default defineConfig({
     // The betterbase SDK links as TypeScript source; pre-bundling would
     // rebuild the wasm imports and break worker loading.
     exclude: ["betterbase"],
+    // Discovered at RUNTIME by @tinfoilsh/verifier's dynamic sigstore
+    // import — without pre-bundling, the late discovery re-optimizes
+    // mid-session and 504s the verifier's module URLs ("Outdated Optimize
+    // Dep" — caught by the live smoke; broke attestation with a generic
+    // "Sigstore code bundle verification failed").
+    include: ["@freedomofpress/sigstore-browser", "@tinfoilsh/verifier"],
   },
   resolve: {
     alias: {

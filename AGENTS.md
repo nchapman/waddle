@@ -9,9 +9,12 @@
   `gh release create` — the platform 500s on it) → wait for the auto-triggered
   publish to attach tinfoil-deployment.json + tinfoil.hash →
   `tinfoil container update waddle --tag vN --yes` (env from `.env.local`;
-  tinfoil CLI on `~/.local/bin`) → poll `/health` for *locked* → TOFU re-pin
-  in the client → quick live smoke. Track the pinned config in
-  `config/tinfoil-config.yml` in the same commit train.
+  tinfoil CLI on `~/.local/bin`) → poll `/health` for *locked* → TOFU
+  re-pin + live smoke via `pnpm smoke:live` (scripts/live-smoke.mjs —
+  concierge+machine health, real Chrome attestation, asserts the release
+  tag, does the TOFU re-pin when the fingerprint moved; profile persists
+  in `.pi/evidence/smoke-profile`, which is gitignored). Track the pinned
+  config in `config/tinfoil-config.yml` in the same commit train.
 - **The concierge has its own ceremony** (repo `/tmp/waddle-concierge-config`,
   origin git@github.com:nchapman/waddle-concierge-config.git, same flow, image
   `ghcr.io/nchapman/waddle-concierge`). Both repos' publish workflows

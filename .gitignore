@@ -5,3 +5,7 @@ data/
 *.tsbuildinfo
 .DS_Store
 .playwright-mcp/
+
+# Evidence + smoke artifacts live local-only (the wake-proofs narrative is the exception)
+.pi/evidence/*
+!.pi/evidence/wake-proofs.md

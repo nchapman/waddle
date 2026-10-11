@@ -10,9 +10,11 @@
     "dev": "pnpm run --parallel --filter @waddle/sdk --filter @waddle/server --filter @waddle/client dev",
     "build": "pnpm -r build",
     "check": "pnpm --filter @waddle/sdk build && pnpm -r check",
-    "test": "pnpm -r test"
+    "test": "pnpm -r test",
+    "smoke:live": "node scripts/live-smoke.mjs"
   },
   "devDependencies": {
+    "playwright": "^1.64.0",
     "tinfoil": "^1.2.2"
   }
 }
