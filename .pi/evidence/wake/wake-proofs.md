@@ -677,3 +677,40 @@ No fallbacks anywhere in this chain — every leg is the cattle path:
 Also proven tonight by absence: the primary stopped itself on the idle
 gate (unlocked-then-abandoned at 04:15, reaped ~10.5 min later) and
 nothing in the client ever noticed — it has no path to the primary.
+
+## Proof 11 — v0.4.9 full lifecycle under scale-to-0 (2026-10-11)
+
+**Setup**: concierge v0.4.9, platform concierge-only, pool empty
+(`demand_ms_ago: null`), client waddletest2@betterbase.dev, live :5173.
+
+1. **Arm** — client wake → `/boot` (discovery): `demand_ms_ago` null→19s;
+   pool filled `waddle-standby-3` behind the session within one tick
+   window (demand-gated fill, first live proof of the ARM side).
+2. **Mint + restore** — `waddle-ud3b16438-8d6aa4` (user-shape, fresh
+   mint; registry empty after the v0.4.9 restart) → attestation →
+   unlock → ring: `machine restored from shelf` + `concierge handshake
+   {'via':'jwt'}` (proof-10 chain reproduced under the new pool).
+3. **Markers planted pre-sleep** — workspace file
+   (`validation-sleepwake.txt` = `marker-1791732900-survives-sleep`) and
+   a browser-profile History URL
+   (`example.com/?waddle=sleepwake-1791732900`; the agent has no JS-eval,
+   so the History DB IS the cookie-equivalent marker).
+4. **Sleep** — client sleep button → checkpoint → machine **Stopped**
+   (~10s), billing paused; stop row live (`rows:1`).
+5. **Wake** — ~108s door-to-door → attestation → unlock → **both markers
+   restored**: file exact-match ✅; History DB intact (163,840 bytes,
+   pre-sleep mtime, grep finds the marker URL, plus DoorDash URLs from
+   pre-mint sessions — the profile rides the shelf ACROSS machine
+   generations). This live-proves the corrected persistence record
+   (AGENTS.md 9b3ff41): shelf snapshots carry the full Chromium
+   profile; attended unlocks restore it; only the tier-2 escrow arm
+   strips `browser/`.
+6. **Drain** (deferred check): standby-3 created ~15:31Z → TTL destroy
+   ~16:31Z; by then demand is >1h stale → pool stays 0 (platform
+   concierge-only). Result appended below.
+
+**Verdict**: scale-to-0 + activity-based sleep + shelf-as-only-state all
+behave as designed under v0.4.9. Approvals note: the History grep needed
+an interactive bash approval mid-turn (agent stalled on the dialog until
+approved — expected restricted-mode behavior, worth remembering for
+unattended runs: read-only bash still prompts).
