@@ -24,9 +24,16 @@ jobs:
         with:
           repository: BetterbaseHQ/betterbase
           path: .bb-checkout
+      # betterbase's Cargo workspace path-depends on json-joy-rs as a
+      # sibling (crates/betterbase-db → ../../../json-joy-rs/crates/…).
+      - uses: actions/checkout@v4
+        with:
+          repository: BetterbaseHQ/json-joy-rs
+          path: .jj-checkout
       - run: |
           mkdir -p "${GITHUB_WORKSPACE}/../betterbase-dev"
           mv "$GITHUB_WORKSPACE/.bb-checkout" "${GITHUB_WORKSPACE}/../betterbase-dev/betterbase"
+          mv "$GITHUB_WORKSPACE/.jj-checkout" "${GITHUB_WORKSPACE}/../betterbase-dev/json-joy-rs"
       # The js package's sources import wasm pkg/ artifacts from sibling
       # crates/ — built, not committed. Build them the canonical way.
       - uses: dtolnay/rust-toolchain@stable
@@ -37,7 +44,7 @@ jobs:
           tool: wasm-pack
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "../betterbase-dev/betterbase"
+          workspaces: "../betterbase-dev/betterbase\n../betterbase-dev/json-joy-rs"
       - run: bash scripts/build-wasm.sh
         working-directory: ../betterbase-dev/betterbase/js
       - uses: pnpm/action-setup@v4 # reads packageManager from package.json
