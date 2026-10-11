@@ -15,12 +15,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # The client's betterbase dep is a link: to a sibling checkout
-      # (../../betterbase-dev) — fetch it so the link resolves. Tracks the
-      # upstream default branch.
+      # (../../betterbase-dev). Checkout can't write outside the workspace,
+      # so fetch inside and move it to the sibling path the link resolves
+      # to. Tracks the upstream default branch.
       - uses: actions/checkout@v4
         with:
           repository: BetterbaseHQ/betterbase
-          path: ../betterbase-dev
+          path: .bb-checkout
+      - run: mv "$GITHUB_WORKSPACE/.bb-checkout" "${GITHUB_WORKSPACE}/../betterbase-dev"
       - uses: pnpm/action-setup@v4 # reads packageManager from package.json
       - uses: actions/setup-node@v4
         with:
