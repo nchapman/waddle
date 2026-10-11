@@ -380,12 +380,20 @@ app.post("/boot", async (req, reply) => {
       return reply.code(502).send({ error: e instanceof Error ? e.message : String(e) });
     }
     table.userWake(name);
-    app.log.info({ user: hashSub(sub), instance: name }, "boot: fresh machine created");
+    // Wait for Running via the platform API before handing out the URL:
+    // the DNS record lands ~when the machine goes Running, and the
+    // client's first /health poll must not query a record that doesn't
+    // exist yet — that NXDOMAIN caches for the SOA negative TTL and the
+    // machine is browser-unreachable for 30min from its own boot polls
+    // (caught live 01:5xZ). Timeout still responds waking (honest — the
+    // machine boots; a rare cert stall just means a slower client poll).
+    const running = await platform.waitRunning(name, 240_000);
+    app.log.info({ user: hashSub(sub), instance: name, running }, "boot: fresh machine created");
     return reply.code(202).send({
       instance: name,
       url: `https://${name}.${DOMAIN_BASE}`,
       status: "waking",
-      detail: "created",
+      detail: running ? "created (running)" : "created (still provisioning)",
     });
   }
   // A user present means the machine should live: clear any pending

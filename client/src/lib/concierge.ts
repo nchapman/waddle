@@ -99,7 +99,7 @@ export async function pollUntilHealthy(
  *  machine was just deployed and needs its ~90s boot. */
 export async function bootInstance(
   auth: ConciergeAuth,
-  timeoutMs = 150_000,
+  timeoutMs = 300_000,
   zone = ZONE,
 ): Promise<{ ok: boolean; url?: string; instance?: string; waking?: boolean; detail?: string }> {
   const z = zone.replace(/^\.+/, "");

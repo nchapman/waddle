@@ -210,3 +210,25 @@ test("docker backend: list parses `docker ps`, start/stop shell out", async () =
   assert.match(detail, /docker:waddle started/);
   assert.deepEqual(calls[1], ["start", "waddle"]);
 });
+
+test("waitRunning polls the platform API (no DNS) until Running", async () => {
+  let lists = 0;
+  const exec: Exec = async (_c, args) => {
+    if (args[1] === "list") {
+      lists++;
+      return { stdout: lists < 3 ? LIST_OUTPUT.replace("Running", "Starting") : LIST_OUTPUT };
+    }
+    return { stdout: "ok" };
+  };
+  const p = tinfoil(exec);
+  const t0 = Date.now();
+  assert.equal(await p.waitRunning("waddle", 30_000), true);
+  assert.ok(Date.now() - t0 >= 10_000, "waited across polls");
+  assert.ok(lists >= 3);
+});
+
+test("waitRunning times out honestly (false — the machine still boots)", async () => {
+  const exec: Exec = async (_c, args) =>
+    args[1] === "list" ? { stdout: LIST_OUTPUT.replace("Running", "Starting") } : { stdout: "ok" };
+  assert.equal(await tinfoil(exec).waitRunning("waddle", 1), false);
+});

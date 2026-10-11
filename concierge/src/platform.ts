@@ -41,6 +41,13 @@ export interface Platform {
    *  "fire" (wake rows) stop+redeploys a silent one while its release
    *  window is open. */
   ensure(instance: string, probeMs?: number, mode?: "user" | "fire"): Promise<string>;
+  /** Wait via the platform API (NO DNS) until the instance reports
+   *  Running — a fresh machine's DNS record lands ~when it goes Running,
+   *  and handing the client the URL earlier lets its /health polls cache
+   *  NXDOMAIN for the not-yet-existing record (the boot-window poison
+   *  class, caught live 2026-10-11). False on timeout — the caller
+   *  reports honestly; the machine still boots. */
+  waitRunning(instance: string, timeoutMs?: number): Promise<boolean>;
 }
 
 /** Last few lines of CLI output, pipe-joined — deploy details for logs. */
@@ -78,6 +85,7 @@ export function createPlatform(opts: {
         return stdout.split("\n").map((s) => s.trim()).filter(Boolean);
       },
       ensure: (instance: string) => start(instance), // docker start is already health-agnostic
+      waitRunning: (instance: string) => start(instance).then(() => true, () => false), // docker start is synchronous
     };
   }
 
@@ -197,5 +205,15 @@ export function createPlatform(opts: {
     return start(instance);
   }
 
-  return { start, rest, statuses, list, ensure };
+  async function waitRunning(instance: string, timeoutMs = 240_000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      const st = (await listRows().catch(() => new Map<string, { status?: string }>())).get(instance)?.status;
+      if (st === "Running") return true;
+      await new Promise((r) => setTimeout(r, 5_000));
+    } while (Date.now() < deadline);
+    return false;
+  }
+
+  return { start, rest, statuses, list, ensure, waitRunning };
 }
