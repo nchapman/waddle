@@ -66,7 +66,18 @@
   wake-proofs.md narrative, which is tracked).
 - Stray `.bak`/`.bak2` files are old debris — do not commit.
 
-## Live-environment facts (as of v0.0.48 / concierge v0.3.15)
+## Live-environment facts (as of v0.0.51 / concierge v0.4.8)
+
+- **End-of-life is DELETE, never stop-and-forget** (live-caught as the
+  overnight graveyard of stopped proof/retired/swept machines). One
+  verb owns it (`platform.destroy` = rest→delete, not-found = clean);
+  pool reaps, fresh-mint retire, stale-tag refusal, and the 24h sweep
+  all funnel through it. The sweep destroys ABANDONED machines on two
+  quiet clocks (table lastContact, or `adoptedAt` for sleepers inherited
+  at a concierge restart — bound machines and pool stock are spared),
+  and the platform scan runs an orphan janitor for user-shape machines
+  no bookkeeping owns. Stop-and-keep exists ONLY as sleep (an owned
+  machine awaiting its wake).
 
 - **Stop = DNS teardown (platform, proved 2026-10-10 at Cloudflare's
   authoritative NS)**: a stopped instance's name NXDOMAINs authoritatively;
