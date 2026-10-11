@@ -51,6 +51,7 @@ shim:
     - /timer
     - /wake
     - /assign
+    - /boot
     - /handoff
     - /handoff/pull
     - /handoff/post

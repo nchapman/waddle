@@ -31,9 +31,9 @@ import { COLLECTIONS } from "./lib/bb-collections";
 import { buildBbGrant, resolveSyncEndpoint } from "./lib/bb-grant";
 import { frameBus } from "./lib/frame-bus";
 import { WaddleChatTransport } from "./lib/waddle-transport";
-import { DEV, ENCLAVE_URL, CONFIG_REPO, BB_CLIENT_ID, BB_DOMAIN } from "./lib/config";
+import { DEV, ENCLAVE_URL, CONFIG_REPO, BB_CLIENT_ID, BB_DOMAIN, ZONE } from "./lib/config";
 import { eventsToRows, rowsToUIMessages, toolStartRow, toolEndRow, approvalRow, historyRow, type ChatMessage } from "./lib/history";
-import { wakeInstance, pollUntilHealthy, assignStandby } from "./lib/concierge";
+import { wakeInstance, pollUntilHealthy, assignStandby, bootInstance } from "./lib/concierge";
 
 /** The machine this session talks to: the primary, or a warm standby
  *  handed out by the concierge's pool (same config repo → same
@@ -63,19 +63,14 @@ type State =
 
 const fp = (s: string) => `${s.slice(0, 16)}…${s.slice(-8)}`;
 
-/** The standby must live in the primary's operator domain: the TOFU pin
- *  travels by measurement, so it cannot catch a host switch. Empty on a
- *  malformed ENCLAVE_URL — the caller then skips standby assignment. */
+/** The standby must live in the operator's zone: the TOFU pin travels
+ *  by measurement, so it cannot catch a host switch. Derived from the
+ *  CONCIERGE's host (not the enclave's — discovery must not depend on a
+ *  baked machine URL); empty when the concierge is a bare localhost —
+ *  the caller then skips standby assignment. Leading dot: a SUFFIX
+ *  match (`.ddg-waddle.containers.tinfoil.dev`), not an exact one. */
 function standbyZone(): string {
-  try {
-    const parts = new URL(ENCLAVE_URL).hostname.split(".");
-    // A single-label host (dev `http://waddle:8080`) has no parent zone —
-    // "" skips standby assignment (the guard in concierge.ts requires a
-    // real suffix; `.` would be truthy and bind nothing).
-    return parts.length > 1 ? `.${parts.slice(1).join(".")}` : "";
-  } catch {
-    return "";
-  }
+  return ZONE ? `.${ZONE}` : "";
 }
 
 /** Dev parity: a structural stand-in so session/unlock code paths run unchanged. */
@@ -120,13 +115,48 @@ export function App() {
   const suppressReplayRef = useRef(false);
   const frameLiveRef = useRef(false);
   const autoWokeRef = useRef(false);
+  /** Discovery ran this page load. A machine that fails verification
+   *  AFTER discovery gets the error screen, not another discovery —
+   *  /boot would hand back the same failing machine and loop forever
+   *  (review-caught). */
+  const discoveryTriedRef = useRef(false);
   if (!transportRef.current) transportRef.current = new WaddleChatTransport();
 
   /** Wake through the concierge: POST the verb, poll the enclave, re-run
    *  the flow when it answers. Shared by the manual button and the
-   *  load-time auto-wake (once per page load). */
+   *  load-time auto-wake (once per page load).
+   *
+   *  Live mode is discovery-first: /boot asks the concierge for MY
+   *  machine (per-user cattle name, warm from the pool when possible).
+   *  The legacy primary /wake stays as the fallback while discovery
+   *  beds in — and is the whole story in dev parity. */
   async function wakeCore(note: string) {
     setState({ phase: "asleep", waking: true, note });
+    if (!DEV) {
+      const booted = await bootInstance(conciergeAuth);
+      if (booted.ok && booted.url) {
+        discoveryTriedRef.current = true;
+        activeEnclave = booted.url;
+        const healthy = booted.waking
+          ? await pollUntilHealthy(activeEnclave, 75, (i) =>
+              setState((st) => (st.phase === "asleep" ? { ...st, note: `waiting for the enclave… (${i})` } : st)),
+            )
+          : true;
+        if (healthy) {
+          void run();
+          return;
+        }
+        setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: "gave up waiting — try again" } : st));
+        return;
+      }
+      // No session is a dead end (same as legacy wake); anything else —
+      // concierge down, refused, out-of-zone — falls back to the legacy
+      // primary wake so a concierge hiccup can't brick the client.
+      if (booted.detail?.startsWith("no betterbase session")) {
+        setState((st) => (st.phase === "asleep" ? { ...st, waking: false, note: booted.detail } : st));
+        return;
+      }
+    }
     activeEnclave = ENCLAVE_URL; // the wake path always targets the primary
     const woke = await wakeInstance(conciergeAuth);
     if (!woke.ok) {
@@ -166,13 +196,14 @@ export function App() {
       // error screen — waking can't help those (and a spurious /wake would
       // stop-and-redeploy a healthy machine via zombie recovery).
       if (!DEV) {
-        // A standby that fails verification must not strand the session:
-        // fall back to the primary wake path (which resets activeEnclave).
-        // Checked BEFORE the autoWokeRef gate — the assign path already
-        // consumed it, but a bad standby still deserves the fallback.
-        if (activeEnclave !== ENCLAVE_URL) {
+        // A non-primary enclave that fails verification must not strand
+        // the session — ONE retry via the discovery path (which rebinds
+        // or re-mints the machine), then the honest error screen. The
+        // tried-ref breaks the loop: discovery hands back the same
+        // machine it just bound, so retrying it changes nothing.
+        if (activeEnclave !== ENCLAVE_URL && !discoveryTriedRef.current) {
           autoWokeRef.current = true;
-          void wakeCore("standby failed verification — waking the primary");
+          void wakeCore("standby failed verification — discovering my machine");
           return;
         }
       }

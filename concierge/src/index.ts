@@ -44,6 +44,7 @@ import { createHandoffStore } from "./handoff.js";
 import { createPostboxStore } from "./postbox.js";
 import { createPool, envInt, standbyNameRe, type Pool } from "./pool.js";
 import { createPlatform } from "./platform.js";
+import { createUserMachines, userNameRe, hashSub } from "./user-machines.js";
 
 const exec = promisify(execFile);
 
@@ -95,6 +96,14 @@ const STANDBY_NAME_RE = standbyNameRe(STANDBY_PREFIX);
 /** How long a claimed-but-abandoned standby may live (the /assign grace
  *  row AND the pool's foreign-reap clock share this one knob). */
 const CLAIM_GRACE_MS = envInt("STANDBY_CLAIM_GRACE_MS", 12 * 3600_000, 60_000);
+
+// ── User machines (the cattle spine — module semantics in
+// user-machines.ts). Names authorize the namespace exactly like
+// standby names: strict shape AND created/adopted here. The sub→name
+// map is memory-only; after a concierge reboot the hash embedded in
+// every name rebinds it from the platform list.
+const users = createUserMachines();
+const USER_NAME_RE = userNameRe();
 
 // ── Platform verbs (the only shell-outs live in platform.ts) ────────────
 
@@ -175,6 +184,8 @@ const wakeRetries = new Map<string, number>();
 // ── Auth ─────────────────────────────────────────────────────────────────
 // Four tiers, one grep away:
 //   requireExternal  bb JWT or shared secret  (/wake /assign /status)
+//   requireJwtUser   bb JWT, returns its sub  (/boot — machines have no
+//                    user identity; the shared secret is NOT enough)
 //   requireSession   handshake-minted token   (/timer /handoff/post /handoff/post/pull)
 //   requireSecret    shared secret only       (/handshake bearer, /handoff, /handoff/pull)
 // The escrow routes are MACHINE verbs (arm at sleep, pull at boot — both
@@ -196,7 +207,9 @@ function allowedInstance(instance: string | undefined): instance is string {
   // Standby namespace: strict shape AND a name this process created or
   // adopted — a bare prefix match would let any token holder mint rows
   // against operator-invisible instances (and grow the table unbounded).
-  return POOL_ENABLED && STANDBY_NAME_RE.test(instance) && poolNames.has(instance);
+  // User machines follow the same rule via the registry's known-set.
+  if (POOL_ENABLED && STANDBY_NAME_RE.test(instance) && poolNames.has(instance)) return true;
+  return USER_NAME_RE.test(instance) && users.known().has(instance);
 }
 
 /** Session tokens: handshake-minted, instance-scoped, memory-only.
@@ -232,6 +245,16 @@ async function requireExternal(req: { headers: { authorization?: string } }, rep
   if (await verifyExternal(bearer(req))) return true;
   reply.code(401).send({ error: "unauthorized" });
   return false;
+}
+
+/** The user tier: a verified bb JWT, returning its `sub`. The shared
+ *  secret is a MACHINE identity — it names no user, so /boot refuses it
+ *  (403, not 401: the bearer verified, it just isn't a user). */
+async function requireJwtUser(req: { headers: { authorization?: string } }, reply: FastifyReply): Promise<string | null> {
+  const id = await verifyExternal(bearer(req));
+  if (id?.kind === "jwt") return id.sub;
+  reply.code(id ? 403 : 401).send({ error: id ? "user identity required — connect your store" : "unauthorized" });
+  return null;
 }
 
 /** Session tier (handshake-minted token). Replies 401 and returns null
@@ -299,6 +322,91 @@ app.get("/assign", async (req, reply) => {
   table.setStop(got.name, CLAIM_GRACE_MS);
   void pool.tick().catch(() => undefined); // top the pool back up promptly
   return got;
+});
+
+/** Create an instance from the committed config (pool standbys AND
+ *  user machines — one create path, one measurement). NO --variable
+ *  flags: env changes the MEASUREMENT (proven live — the client
+ *  correctly refused a standby whose per-instance variables broke the
+ *  signed-release match). Machines run the exact committed config. */
+async function createInstance(name: string): Promise<void> {
+  const args = [
+    "container", "create", name,
+    "--repo", STANDBY_CONFIG_REPO,
+    "--tag", STANDBY_CONFIG_TAG,
+    "--no-wait",
+  ];
+  for (const s of STANDBY_SECRETS) args.push("--secret", s);
+  await exec("tinfoil", args, { timeout: 30_000 });
+}
+
+/** The user's discovery verb: "my machine, running". Idempotent, and
+ *  the ONLY public path that mints user machines — first /boot tries a
+ *  warm standby (seconds to live), then boots fresh (~90s). Later boots
+ *  return the existing machine, ensured (user mode: a healthy Running
+ *  machine is never stopped; a stopped one deploys). */
+app.post("/boot", async (req, reply) => {
+  const sub = await requireJwtUser(req, reply);
+  if (sub === null) return reply;
+  // Warm-first: a pool standby is already booted and measured — claiming
+  // one saves the ~90s deploy. Same claim-grace contract as /assign: a
+  // claimed machine the user abandons dies within grace, not the pool TTL.
+  let name = users.rebind(sub);
+  if (!name && POOL_ENABLED && pool) {
+    const got = pool.assign();
+    if (got) {
+      users.claim(sub, got.name);
+      table.setStop(got.name, CLAIM_GRACE_MS);
+      void pool.tick().catch(() => undefined);
+      name = got.name;
+      app.log.info({ user: hashSub(sub), instance: name }, "boot: claimed warm standby");
+    }
+  }
+  let fresh = false;
+  if (!name) {
+    name = users.bind(sub);
+    fresh = true;
+  }
+  if (fresh && POOL_CAPABLE) {
+    try {
+      // --no-wait: the create IS the deploy — following it with
+      // platform.ensure() would race the in-flight create ("cannot
+      // deploy a started instance", the exact 409 seen live 01:23Z) and
+      // 502 the client. Fresh machines return waking immediately.
+      await createInstance(name);
+    } catch (e) {
+      users.forget(name);
+      app.log.warn({ err: String(e) }, "boot: create failed");
+      return reply.code(502).send({ error: e instanceof Error ? e.message : String(e) });
+    }
+    table.userWake(name);
+    app.log.info({ user: hashSub(sub), instance: name }, "boot: fresh machine created");
+    return reply.code(202).send({
+      instance: name,
+      url: `https://${name}.${DOMAIN_BASE}`,
+      status: "waking",
+      detail: "created",
+    });
+  }
+  // A user present means the machine should live: clear any pending
+  // stop FIRST, then the claim-grace row lands last and sticks (an
+  // abandoned warm claim dies on the grace clock; the machine's own
+  // timer writes replace the row once the user actually unlocks).
+  table.userWake(name);
+  if (POOL_ENABLED && pool && STANDBY_NAME_RE.test(name)) table.setStop(name, CLAIM_GRACE_MS);
+  try {
+    const detail = await platform.ensure(name);
+    const running = detail.startsWith("already running");
+    app.log.info({ user: hashSub(sub), instance: name, detail }, "boot");
+    return reply.code(running ? 200 : 202).send({
+      instance: name,
+      url: `https://${name}.${DOMAIN_BASE}`,
+      status: running ? "running" : "waking",
+      detail,
+    });
+  } catch (e) {
+    return reply.code(502).send({ error: e instanceof Error ? e.message : String(e) });
+  }
 });
 
 /** Handshake: betterbase JWT (or dev secret) → session token. Once per
@@ -467,19 +575,7 @@ const pool: Pool | null = POOL_CAPABLE
         boot: async (name) => {
           poolNames.add(name); // burn the name even on failure — a colliding
           // create must not wedge nextName on the same index forever.
-          // NO --variable flags: env changes the MEASUREMENT (proven live
-          // — the client correctly refused a standby whose per-instance
-          // variables broke the signed-release match). Pool machines run
-          // the exact committed config; per-machine identity is an open
-          // design item (see evidence).
-          const args = [
-            "container", "create", name,
-            "--repo", STANDBY_CONFIG_REPO,
-            "--tag", STANDBY_CONFIG_TAG,
-            "--no-wait",
-          ];
-          for (const s of STANDBY_SECRETS) args.push("--secret", s);
-          await exec("tinfoil", args, { timeout: 30_000 });
+          await createInstance(name);
         },
         destroy: async (name) => {
           try {
@@ -551,6 +647,22 @@ if (pool) {
   if (POOL_ENABLED) {
     setInterval(() => void pool.tick().catch((e) => app.log.warn({ err: String(e) }, "pool tick failed")), envInt("POOL_TICK_MS", 30_000, 1_000)).unref();
   }
+}
+
+// ── User-machine scan: the registry's known-set refills from the
+// platform (the durable truth) on boot and periodically — independent
+// of the pool, which may be disabled while /boot still serves. The
+// sub→name map rebinds lazily at /boot via the name's embedded hash.
+if (BACKEND === "tinfoil") {
+  const scanUsers = () =>
+    platform.statuses()
+      .then((statuses) => {
+        const adopted = users.adopt([...statuses.keys()]);
+        if (adopted > 0) app.log.info({ adopted }, "user machines adopted from platform");
+      })
+      .catch(() => undefined); // retried next interval
+  void scanUsers();
+  setInterval(() => void scanUsers(), envInt("POOL_SCAN_MS", 5 * 60_000, 10_000)).unref();
 }
 
 // ── Backstop sweep: managed instances gone quiet get stopped ─────────────

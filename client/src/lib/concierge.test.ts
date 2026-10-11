@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { wakeInstance, pollUntilHealthy, assignStandby } from "./concierge.js";
+import { wakeInstance, pollUntilHealthy, assignStandby, bootInstance } from "./concierge.js";
 
 type Responder = { ok?: boolean; body?: unknown; throwErr?: Error };
 
@@ -107,4 +107,76 @@ test("pollUntilHealthy stops at the first healthy answer", async () => {
   const healthy = await pollUntilHealthy("http://x", 10, (i) => ticks.push(i), 1);
   assert.equal(healthy, true);
   assert.deepEqual(ticks, [1]); // second probe answered ok — no further ticks
+});
+
+// ── bootInstance (discovery) ────────────────────────────────────────────
+
+test("bootInstance resolves my machine: in-zone URL, waking flag honored", async () => {
+  const { calls } = stubFetch((url) =>
+    url.includes("/boot")
+      ? { ok: true, body: { url: "https://waddle-u123abc-dead42.ddg-waddle.containers.tinfoil.dev", instance: "waddle-u123abc-dead42", status: "waking", detail: "deployed" } }
+      : { ok: true },
+  );
+  const r = await bootInstance(async () => "tok", 150_000, "ddg-waddle.containers.tinfoil.dev");
+  assert.equal(r.ok, true);
+  assert.equal(r.waking, true);
+  assert.match(r.url!, /waddle-u123abc-dead42\.ddg-waddle/);
+  assert.match(bearer(calls[0]!), /^Bearer tok$/);
+});
+
+test("bootInstance refuses an out-of-zone machine URL", async () => {
+  stubFetch(() => ({ ok: true, body: { url: "https://evil.example.com", status: "running" } }));
+  const r = await bootInstance(async () => "tok", 150_000, "ddg-waddle.containers.tinfoil.dev");
+  assert.equal(r.ok, false);
+  assert.match(r.detail!, /unusable machine URL/);
+});
+
+test("bootInstance: status running means no wake wait", async () => {
+  stubFetch(() => ({ ok: true, body: { url: "https://waddle-u123abc-dead42.ddg-waddle.containers.tinfoil.dev", status: "running" } }));
+  const r = await bootInstance(async () => "tok", 150_000, "ddg-waddle.containers.tinfoil.dev");
+  assert.equal(r.waking, false);
+});
+
+test("bootInstance without a session says so — no request leaves", async () => {
+  const { calls } = stubFetch(() => ({ ok: true }));
+  const r = await bootInstance(async () => null);
+  assert.equal(r.ok, false);
+  assert.match(r.detail!, /no betterbase session/);
+  assert.equal(calls.length, 0);
+});
+
+test("bootInstance reports a concierge refusal with its status", async () => {
+  stubFetch(() => ({ ok: false, body: "user identity required" }));
+  const r = await bootInstance(async () => "tok", 150_000, "ddg-waddle.containers.tinfoil.dev");
+  assert.equal(r.ok, false);
+  assert.match(r.detail!, /concierge refused \(503\)/);
+});
+
+test("bootInstance refuses when no zone is known (dev shape) or the URL is malformed", async () => {
+  stubFetch(() => ({ ok: true, body: { url: "https://waddle-u12345678-dead42.ddg-waddle.containers.tinfoil.dev", status: "running" } }));
+  assert.match((await bootInstance(async () => "tok", 150_000, "")).detail!, /unusable/);
+  stubFetch(() => ({ ok: true, body: { url: "not-a-url", status: "running" } }));
+  assert.match((await bootInstance(async () => "tok", 150_000, "ddg-waddle.containers.tinfoil.dev")).detail!, /unusable/);
+});
+
+test("bootInstance zone check has a label boundary — evil<tinfoil.dev> suffixes do not pass", async () => {
+  stubFetch(() => ({ ok: true, body: { url: "https://evilddg-waddle.containers.tinfoil.dev", status: "running" } }));
+  const r = await bootInstance(async () => "tok", 150_000, "ddg-waddle.containers.tinfoil.dev");
+  assert.equal(r.ok, false);
+});
+
+test("bootInstance reports a silent stall as a stall, not unreachable", async () => {
+  globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () =>
+        reject(Object.assign(new Error("aborted due to timeout"), { name: "TimeoutError" })));
+    })) as typeof fetch;
+  const r = await bootInstance(async () => "tok", 25, "ddg-waddle.containers.tinfoil.dev");
+  assert.match(r.detail!, /stalled/);
+});
+
+test("assignStandby label boundary — a suffix that is not a label does not pass", async () => {
+  stubFetch(() => ({ ok: true, body: { url: "https://evilcontainers.tinfoil.dev" } }));
+  // zone ".containers.tinfoil.dev": host must be exactly that or end ".containers.tinfoil.dev"
+  assert.equal(await assignStandby(async () => "tok", ".containers.tinfoil.dev"), null);
 });

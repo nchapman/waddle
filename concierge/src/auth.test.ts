@@ -12,9 +12,9 @@ test("secretOk: exact match passes, everything else fails", () => {
 
 test("no JWKS configured: shared secret is the only key", async () => {
   const verify = createVerifyExternal({ sharedSecret: "s3cret" });
-  assert.equal(await verify("s3cret"), true);
-  assert.equal(await verify("not-a-jwt"), false);
-  assert.equal(await verify(undefined), false);
+  assert.deepEqual(await verify("s3cret"), { kind: "secret" });
+  assert.equal(await verify("not-a-jwt"), null);
+  assert.equal(await verify(undefined), null);
 });
 
 test("valid bb JWT passes even when the secret would not", async () => {
@@ -25,7 +25,7 @@ test("valid bb JWT passes even when the secret would not", async () => {
       throw new Error("bad signature");
     },
   });
-  assert.equal(await verify("good-jwt"), true);
+  assert.deepEqual(await verify("good-jwt"), { kind: "jwt", sub: "user-1" });
 });
 
 test("JWKS configured does NOT lock machines out: a failed JWT falls through to the shared secret", async () => {
@@ -38,8 +38,8 @@ test("JWKS configured does NOT lock machines out: a failed JWT falls through to 
       throw new Error("not a bb JWT");
     },
   });
-  assert.equal(await verify("s3cret"), true);
-  assert.equal(await verify("neither-key"), false);
+  assert.deepEqual(await verify("s3cret"), { kind: "secret" });
+  assert.equal(await verify("neither-key"), null);
 });
 
 test("neither key: rejected", async () => {
@@ -50,6 +50,27 @@ test("neither key: rejected", async () => {
       throw new Error("bad");
     },
   });
-  assert.equal(await verify("wrong-token"), false);
-  assert.equal(await verify(undefined), false);
+  assert.equal(await verify("wrong-token"), null);
+  assert.equal(await verify(undefined), null);
+});
+
+test("a JWT without a string sub is NOT a user identity — falls through to the secret", async () => {
+  // /boot keys machines by sub; a token that verifies but carries no sub
+  // must not silently pass as a user. (It also isn't the secret, so the
+  // whole verify returns null — bearer of nothing.)
+  const verify = createVerifyExternal({
+    sharedSecret: "s3cret",
+    verifyJwt: async () => ({ sub: 12345 }),
+  });
+  assert.equal(await verify("sub-less-jwt"), null);
+  assert.deepEqual(await verify("s3cret"), { kind: "secret" });
+});
+
+test("a jose-shaped leg result ({payload}) unwraps to claims — both leg shapes verify", async () => {
+  // The default leg destructures jose's {payload, protectedHeader}; the
+  // reader must ALSO survive a leg that hands back the wrapper raw.
+  const verify = createVerifyExternal({
+    verifyJwt: async () => ({ payload: { sub: "user-9" } }),
+  });
+  assert.deepEqual(await verify("wrapper-jwt"), { kind: "jwt", sub: "user-9" });
 });
