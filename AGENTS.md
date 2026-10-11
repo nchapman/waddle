@@ -98,6 +98,17 @@
   were tuned 2026-10-10 to blunt the local amplification. Random per-boot
   names ("every boot is a standby") would kill the class — parked in
   PLAN.md territory (discovery via concierge, zone-bind trust).
+- **Stop keeps NOTHING user-visible (docs-verified 2026-10-11)**: the
+  enclave filesystem is a ramdisk — "in-memory state and ephemeral
+  filesystem writes do not survive Stop"; we attach no volumes. Stop
+  retains only the saved config + secret bindings (+ attached volumes,
+  which we don't use); DNS is stripped either way. So sleep ≠ data
+  retention — the shelf is the ONLY state; sleep is decision latency
+  (instant billing pause, reversible) + one-verb wake against the
+  saved spec. The browser profile dies on every sleep (too big for
+  escrow's 768KiB arm cap); encrypted volumes (survive stop AND delete
+  as unattached disks) keyed under the user's escrow secret are the
+  parked fix — PLAN.md territory.
 - **A deployed-but-unattended machine lives ~10.5min by design**: the
   locked-boot stop backstop (WADDLE_IDLE_MS+30s) reaps boots nobody
   unlocks, and the concierge's 24h-quiet sweep reaps machines its table
