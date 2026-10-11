@@ -86,6 +86,13 @@ export function createTable(onStop: (instance: string) => void, onWake: (instanc
     entry(instance: string): Entry | undefined {
       return table.get(instance);
     },
+    /** Drop an instance entirely (machine destroyed): entry, rows, and
+     *  every pending chain — chains no-op on their next identity check
+     *  once the entry is gone. Ghost rows otherwise inflate /health and
+     *  /status for the process lifetime (audit M3). */
+    forget(instance: string): void {
+      table.delete(instance);
+    },
     /** Stop row: replace = debounce; dueMs 0 = cancel. */
     setStop(instance: string, dueMs: number): "replaced" | "cleared" {
       const e = entryFor(instance);

@@ -2,8 +2,10 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHandoffStore } from "./handoff.js";
 
-// Today's payload shape: an opaque bag the store never interprets.
-const CRED = { autonomyKey: "ak_s3cret", schedules: [{ id: "j1", title: "t", prompt: "p", enabled: true }] };
+// Today's payload shape: an opaque bag the store never interprets
+// (the real arm carries { secret, schedules[], snapshot? } — master
+// secret under the tier-2 opt-in; keys here are arbitrary).
+const CRED = { secret: "s3cret", schedules: [{ id: "j1", title: "t", prompt: "p", enabled: true }] };
 
 function store(opts: Parameters<typeof createHandoffStore>[0] = {}) {
   let t = 1_000_000;

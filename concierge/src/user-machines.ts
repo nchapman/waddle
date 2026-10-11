@@ -2,7 +2,7 @@
  * @waddle/concierge — the user→machine registry (the cattle spine).
  *
  * Every user (a betterbase `sub`) gets machines named
- * `waddle-u<hash6>-<rand6>`: the hash encodes the user (so a concierge
+ * `waddle-u<hash8>-<rand6>`: the hash encodes the user (so a concierge
  * reboot can REBIND from the platform list without a persisted map —
  * one-way, no PII in the name), the rand makes every mint fresh (a new
  * name has no negative-cache history anywhere — the DNS class dies at

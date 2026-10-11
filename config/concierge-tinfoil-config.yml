@@ -33,7 +33,7 @@ networks:
   control:
     egress: allowlist
     allow:
-      - api.tinfoil.sh   # the only verb surface: container deploy/stop/list
+      - api.tinfoil.sh   # the only verb surface: container create/deploy/stop/list/delete
       - accounts.betterbase.dev   # JWKS fetch (client JWT verification)
       # NOTE: instance /health probes CANNOT be allowlisted here — the platform
       # resolves entries at deploy time, and instance hosts NXDOMAIN while
@@ -48,8 +48,6 @@ shim:
     - /status
     - /handshake
     - /timer
-    - /wake
-    - /assign
     - /boot
     - /boot/ready
     - /handoff

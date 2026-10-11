@@ -147,9 +147,11 @@ export interface ErrorEvent {
 // ── Concierge wire ─────────────────────────────────────────────────────
 // The always-on lifecycle timer: a table of {instance, action, due} rows
 // plus memory-only escrows. Writes are POST with `instance` in the body
-// (no URL-borne secrets); the read-only /health, /assign, /status are GET
-// (assign and status carry their bearer in the header). Auth tiers:
-//   external  bb JWT or shared secret  (/wake /assign /status)
+// (no URL-borne secrets); the read-only /health, /boot/ready, /status
+// are GET (boot/ready and status carry their bearer in the header).
+// Auth tiers:
+//   external  bb JWT or shared secret  (/boot/ready /status)
+//   jwt-user  bb JWT, sub-identifying  (/boot — the discovery/wake verb)
 //   session   handshake-minted token   (/timer /handoff/post /handoff/post/pull)
 //   secret    shared secret only       (/handshake bearer — it mints sessions;
 //                                       /handoff, /handoff/pull — machine verbs that move the master secret)
@@ -231,14 +233,6 @@ export interface PostboxPullResponse {
   blob: string;
 }
 
-/** POST /wake — the client's "user came online" immediate verb. */
-export interface WakeRequest {
-  instance: string;
-}
-export interface WakeResponse {
-  status: "waking";
-  detail: string;
-}
 
 /** POST /boot — the client's discovery verb: "my machine, running".
  *  `fresh: true` = the client watched the previous machine die (it stops
@@ -266,8 +260,4 @@ export interface BootResponse {
 export interface BootReadyResponse {
   instance: string;
   ready: boolean;
-}
-export interface AssignResponse {
-  name: string;
-  url: string;
 }

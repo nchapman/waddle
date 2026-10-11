@@ -91,6 +91,11 @@ const PORT = Number(process.env.PORT ?? 8080);
 const VERSION = pkg.version;
 /** Idle gate: no ACTIVITY for this long → sleep. A dev override shortens it. */
 const IDLE_MS = Number(process.env.WADDLE_IDLE_MS ?? 600_000); // 10 min
+/** Platform-key presence at MODULE LOAD — the one honest prod/dev
+ *  discriminator. Captured here because initAgent later writes the
+ *  client-supplied inference key into the same env var, which used to
+ *  silently flip the dev file-arm gate to "prod" (audit finding). */
+const PLATFORM_KEY_AT_BOOT = process.env.TINFOIL_API_KEY != null;
 
 // Ring buffer of recent log lines — tinfoil gives us no logs/exec, so the
 // session-gated /debug/log endpoint is the only window into a live enclave.
@@ -623,11 +628,13 @@ async function rearmEscrow(): Promise<void> {
     if (!ok) app.log.warn({ horizon }, "sleep-gate escrow re-arm failed — next wake boot stays locked");
   }
   // Dev file arm ONLY — two independent gates: no platform-injected
-  // key (prod always has TINFOIL_API_KEY; volumes there are ephemeral
-  // anyway, so the file would never be read) AND wake autonomy
-  // explicitly on (the dev compose setting). A plaintext master at
-  // rest is a dev-localhost trust call; prod never writes it.
-  if (!process.env.TINFOIL_API_KEY && autonomyEnabled()) {
+  // key at BOOT (captured before any unlock — initAgent writes the
+  // client-supplied key into the SAME env var, which used to flip this
+  // gate to "prod" mid-session and silently skip the arm: the dev wake
+  // E2E loop's only key carrier) AND wake autonomy explicitly on (the
+  // dev compose setting). A plaintext master at rest is a
+  // dev-localhost trust call; prod never writes it.
+  if (!PLATFORM_KEY_AT_BOOT && autonomyEnabled()) {
     try {
       armWakeCredential({ secret: armSecret, schedules: activeSchedules(), snapshot, inferenceKey: armInferenceKey ?? undefined });
     } catch {

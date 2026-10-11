@@ -28,8 +28,10 @@ export interface PoolDeps {
   boot(name: string): Promise<void>;
   /** Stop and delete a standby. Idempotent. */
   destroy(name: string): Promise<void>;
-  /** Plain health probe — true iff the machine answers. */
-  health(name: string): Promise<boolean>;
+  /** Health probe — true/false, or undefined when UNKNOWN this pass
+   *  (platform list failure). Unknown must never read as dead: one
+   *  `container list` blip would destroy every warm machine (I7). */
+  health(name: string): Promise<boolean | undefined>;
   urlFor(name: string): string;
   /** Next standby name that doesn't collide with tracked machines. */
   nextName(): string;
@@ -152,10 +154,16 @@ export function createPool(cfg: PoolConfig, deps: PoolDeps): Pool {
         continue;
       }
       const expired = deps.now() - m.createdAt > cfg.ttlMs;
-      const dead = m.state === "warm" && !(await deps.health(m.name).catch(() => false));
-      const staleTag =
-        cfg.expectedTag && m.state !== "booting" && deps.tagOf &&
-        (await deps.tagOf(m.name).catch(() => undefined)) !== cfg.expectedTag;
+      // UNKNOWN ≠ DEAD (I7): a failed status fetch skips the
+      // health/tag reaps this pass — TTL still applies (it needs no
+      // platform answer), but a blip can't destroy warm stock.
+      const health = await deps.health(m.name).catch(() => undefined);
+      const dead = m.state === "warm" && health === false;
+      let staleTag = false;
+      if (cfg.expectedTag && m.state !== "booting" && deps.tagOf && health !== undefined) {
+        const tag = await deps.tagOf(m.name).catch(() => undefined);
+        staleTag = tag !== undefined && tag !== cfg.expectedTag;
+      }
       if (expired || dead || staleTag) {
         deps.log(
           expired ? "standby ttl expired — destroying" : dead ? "warm standby unhealthy — destroying" : "standby tag stale — destroying (measurement pin would refuse it)",
@@ -220,7 +228,7 @@ export function createPool(cfg: PoolConfig, deps: PoolDeps): Pool {
 
   /** Adopt Running leftovers whose claim status died with a restart.
    *  NEVER assignable (assign() hands out warm only): a Running
-   *  standby may be a machine a user already claimed via /assign and
+   *  standby may be a machine a user already claimed via /boot and
    *  unlocked — handing its URL to a second user, or TTL-deleting it
    *  mid-session, would violate the claim. Reaped on the claim-grace
    *  clock instead (review finding). */

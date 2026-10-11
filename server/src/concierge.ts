@@ -29,7 +29,7 @@ const CONCIERGE_URL = process.env.CONCIERGE_URL ?? "";
  * concierge's namespace gates refuse: an unnamed machine has no
  * identity, by design. */
 export const UNADOPTED = "unadopted";
-let INSTANCE = process.env.WADDLE_INSTANCE ?? UNADOPTED;
+let INSTANCE = process.env.WADDLE_INSTANCE ?? UNADOPTED; // dev-only bake — see the boot notice by log()
 const NAME_SHAPE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 function adoptInstance(name: unknown): void {
   if (typeof name === "string" && NAME_SHAPE.test(name) && name !== INSTANCE) {
@@ -59,6 +59,13 @@ let sessionToken: string | null = null;
 
 const log = (msg: string, extra?: Record<string, unknown>) =>
   console.log(JSON.stringify({ level: 30, time: Date.now(), module: "concierge-client", msg, ...extra }));
+
+// WADDLE_INSTANCE is the DEV-COMPOSE baked identity (pairs with the dev
+// concierge's CONCIERGE_ALLOWED_INSTANCES). Prod never sets it: a stray
+// prod bake would resurrect the shared-name bug class this file killed.
+if (process.env.WADDLE_INSTANCE) {
+  log("WADDLE_INSTANCE set — dev-only baked identity (prod machines adopt)", { instance: process.env.WADDLE_INSTANCE });
+}
 
 async function post<T>(path: string, body: object, bearer: string): Promise<T | null> {
   if (!CONCIERGE_URL) return null;

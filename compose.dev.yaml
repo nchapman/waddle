@@ -11,6 +11,9 @@ services:
     environment:
       # The agent's pen: host-side concierge via the docker-host bridge.
       CONCIERGE_URL: http://host.docker.internal:8091
+      # Dev-only baked identity: pairs with `just concierge`'s
+      # CONCIERGE_ALLOWED_INSTANCES=waddle (the one dev machine). Prod
+      # machines adopt their name from the concierge (sentinel default).
       WADDLE_INSTANCE: waddle
       # Wake autonomy + tight loop for E2E: idle after 2 min quiet; the
       # stop backstop arms at idle+30s (concierge.ts) so the checkpoint-exit

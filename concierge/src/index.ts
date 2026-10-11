@@ -37,7 +37,6 @@ import type {
   PostboxPostRequest,
   PostboxPullRequest,
   TimerRequest,
-  WakeRequest,
   BootRequest,
 } from "@waddle/sdk";
 import pkg from "../package.json" with { type: "json" };
@@ -99,8 +98,9 @@ if (POOL_SIZE > 0 && !POOL_CAPABLE) {
 }
 const POOL_ENABLED = POOL_SIZE > 0 && POOL_CAPABLE;
 const STANDBY_NAME_RE = standbyNameRe(STANDBY_PREFIX);
-/** How long a claimed-but-abandoned standby may live (the /assign grace
- *  row AND the pool's foreign-reap clock share this one knob). */
+/** How long a claimed-but-abandoned machine may live (the /boot
+ *  claim-grace rows AND the pool's foreign-reap clock share this one
+ *  knob). */
 const CLAIM_GRACE_MS = envInt("STANDBY_CLAIM_GRACE_MS", 12 * 3600_000, 60_000);
 
 // ── User machines (the cattle spine — module semantics in
@@ -116,7 +116,7 @@ const USER_NAME_RE = userNameRe();
 /** The tag every deploy boots — the pool's tag by default, so /wake and
  *  standby creates can never skew from what the client verifies (latest
  *  release of the config repo). */
-const DEPLOY_TAG = process.env.CONCIERGE_DEPLOY_TAG ?? (POOL_CAPABLE ? STANDBY_CONFIG_TAG : "");
+const DEPLOY_TAG = process.env.CONCIERGE_DEPLOY_TAG ?? (STANDBY_CONFIG_TAG || "");
 const platform = createPlatform({
   backend: BACKEND as "docker" | "tinfoil",
   deployTag: DEPLOY_TAG,
@@ -189,7 +189,7 @@ const wakeRetries = new Map<string, number>();
 
 // ── Auth ─────────────────────────────────────────────────────────────────
 // Four tiers, one grep away:
-//   requireExternal  bb JWT or shared secret  (/wake /assign /status)
+//   requireExternal  bb JWT or shared secret  (/boot/ready /status)
 //   requireJwtUser   bb JWT, returns its sub  (/boot — machines have no
 //                    user identity; the shared secret is NOT enough)
 //   requireSession   handshake-minted token   (/timer /handoff/post /handoff/post/pull)
@@ -362,6 +362,7 @@ app.post<{ Body: BootRequest }>("/boot", async (req, reply) => {
         app.log.warn({ instance: got.name, tag, expected: STANDBY_CONFIG_TAG }, "boot: refusing stale-tag standby — destroying");
         await platform.destroy(got.name).catch(() => undefined);
         users.forget(got.name);
+        table.forget(got.name);
       } else {
         users.claim(sub, got.name);
         table.setStop(got.name, CLAIM_GRACE_MS);
@@ -385,10 +386,19 @@ app.post<{ Body: BootRequest }>("/boot", async (req, reply) => {
       await createInstance(name);
     } catch (e) {
       users.forget(name);
+      table.forget(name);
       app.log.warn({ err: String(e) }, "boot: create failed");
       return reply.code(502).send({ error: e instanceof Error ? e.message : String(e) });
     }
     table.userWake(name);
+    // The fresh-mint's OWN bound: a machine booted but never unlocked
+    // cannot arm its own rows (identity-less — the sentinel 403s by
+    // design), and the sweep's bound-skip would spare it forever as a
+    // "claimed" machine. Same grace row as a warm claim: if the user
+    // unlocks, the machine's own timer writes replace it; if they
+    // abandon the boot, the row fires within grace (audit C1 — a
+    // designed reaper that silently no-oped for this whole class).
+    table.setStop(name, CLAIM_GRACE_MS);
     // Wait for Running via the platform API before handing out the URL:
     // the DNS record lands ~when the machine goes Running, and the
     // client's first /health poll must not query a record that doesn't
@@ -518,21 +528,6 @@ app.post<{ Body: TimerRequest }>("/timer", async (req, reply) => {
   return { ok: true, wake: table.setWake(instance, job_id, due_ms), job_id };
 });
 
-/** The one immediate verb — the client's "user came online" path. */
-app.post<{ Body: WakeRequest }>("/wake", async (req, reply) => {
-  const { instance } = req.body ?? {};
-  if (!allowedInstance(instance)) return reply.code(403).send({ error: "instance not allowed" });
-  if (!(await requireExternal(req, reply))) return reply;
-  pool?.markDemand(); // a wake is service use too — arm pool warmth (scale-to-0 gate)
-  // A user present means the machine should live: clear any pending stop.
-  table.userWake(instance);
-  try {
-    const detail = await platform.ensure(instance);
-    return reply.code(202).send({ status: "waking", detail });
-  } catch (err) {
-    return reply.code(502).send({ error: err instanceof Error ? err.message : String(err) });
-  }
-});
 
 /** Operator/debug: the table, no secrets — but AUTHENTICATED (SME
  *  review): the snapshot names standby machines (names authorize the
@@ -682,10 +677,23 @@ const pool: Pool | null = POOL_CAPABLE
             poolNames.delete(name);
           }
         },
-        health: async (name) => (await platform.statuses().catch(() => new Map())).get(name) === "Running",
+        // UNKNOWN ≠ DEAD (audit I7): a thrown `container list` (CLI
+        // timeout, API 5xx) must not read as "every warm machine is
+        // unhealthy" — the tick would destroy the whole pool on one
+        // blip. Errors propagate; tick skips reaping unknown machines.
+        health: async (name) => {
+          const statuses = await platform.statuses();
+          const st = statuses.get(name);
+          if (st === undefined) return undefined; // unknown this pass
+          return st === "Running";
+        },
         urlFor: (name) => `https://${name}.${DOMAIN_BASE}`,
-        tagOf: async (name) =>
-          (await platform.statusRows().catch(() => new Map())).get(name)?.tag,
+        tagOf: async (name) => {
+          const rows = await platform.statusRows();
+          const row = rows.get(name);
+          if (row === undefined) return undefined; // unknown ≠ stale
+          return row.tag;
+        },
         nextName: () => {
           for (let i = 1; ; i++) {
             const n = `${STANDBY_PREFIX}${i}`;
@@ -771,7 +779,10 @@ if (BACKEND === "tinfoil") {
             app.log.warn({ instance: name }, "janitor: orphan user machine — destroying");
             void platform
               .destroy(name)
-              .then(() => users.forget(name))
+              .then(() => {
+                users.forget(name);
+                table.forget(name);
+              })
               .catch(() => undefined); // retried next scan
           }
         }
@@ -811,6 +822,7 @@ setInterval(
         await platform.destroy(name).catch((err) => app.log.warn({ err: String(err) }, "backstop destroy failed"));
         users.retire(name);
         users.forget(name);
+        table.forget(name); // ghost rows outlive the machine otherwise
       }
     })();
   },

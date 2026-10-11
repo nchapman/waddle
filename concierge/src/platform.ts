@@ -64,8 +64,6 @@ export interface Platform {
    *  Chrome, and before it the local chain). False on timeout — the
    *  caller reports honestly. */
   awaitDns(host: string, timeoutMs?: number): Promise<boolean>;
-  /** One /health probe (bounded) — the readiness endpoint's final check. */
-  probe(url: string, timeoutMs?: number): Promise<boolean>;
 }
 
 /** Last few lines of CLI output, pipe-joined — deploy details for logs. */
@@ -114,7 +112,6 @@ export function createPlatform(opts: {
       },
       waitRunning: (instance: string) => start(instance).then(() => true, () => false), // docker start is synchronous
       awaitDns: () => Promise.resolve(true), // docker-local hosts resolve via /etc/hosts — nothing to wait for
-      probe, // the injected/real probe — same reachability check as tinfoil
       statusRows: () => Promise.resolve(new Map()), // docker has no tag feed
     };
   }
@@ -210,7 +207,7 @@ export function createPlatform(opts: {
    *  409 dance is the recovery; failed deploys re-arm on their retry
    *  budget.
    *
-   *  "user" (/wake): non-destructive by default. A failed probe cannot
+   *  "user" (zombie recovery): non-destructive by default. A failed probe cannot
    *  distinguish a dead agent from egress-blocking-the-probe, and the
    *  client polls /health itself either way — so a silent machine is
    *  reported, never stopped. A true zombie degrades to today's
@@ -318,5 +315,5 @@ export function createPlatform(opts: {
     return start(instance);
   }
 
-  return { start, rest, destroy, statuses, statusRows, list, ensure, redeploy, waitRunning, awaitDns, probe: (url, ms) => probe(url, ms ?? 5_000) };
+  return { start, rest, destroy, statuses, statusRows, list, ensure, redeploy, waitRunning, awaitDns };
 }

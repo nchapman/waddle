@@ -125,8 +125,7 @@ export function App() {
    *
    *  Live mode is discovery-first: /boot asks the concierge for MY
    *  machine (per-user cattle name, warm from the pool when possible).
-   *  The legacy primary /wake stays as the fallback while discovery
-   *  beds in — and is the whole story in dev parity. */
+   *  Dev compose is always-on and skips the concierge entirely. */
   async function wakeCore(note: string) {
     setState({ phase: "asleep", waking: true, note });
     if (DEV) {
@@ -139,6 +138,24 @@ export function App() {
       return;
     }
     {
+      // Wait for the betterbase session to hydrate (audit critical):
+      // App's mount effect runs BEFORE AuthProvider's restore, so a
+      // first-load /boot would deterministically fire with no token and
+      // die on "no betterbase session" while the footer says connected.
+      // Same ≤3s settle doUnlock uses for the identical race.
+      if (bbLoadingRef.current) {
+        await new Promise<void>((resolve) => {
+          const settle = () => {
+            clearInterval(poll);
+            clearTimeout(t);
+            resolve();
+          };
+          const t = setTimeout(settle, 3_000);
+          const poll = setInterval(() => {
+            if (!bbLoadingRef.current) settle();
+          }, 100);
+        });
+      }
       const booted = await bootInstance(conciergeAuth, 300_000, undefined, machineDiedRef.current);
       if (booted.ok && booted.url) {
         discoveryTriedRef.current = true;
