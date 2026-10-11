@@ -14,15 +14,19 @@ jobs:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
     steps:
       - uses: actions/checkout@v4
-      # The client's betterbase dep is a link: to a sibling checkout
-      # (../../betterbase-dev). Checkout can't write outside the workspace,
-      # so fetch inside and move it to the sibling path the link resolves
-      # to. Tracks the upstream default branch.
+      # The client's betterbase dep is a link: to a sibling path
+      # (../../betterbase-dev/betterbase/js — the local dev workspace nests
+      # it that way). The public BetterbaseHQ/betterbase repo has the same
+      # package at js/ (package.json byte-identical). Checkout can't write
+      # outside the workspace, so fetch inside and move it to the exact
+      # path the link resolves to. Tracks the upstream default branch.
       - uses: actions/checkout@v4
         with:
           repository: BetterbaseHQ/betterbase
           path: .bb-checkout
-      - run: mv "$GITHUB_WORKSPACE/.bb-checkout" "${GITHUB_WORKSPACE}/../betterbase-dev"
+      - run: |
+          mkdir -p "${GITHUB_WORKSPACE}/../betterbase-dev/betterbase"
+          mv "$GITHUB_WORKSPACE/.bb-checkout" "${GITHUB_WORKSPACE}/../betterbase-dev/betterbase/js"
       - uses: pnpm/action-setup@v4 # reads packageManager from package.json
       - uses: actions/setup-node@v4
         with:
