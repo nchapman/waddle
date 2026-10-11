@@ -36,6 +36,11 @@ export interface PoolDeps {
   /** May the pool boot a new standby right now? (Release-window
    * deferral — see index.ts. Absent = always may.) */
   canFill?(): boolean;
+  /** The instance's deployed tag (platform list; absent = unknown).
+   *  With cfg.expectedTag set, warm stock on a stale tag is destroyed —
+   *  a user handed a stale standby gets refused by their client's
+   *  measurement pin (live-proven), so stale warmth is worthless. */
+  tagOf?(name: string): Promise<string | undefined>;
   now(): number;
   log(msg: string, fields?: Record<string, unknown>): void;
 }
@@ -49,6 +54,10 @@ export interface PoolConfig {
    *  this clock — the claim bound, NOT the pool TTL: a machine a user
    *  unlocked may be mid-session, and claims outlive pool rows. */
   claimGraceMs?: number;
+  /** The tag warm stock must carry (STANDBY_CONFIG_TAG). Machines on
+   *  any other tag are reaped on tick — measurement-stale warmth serves
+   *  no one (the client's pin refuses it). */
+  expectedTag?: string;
 }
 
 export interface Pool {
@@ -134,8 +143,14 @@ export function createPool(cfg: PoolConfig, deps: PoolDeps): Pool {
       }
       const expired = deps.now() - m.createdAt > cfg.ttlMs;
       const dead = m.state === "warm" && !(await deps.health(m.name).catch(() => false));
-      if (expired || dead) {
-        deps.log(expired ? "standby ttl expired — destroying" : "warm standby unhealthy — destroying", { name: m.name, age_ms: deps.now() - m.createdAt });
+      const staleTag =
+        cfg.expectedTag && m.state !== "booting" && deps.tagOf &&
+        (await deps.tagOf(m.name).catch(() => undefined)) !== cfg.expectedTag;
+      if (expired || dead || staleTag) {
+        deps.log(
+          expired ? "standby ttl expired — destroying" : dead ? "warm standby unhealthy — destroying" : "standby tag stale — destroying (measurement pin would refuse it)",
+          { name: m.name, age_ms: deps.now() - m.createdAt },
+        );
         await destroyMachine(m);
       }
     }

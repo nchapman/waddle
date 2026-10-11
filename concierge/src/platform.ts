@@ -35,6 +35,9 @@ export interface Platform {
    *  the leftover scan, and the backstop sweep share one `container
    *  list` per tick. Empty map on docker. */
   statuses(): Promise<Map<string, string>>;
+  /** Status + deployed tag per instance (the pool's stale-tag reap and
+   *  /boot's warm-claim gate read the tag from here). */
+  statusRows(): Promise<Map<string, { status: string; tag?: string }>>;
   /** Every instance name the backend knows. */
   list(): Promise<string[]>;
   /** Health-first start, mode-aware (see the tinfoil implementation):
@@ -103,6 +106,7 @@ export function createPlatform(opts: {
       waitRunning: (instance: string) => start(instance).then(() => true, () => false), // docker start is synchronous
       awaitDns: () => Promise.resolve(true), // docker-local hosts resolve via /etc/hosts — nothing to wait for
       probe, // the injected/real probe — same reachability check as tinfoil
+      statusRows: () => Promise.resolve(new Map()), // docker has no tag feed
     };
   }
 
@@ -154,10 +158,10 @@ export function createPlatform(opts: {
   }
 
   let statusCache: { at: number; rows: Map<string, { status: string; domain?: string }> } | null = null;
-  async function listRows(): Promise<Map<string, { status: string; domain?: string }>> {
+  async function listRows(): Promise<Map<string, { status: string; domain?: string; tag?: string }>> {
     if (statusCache && Date.now() - statusCache.at < 10_000) return statusCache.rows;
     const { stdout } = await exec("tinfoil", ["container", "list"], { timeout: 60_000 });
-    const rows = new Map<string, { status: string; domain?: string }>();
+    const rows = new Map<string, { status: string; domain?: string; tag?: string }>();
     // Header row then one row per instance: NAME STATUS DOMAIN TAG REPO.
     // Column-shape guard: a domain's LAST label is alphabetic (example.dev)
     // — a dotted TAG (v0.3.18) must never smuggle in as a probe host.
@@ -166,10 +170,19 @@ export function createPlatform(opts: {
     for (const line of stdout.split("\n").slice(1)) {
       const cols = line.trim().split(/\s+/);
       const domain = looksLikeDomain(cols[2]) ? cols[2] : undefined;
-      if (cols.length >= 2 && cols[0] && cols[0] !== "NAME") rows.set(cols[0]!, { status: cols[1]!, domain });
+      // TAG: vNNN.N.N shape when the DOMAIN column is present, else the
+      // dotted-column guard already rejected it — take the first
+      // vN.N-shaped column.
+      const tag = cols.find((c, i) => i >= 2 && /^v\d+\.\d+/.test(c ?? ""));
+      if (cols.length >= 2 && cols[0] && cols[0] !== "NAME") rows.set(cols[0]!, { status: cols[1]!, domain, tag });
     }
     statusCache = { at: Date.now(), rows };
     return rows;
+  }
+
+  /** Status + tag per instance (memoized with the same cache). */
+  async function statusRows(): Promise<Map<string, { status: string; tag?: string }>> {
+    return listRows();
   }
 
   async function statuses(): Promise<Map<string, string>> {
@@ -257,5 +270,5 @@ export function createPlatform(opts: {
     return false;
   }
 
-  return { start, rest, statuses, list, ensure, waitRunning, awaitDns, probe: (url, ms) => probe(url, ms ?? 5_000) };
+  return { start, rest, statuses, statusRows, list, ensure, waitRunning, awaitDns, probe: (url, ms) => probe(url, ms ?? 5_000) };
 }

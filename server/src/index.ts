@@ -8,6 +8,7 @@ import websocket from "@fastify/websocket";
 import cors from "@fastify/cors";
 import { WebSocket } from "ws";
 import { readFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { hello, type GatewayEvent, type UnlockRequest, type UnlockResponse, type StateResponse } from "@waddle/sdk";
 import pkg from "../package.json" with { type: "json" };
 import { Lock, freshNonce } from "./state.js";
@@ -195,7 +196,12 @@ function requireSession(request: { headers: Record<string, unknown> }, token?: s
   return lock.verify(bearer);
 }
 
-app.get("/health", async () => hello(VERSION, !lock.unlocked, lock.storage));
+app.get("/health", async () => ({
+  ...hello(VERSION, !lock.unlocked, lock.storage),
+  // The platform fact the cattle identity keys on: does the enclave's
+  // hostname equal its instance name? (Read once, live; harmless rest.)
+  hostname: hostname(),
+}));
 
 // Platform facts (no user data): what the enclave runtime lets us do.
 // Feeds the Docker-in-Docker feasibility question — caps, seccomp, mounts.

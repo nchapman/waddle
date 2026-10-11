@@ -369,11 +369,22 @@ app.post<{ Body: BootRequest }>("/boot", async (req, reply) => {
   if (!name && POOL_ENABLED && pool) {
     const got = pool.assign();
     if (got) {
-      users.claim(sub, got.name);
-      table.setStop(got.name, CLAIM_GRACE_MS);
-      void pool.tick().catch(() => undefined);
-      name = got.name;
-      app.log.info({ user: hashSub(sub), instance: name }, "boot: claimed warm standby");
+      // Claim-time tag gate: a warm standby on any tag but the current
+      // release would sail through assignment and die at the client's
+      // measurement pin (live-proven refusal class). Refuse here, stop
+      // the stale stock, fall through to a fresh mint.
+      const tag = (await platform.statusRows().catch(() => new Map())).get(got.name)?.tag;
+      if (tag && tag !== (STANDBY_CONFIG_TAG || tag)) {
+        app.log.warn({ instance: got.name, tag, expected: STANDBY_CONFIG_TAG }, "boot: refusing stale-tag standby — destroying");
+        await platform.rest(got.name).catch(() => undefined);
+        users.forget(got.name);
+      } else {
+        users.claim(sub, got.name);
+        table.setStop(got.name, CLAIM_GRACE_MS);
+        void pool.tick().catch(() => undefined);
+        name = got.name;
+        app.log.info({ user: hashSub(sub), instance: name }, "boot: claimed warm standby");
+      }
     }
   }
   let fresh = false;
@@ -619,7 +630,7 @@ app.post<{ Body: PostboxPullRequest }>("/handoff/post/pull", async (req, reply) 
 const poolNames = new Set<string>();
 const pool: Pool | null = POOL_CAPABLE
   ? createPool(
-      { size: POOL_ENABLED ? POOL_SIZE : 0, ttlMs: STANDBY_TTL_MS, claimGraceMs: CLAIM_GRACE_MS },
+      { size: POOL_ENABLED ? POOL_SIZE : 0, ttlMs: STANDBY_TTL_MS, claimGraceMs: CLAIM_GRACE_MS, expectedTag: STANDBY_CONFIG_TAG || undefined },
       {
         boot: async (name) => {
           poolNames.add(name); // burn the name even on failure — a colliding
@@ -640,6 +651,8 @@ const pool: Pool | null = POOL_CAPABLE
         },
         health: async (name) => (await platform.statuses().catch(() => new Map())).get(name) === "Running",
         urlFor: (name) => `https://${name}.${DOMAIN_BASE}`,
+        tagOf: async (name) =>
+          (await platform.statusRows().catch(() => new Map())).get(name)?.tag,
         nextName: () => {
           for (let i = 1; ; i++) {
             const n = `${STANDBY_PREFIX}${i}`;

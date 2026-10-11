@@ -12,6 +12,10 @@ export interface HelloResponse {
   locked: boolean;
   /** "memory" = no writable storage mounted; enrollment is per-boot. */
   storage?: "disk" | "memory";
+  /** The enclave runtime's own hostname — platform fact: on tinfoil it is
+   *  expected to equal the instance name (the machine self-identity key,
+   *  PLAN.md cattle). Diagnostic for now; the identity fix keys on it. */
+  hostname?: string;
 }
 
 export type GatewayEvent =

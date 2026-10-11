@@ -248,3 +248,39 @@ describe("warm-standby pool", () => {
   });
 
 });
+
+it("tick destroys warm stock on a stale tag — the client's measurement pin would refuse it", async () => {
+  const destroyed: string[] = [];
+  let n = 0;
+  const pool = createPool({ size: 1, ttlMs: 60_000, expectedTag: "v1.0.0" }, {
+    boot: async () => { n++; },
+    destroy: async (name) => { destroyed.push(name); },
+    health: async () => true,
+    urlFor: (name) => `https://${name}.x`,
+    nextName: () => `waddle-standby-${++n}`,
+    tagOf: async () => "v9.9.9", // everything stale
+    now: () => Date.now(),
+    log: () => undefined,
+  });
+  await pool.tick(); // booting
+  await pool.tick(); // warm (health true)
+  await pool.tick(); // stale-tag reap (+ refill boot)
+  assert.ok(destroyed.length >= 1, "stale warm stock destroyed");
+});
+
+it("tick keeps warm stock whose tag matches expectedTag", async () => {
+  const destroyed: string[] = [];
+  let n = 0;
+  const pool = createPool({ size: 1, ttlMs: 60_000, expectedTag: "v1.0.0" }, {
+    boot: async () => { n++; },
+    destroy: async (name) => { destroyed.push(name); },
+    health: async () => true,
+    urlFor: (name) => `https://${name}.x`,
+    nextName: () => `waddle-standby-${++n}`,
+    tagOf: async () => "v1.0.0", // fresh
+    now: () => Date.now(),
+    log: () => undefined,
+  });
+  await pool.tick(); await pool.tick(); await pool.tick();
+  assert.equal(destroyed.length, 0);
+});
