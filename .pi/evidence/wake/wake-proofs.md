@@ -552,3 +552,33 @@ guard); deploy failures propagate instead of re-running.
 released and pending deploy. Exposure window note: v0.3.16/17 have JWKS on with
 the escrow routes still external-tier — nothing was armed (rows:0) during the
 window, so no escrow was at risk.
+
+## 2026-10-11 01:21–01:35Z — v0.3.22 deployed; the firewall-poison root cause; non-destructive wake proven live
+
+**The deploy wedge, root-caused (23:10Z–01:21Z, six failed updates):** the
+platform builds the egress firewall by RESOLVING every allowlist hostname at
+deploy time. v0.3.18's config allowlisted the zone apex
+(`ddg-waddle.containers.tinfoil.dev` — no A record) → "certificate"-stage
+failures on blue-green updates. v0.3.21 allowlisted the concrete instance host
+instead → "firewall"-stage failure, because the machine was STOPPED and
+stop = DNS teardown → NXDOMAIN. Both classes are the same bug: hostname
+allowlists cannot express instance hosts. v0.3.22 dropped the entry (probes
+are best-effort; fires degrade to always-dance — correct, one wasted boot)
+and the update landed clean first try. AGENTS.md + PLAN.md carry the lesson
+and the wildcard/CIDR platform ask.
+
+**Non-destructive /wake, proven live (proof 7):** machine Running at v0.0.48
+(boot ~01:23Z after a first /wake whose deploy raced a stale platform
+deployment → one 502, deploy landed anyway); second /wake at 01:33Z →
+`202 {"detail":"already running (probe failed — left running): waddle"}` —
+the probe is egress-blocked (by design now), user mode reports and leaves
+the machine alone; container list confirms no stop/redeploy (same Running
+boot). The first /wake's 409 ("cannot deploy a started instance") was a
+double-fire race, not the zombie class.
+
+**The DNS churn bit the client exactly as documented:** public DNS healthy
+(1.1.1.1 → 69.46.85.219; /health via the resolved IP answers, locked), local
+resolver chain served cached NXDOMAIN all through the machine's stopped
+hours — the browser could not connect before the 10.5-min locked-boot
+backstop would reap it. Structural (shared name + stop=teardown + 1800s
+negative TTL); the cattle plan (per-boot names) is the fix.
