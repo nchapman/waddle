@@ -117,7 +117,15 @@
   unlocks, and the concierge's 24h-quiet sweep reaps machines its table
   remembers. Both fired during the v0.0.48 deploy (22:13:34Z stop =
   boot+10.5min exact). "Mystery stops" of a fresh deploy are one of these
-  two, not platform flakiness.
+  two, not platform flakiness. CAVEAT (v0.0.52, code-honest now): the
+  fast backstop only works for IDENTITY-CARRYING boots (escrow pull /
+  unlock — real-name rows); identity-less locked boots present the
+  "unadopted" sentinel, which the gates refuse by design, so their
+  bound is the platform clocks (standby claim-grace 12h / user 24h
+  sweep). The old "waddle"-keyed rows were a silent no-op since the
+  cattle rename anyway.
+- **GET /assign DELETED (v0.4.10)** — /boot owns the claim contract
+  (warm-first + claim-grace rows); the client never called /assign.
 - **Client /wake + /assign 401s FIXED (v0.3.16–17)**: the external tier
   now verifies betterbase JWTs (CONCIERGE_JWKS_URL + ISSUER + AUDIENCE in
   the config, egress-allowed for the JWKS fetch — note prod tokens stamp
@@ -215,7 +223,9 @@ closed — no bb changes.
   navigating directly (observed live).
 - Live stream is jpeg-over-ws (~10fps); WebRTC is the production upgrade.
 - k=1 accepted risks (per-machine identity + UCAN is the k>1 fix, PLAN.md):
-  shared secret as identity proxy, shared "waddle" instance name,
+  shared secret as identity proxy, "unadopted" sentinel until adopted
+  (k=1 fallback on /handoff/pull: sentinel callers bypass the name gate
+  to the single-open-window; real names stay exact-key)
   poison-arm overwrite, captured-release-is-the-secret; /handshake→/timer
   stays open to secret-holders until then.
 - User decisions pending: restricted-mode scope for real scheduled work
