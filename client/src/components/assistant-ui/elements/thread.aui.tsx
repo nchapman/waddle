@@ -810,6 +810,16 @@ const UserImagePart: ImageMessagePartComponent = (part) => (
 );
 
 const UserMessage: FC = () => {
+  // Scheduled fires inject their instruction as a user-shaped row
+  // ("[scheduled: Call mom] Reminder for the user: …"). Rendered raw that
+  // leaks the whole prompt — instructions and all — into the thread.
+  // Collapse it to a chip like a tool call; the full text is one click away.
+  const text = useAuiState((s) => {
+    const first = s.message.content[0];
+    return first?.type === "text" ? first.text : "";
+  });
+  const sched = /^\[scheduled: ([^\]]+)\]/.exec(text);
+
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
@@ -818,16 +828,32 @@ const UserMessage: FC = () => {
     >
       <UserMessageAttachments />
 
-      <div className="aui-user-message-content-wrapper relative col-start-2 min-w-0">
-        <div className="aui-user-message-content peer bg-muted text-foreground rounded-(--composer-radius) px-4 py-2 wrap-break-word empty:hidden">
-          <MessagePrimitive.Parts
-            components={{ File: UserFilePart, Image: UserImagePart }}
-          />
+      {sched ? (
+        <details
+          data-slot="waddle-scheduled-chip"
+          className="col-start-2 min-w-0 rounded-xl border border-border/60 bg-secondary/40 px-3 py-2 text-xs"
+        >
+          <summary className="flex cursor-pointer select-none items-center gap-2">
+            <span className="text-sm">⏰</span>
+            <span className="font-medium text-foreground/85">{sched[1]}</span>
+            <span className="text-muted-foreground">scheduled</span>
+          </summary>
+          <div className="mt-1.5 whitespace-pre-wrap border-t border-border/40 pt-1.5 font-mono text-[10px] leading-relaxed text-muted-foreground/70">
+            {text}
+          </div>
+        </details>
+      ) : (
+        <div className="aui-user-message-content-wrapper relative col-start-2 min-w-0">
+          <div className="aui-user-message-content peer bg-muted text-foreground rounded-(--composer-radius) px-4 py-2 wrap-break-word empty:hidden">
+            <MessagePrimitive.Parts
+              components={{ File: UserFilePart, Image: UserImagePart }}
+            />
+          </div>
+          <div className="aui-user-action-bar-wrapper absolute start-0 top-1/2 -translate-x-full -translate-y-1/2 pe-2 peer-empty:hidden rtl:translate-x-full">
+            <UserActionBar />
+          </div>
         </div>
-        <div className="aui-user-action-bar-wrapper absolute start-0 top-1/2 -translate-x-full -translate-y-1/2 pe-2 peer-empty:hidden rtl:translate-x-full">
-          <UserActionBar />
-        </div>
-      </div>
+      )}
 
       <BranchPicker
         data-slot="aui_user-branch-picker"

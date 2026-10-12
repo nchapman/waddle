@@ -67,6 +67,20 @@ export function historyRow(role: ChatMessage["role"], text: string): ChatMessage
   return { role, text, ...(role === "tool" ? { tool: parseToolText(text) } : {}) };
 }
 
+/** Re-key a live-appended batch so it cannot collide with the seed (or an
+ *  earlier batch): rowsToUIMessages ids are index-derived and repeat across
+ *  batches, while the thread keys messages and tool parts by id. `n` is the
+ *  caller's monotonic batch counter. */
+export function rekeyLiveBatch(rows: ChatMessage[], n: number): UIMessage[] {
+  return rowsToUIMessages(rows).map((m) => ({
+    ...m,
+    id: `live${n}-${m.id}`,
+    parts: m.parts.map((p) =>
+      p.type === "dynamic-tool" ? { ...p, toolCallId: `live${n}-${p.toolCallId}` } : p,
+    ),
+  }));
+}
+
 /** Deterministic history seed: map sealed log events to surface rows. */
 export function eventsToRows(events: Array<Record<string, unknown>>): ChatMessage[] {
   const rows: ChatMessage[] = [];

@@ -293,6 +293,22 @@ export function App() {
         // Backlog duplicate of the seeded history — drop.
         if (event.type === "message" || event.type === "history_row" || event.type === "tool_start" || event.type === "tool_end") return s;
       }
+      // A turn this client is streaming renders through its own stream — its
+      // user echo, tool rows, verdicts, and final all arrive via the
+      // broadcast as well, and appending them would duplicate the thread
+      // AND hand the runtime a mid-stream re-seed (the wipe hazard). Idle
+      // clients append instead: a scheduled nudge fired while they watch,
+      // another browser's words, the tools of a watched fire. The sealed
+      // log keeps the authoritative rows for the next replay either way.
+      const streaming = transportRef.current?.isStreaming();
+      if (
+        streaming &&
+        (event.type === "message" ||
+          event.type === "history_row" ||
+          event.type === "tool_start" ||
+          event.type === "tool_end")
+      )
+        return s;
       if (s.phase !== "chat") return s;
       if (event.type === "history_row") {
         const messages = [...s.messages, historyRow(event.role, event.text)];
@@ -317,7 +333,11 @@ export function App() {
         return { ...s, messages };
       }
       if (event.type === "approval") {
-        const messages = [...s.messages, approvalRow(event.tool, event.approved)];
+        // The verdict ROW renders in the streamer's own turn (fenced text
+        // via the transport) and in idle watchers' threads (an approvalRow
+        // in their collected turn); this state append is for the pre-mount
+        // backlog only. Clearing the card is state cleanup — always runs.
+        const messages = streaming ? s.messages : [...s.messages, approvalRow(event.tool, event.approved)];
         return {
           ...s,
           messages,
@@ -467,6 +487,21 @@ export function App() {
     }
   }, [state, doUnlock, keyInput]);
 
+  // Auto-unlock, same logic: a stored secret on a returning device makes the
+  // unlock click ceremony, not proof — hand it over and go. Fresh devices
+  // (no stored secret) keep the full form. One attempt per attested cycle;
+  // a failure lands on the error screen, not a retry loop.
+  const autoUnlockRef = useRef(false);
+  useEffect(() => {
+    if (state.phase !== "attested") {
+      autoUnlockRef.current = false;
+      return;
+    }
+    if (!state.locked || autoUnlockRef.current || !getToken()) return;
+    autoUnlockRef.current = true;
+    void doUnlock(state.result);
+  }, [state, doUnlock]);
+
   /** The user's hands: transient input intents over the live ws. */
   const sendBrowserInput = useCallback<BrowserSend>(
     (intent) => {
@@ -512,9 +547,10 @@ export function App() {
     return st.note ? "failed" : "idle";
   }
 
-  // History seed for the runtime: computed once when the backlog finishes.
-  // Identity must stay stable afterward — a fresh array per render makes the
-  // runtime re-sync and wipe live streaming turns.
+  // History seed for the runtime: computed ONCE when the backlog finishes
+  // (ChatSurface mounts on `replayed`, consumes initialMessages exactly
+  // once). Live turns flow through the transport only — a local submit
+  // streams; a turn nobody here submitted arrives via onServerRows.
   const chatState = state.phase === "chat" ? state : null;
   const replayedNow = chatState?.replayed ?? false;
   const seedMessages = useMemo(

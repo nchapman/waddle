@@ -31,6 +31,7 @@ import { handshakeConcierge, conciergeActive, renewIdleStop, deathFlare, writeTi
 import { autonomyEnabled, armWakeCredential, readWakeCredential, clearWakeCredential } from "./wakeboot.js";
 import { checkPlaypenForArm, checkSnapshotHygiene } from "./guard/arm.js";
 import { registerSecret } from "./guard/policy.js";
+import { scrubSecrets } from "./guard/redact.js";
 import { playpenReport } from "./guard/playpen.js";
 import { sealPostbox, openPostbox, mergeSchedules, schedulableRows } from "./postbox.js";
 import { sealSnapshot, openSnapshot } from "./snapshot.js";
@@ -94,6 +95,8 @@ export interface WaddleServer {
   setServer(server: HttpServer): void;
   /** The agent turn stream — fans out to every authenticated socket. */
   agentSink: Sink;
+  /** Fire one schedule now (test seam — same path the interval drives). */
+  fireSchedule(s: Schedule): Promise<void>;
 }
 
 export function buildApp(): WaddleServer {
@@ -196,9 +199,9 @@ export function buildApp(): WaddleServer {
 
   const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
   /** Send an event to every live socket (frames, status, outcomes — views). */
-  function broadcast<T>(payload: T): void {
+  function broadcast<T>(payload: T, skip?: WebSocketLike): void {
     const wire = JSON.stringify(payload);
-    for (const s of sockets) if (s.readyState === WebSocket.OPEN) s.send(wire);
+    for (const s of sockets) if (s !== skip && s.readyState === WebSocket.OPEN) s.send(wire);
   }
   /** The agent turn stream — fans out to EVERY authenticated socket, not
    *  just the newest connection: several browsers can watch (and answer
@@ -281,15 +284,28 @@ export function buildApp(): WaddleServer {
   async function fireSchedule(s: Schedule): Promise<void> {
     slog.info("schedule firing", { id: s.id, title: s.title });
     markRun(s.id);
-    log?.append({ type: "message", role: "user", text: `[scheduled: ${s.title}] ${s.prompt}`, at: nowIso() });
+    const injected = `[scheduled: ${s.title}] ${s.prompt}`;
+    log?.append({ type: "message", role: "user", text: injected, at: nowIso() });
+    // Watching clients render the fire like any turn: the injected prompt
+    // arrives first (the thread shows it as a collapsed chip), the reply
+    // streams after it. Idleness is the client's call — a mid-stream client
+    // drops the broadcast copy and keeps its own turn.
+    broadcast({ type: "message", role: "user", text: injected, at: nowIso() });
     if (sockets.size === 0) applyQuietSink();
     try {
       // Autonomous: no user is watching a scheduled fire — the gate must
       // fail fast on asks rather than wait out the approval timeout.
       await chat(`[scheduled task "${s.title}"] ${s.prompt}`, { autonomous: true });
     } catch (e) {
-      slog.warn("scheduled run failed", { err: String(e), id: s.id });
-      log?.append({ type: "message", role: "assistant", text: `scheduled run failed: ${errText(e)}`, at: nowIso() });
+      slog.warn("scheduled run failed", { err: scrubSecrets(errText(e)).slice(0, 200), id: s.id });
+      // Scrubbed + bounded: this row is history (sealed, replayed) and a
+      // broadcast — exception text is exactly the leaky kind.
+      const failed = `scheduled run failed: ${scrubSecrets(errText(e)).slice(0, 200)}`;
+      log?.append({ type: "message", role: "assistant", text: failed, at: nowIso() });
+      // Watching clients' idle collectors flush on the assistant final —
+      // a fire that dies mid-run must broadcast its failure row too, or
+      // the buffer waits forever (the run never settles).
+      broadcast({ type: "message", role: "assistant", text: failed, at: nowIso() });
     }
   }
 
@@ -871,7 +887,7 @@ export function buildApp(): WaddleServer {
           // the upgrade and the 4401 close must not reach the intents.
           if (!authed) return;
           const send = (event: GatewayEvent | DeltaEvent | ErrorEvent) => ws.send(JSON.stringify(event));
-          void handleIntent(send, evt.data);
+          void handleIntent(send, evt.data, ws.raw as WebSocketLike);
         },
         onClose(_evt, ws) {
           const sock = ws.raw as WebSocketLike;
@@ -899,6 +915,7 @@ export function buildApp(): WaddleServer {
   async function handleIntent(
     send: (event: GatewayEvent | DeltaEvent | ErrorEvent) => void,
     raw: unknown,
+    from?: WebSocketLike,
   ): Promise<void> {
     touch();
     if (conciergeActive()) renewIdleStop(); // activity = debounce the stop row
@@ -1001,7 +1018,17 @@ export function buildApp(): WaddleServer {
     try {
       await chat(intent.text); // deltas/tools/finals stream via the sink
     } catch (e) {
-      send({ type: "error", message: errText(e) });
+      // Exception text is exactly the leaky kind — scrubbed and bounded on
+      // EVERY channel: the unicast error, the log ring, the history row.
+      const failed = `run failed: ${scrubSecrets(errText(e)).slice(0, 200)}`;
+      send({ type: "error", message: failed });
+      slog.warn("run failed", { err: scrubSecrets(errText(e)).slice(0, 200) });
+      // A dead run settles nothing on the wire — every WATCHER's idle
+      // collector holds the turn open forever. The failure row is history
+      // (sealed + broadcast); the requester is excluded — its stream just
+      // errored, and a second copy would render on top of the banner.
+      log?.append({ type: "message", role: "assistant", text: failed, at: nowIso() });
+      broadcast({ type: "message", role: "assistant", text: failed, at: nowIso() }, from);
     }
   }
 
@@ -1123,5 +1150,5 @@ export function buildApp(): WaddleServer {
     }
   }
 
-  return { app, wakeBoot, handleIntent, setServer, agentSink };
+  return { app, wakeBoot, handleIntent, setServer, agentSink, fireSchedule };
 }

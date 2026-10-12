@@ -4,9 +4,11 @@ import type { UIMessage } from "@ai-sdk/react";
 import {
   eventsToRows,
   rowsToUIMessages,
+  rekeyLiveBatch,
   parseToolText,
   toolStartRow,
   toolEndRow,
+  type ChatMessage,
 } from "./history.js";
 
 const dynamicParts = (m: UIMessage) => m.parts.filter((p) => p.type === "dynamic-tool");
@@ -107,4 +109,30 @@ test("parseToolText keeps malformed args/results as raw text — replay never cr
   assert.equal(t!.isError, false);
   // Plain prose is not a tool row.
   assert.equal(parseToolText("just talking"), undefined);
+});
+
+test("rekeyLiveBatch: batches get unique message and tool-call ids across the seed and each other", () => {
+  const turn: ChatMessage[] = [
+    { role: "user", text: "go" },
+    toolStartRow("read", { path: "/x" }),
+    toolEndRow("read", "ok", false),
+    { role: "assistant", text: "done" },
+  ];
+  // The seed would render this same shape with ids h0… — live batches must
+  // never collide with it or with each other.
+  const a = rekeyLiveBatch(turn, 0);
+  const b = rekeyLiveBatch(turn, 1);
+  const seed = rowsToUIMessages(turn);
+  const ids = new Set<string>();
+  for (const m of [...seed, ...a, ...b]) {
+    assert.ok(!ids.has(m.id), `duplicate message id ${m.id}`);
+    ids.add(m.id);
+    for (const p of m.parts) {
+      if (p.type === "dynamic-tool") {
+        assert.ok(!ids.has(p.toolCallId), `duplicate toolCallId ${p.toolCallId}`);
+        ids.add(p.toolCallId);
+      }
+    }
+  }
+  assert.equal(a.length, 2, "user + assistant messages per turn");
 });

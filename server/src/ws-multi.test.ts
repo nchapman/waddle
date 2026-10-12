@@ -25,7 +25,7 @@ const { buildApp } = await import("./app.js");
 const { requestApproval, setApprovalEmitter } = await import("./approvals.js");
 
 const srv = buildApp();
-const { app, agentSink } = srv;
+const { app, agentSink, fireSchedule } = srv;
 
 const SECRET = randomBytes(64).toString("base64");
 const post = (path: string, body: unknown) =>
@@ -119,7 +119,7 @@ test("two clients on one machine: the turn fans out, one closing never kills the
     const watchers: Array<[string, ReturnType<typeof client>]> = [["A", a], ["B", b]];
     for (const [name, c] of watchers) {
       trace(`waiting ${name} final`);
-      await c.waitFor((f: Frame) => f.type === "message" && f.role === "assistant", `${name} final`);
+      await c.waitFor((f: Frame) => f.type === "message" && f.role === "assistant" && f.text === "hello world", `${name} final`);
       const types = c.frames.map((f: Frame) => f.type);
       assert.ok(types.includes("delta"), `${name} must see deltas`);
       assert.ok(types.filter((t: string) => t === "tool_start").length === 1, `${name} must see the tool`);
