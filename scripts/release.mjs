@@ -281,23 +281,26 @@ async function ensureRelease(repoDir, tag) {
   log(`release: gh workflow run tinfoil-release.yml -f version=${tag} (${repo})`);
   shOut("gh", ["workflow", "run", "tinfoil-release.yml", "-f", `version=${tag}`, "-R", repo]);
   const deadline = Date.now() + 15 * 60 * 1000;
+  const assetsAttached = () => {
+    const a = shOut("gh", ["release", "view", tag, "-R", repo, "--json", "assets", "--jq", ".assets[].name"], { allowFail: true });
+    return a && a.includes("tinfoil.hash") && a.includes("tinfoil-deployment.json") ? a : null;
+  };
   while (Date.now() < deadline) {
     await sleep(30_000);
+    // TWO workflows own a release: "Release vX" creates it, then an
+    // auto-triggered "Publish release vX" attaches the platform assets
+    // (tinfoil-deployment.json + tinfoil.hash). Success of the first is
+    // NOT completion — the ASSETS are (train died here once, live-caught).
     const run = shOut("gh", ["run", "list", "-R", repo, "--workflow", "tinfoil-release.yml", "--limit", "1", "--json", "status,conclusion,displayTitle"], { allowFail: true });
     if (run) {
       const j = JSON.parse(run)[0];
       log(`release: ${repo} ${j.displayTitle}: ${j.status}${j.conclusion ? ` (${j.conclusion})` : ""}`);
-      if (j.status === "completed") {
-        if (j.conclusion !== "success") die(`release workflow failed for ${repo} ${tag} — see gh run view`);
-        break;
-      }
+      if (j.status === "completed" && j.conclusion !== "success") die(`release workflow failed for ${repo} ${tag} — see gh run view`);
     }
-    const now = shOut("gh", ["release", "view", tag, "-R", repo, "--json", "assets", "--jq", ".assets[].name"], { allowFail: true });
-    if (now && now.includes("tinfoil.hash") && now.includes("tinfoil-deployment.json")) break;
+    const assets = assetsAttached();
+    if (assets) { log(`release: ${repo} ${tag} published (assets: ${assets.split("\n").join(", ")})`); return; }
   }
-  const final = shOut("gh", ["release", "view", tag, "-R", repo, "--json", "assets", "--jq", ".assets[].name"], { allowFail: true });
-  if (!final || !final.includes("tinfoil.hash")) die(`release assets never attached for ${repo} ${tag}`);
-  log(`release: ${repo} ${tag} published (assets: ${final.split("\n").join(", ")})`);
+  die(`release assets never attached for ${repo} ${tag} (Release workflow done? Publish workflow stuck? — gh run view -R ${repo})`);
 }
 
 async function pollHealth(host, version) {
