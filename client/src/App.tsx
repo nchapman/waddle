@@ -242,6 +242,23 @@ export function App() {
     return () => connRef.current?.close();
   }, [run]);
 
+  // Sign-in → wake, hands free: the first-run card's whole job is "sign in
+  // and your agent appears". Fires once per auth transition while the app
+  // still sits asleep (a failed wake lands on the failed card — retry is
+  // a click, not an auto-loop).
+  const authedRef = useRef(bb.isAuthenticated);
+  useEffect(() => {
+    if (authedRef.current === bb.isAuthenticated) return;
+    authedRef.current = bb.isAuthenticated;
+    if (bb.isAuthenticated) {
+      setState((st) =>
+        st.phase === "asleep" && !st.waking ? { ...st, waking: true, note: undefined } : st,
+      );
+      if (state.phase === "asleep") void wake("signed in — waking your machine");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bb.isAuthenticated]);
+
 
   const onServerEvent = useCallback((event: ServerEvent) => {
     // Frame events never touch React state: they publish to the bus (the
@@ -478,6 +495,23 @@ export function App() {
 
   const wake = useCallback((note = "concierge booting the instance…") => void wakeCore(note), []);
 
+  /** The asleep journey as the user sees it: sign-in first, then staged
+   *  progress (the note strings are ours — mapped, not parsed from the
+   *  platform), then an actionable failure. Raw notes ride as `detail`. */
+  function asleepStage(
+    st: { waking: boolean; note?: string },
+    authed: boolean,
+    bbLoading: boolean,
+  ): "signin" | "idle" | "finding" | "waking" | "verifying" | "failed" {
+    if (!authed && !bbLoading) return "signin";
+    if (st.waking) {
+      if (st.note?.startsWith("waiting for the enclave")) return "waking";
+      if (st.note?.startsWith("waking the agent") || st.note?.startsWith("waiting for the agent")) return "verifying";
+      return "finding";
+    }
+    return st.note ? "failed" : "idle";
+  }
+
   // History seed for the runtime: computed once when the backlog finishes.
   // Identity must stay stable afterward — a fresh array per render makes the
   // runtime re-sync and wipe live streaming turns.
@@ -538,7 +572,12 @@ export function App() {
           )}
           {state.phase === "unlocking" && <UnlockingScreen />}
           {state.phase === "asleep" && (
-            <AsleepScreen waking={state.waking} note={state.note} onWake={() => void wake()} />
+            <AsleepScreen
+              stage={asleepStage(state, bb.isAuthenticated, bb.isLoading)}
+              detail={state.note}
+              onWake={() => void wake()}
+              onSignIn={bb.clientId ? () => void bb.login() : undefined}
+            />
           )}
           <StoreFooter
             connected={bb.isAuthenticated}

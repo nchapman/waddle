@@ -26,7 +26,7 @@ function CeremonyFrame({
           <DuckMark size={34} className="text-duck" />
           <div>
             <div className="text-lg font-semibold tracking-tight">waddle</div>
-            <div className="text-xs text-muted-foreground">your agent, in a sealed enclave</div>
+            <div className="text-xs text-muted-foreground">your private agent</div>
           </div>
         </div>
         {children}
@@ -184,15 +184,15 @@ export function LockedForm({
       <div className="space-y-4">
         <div className="flex items-center gap-2">
           <span className="text-base">🔐</span>
-          <span className="text-sm font-medium">Locked — the enclave holds no key to your data</span>
+          <span className="text-sm font-medium">Locked — your data is sealed</span>
         </div>
         <p className="text-sm leading-relaxed text-muted-foreground">
-          Unlocking generates a 64-byte secret on this device, delivers it through the attested
-          channel, and derives every server-side key from it.
+          The machine can’t read your data without your secret. Unlocking checks it and
+          unlocks everything — this device, and only this device, holds the key.
         </p>
         <div className="space-y-1.5">
           <label htmlFor="inference-key" className="text-xs font-medium text-muted-foreground">
-            inference key (Tinfoil, memory-only)
+            inference key (optional — never stored)
           </label>
           <Input
             id="inference-key"
@@ -211,28 +211,110 @@ export function LockedForm({
   );
 }
 
-export function AsleepScreen({
-  waking,
-  note,
-  onWake,
-}: {
-  waking: boolean;
-  note?: string;
-  onWake: () => void;
-}) {
+export type AsleepStage = "signin" | "idle" | "finding" | "waking" | "verifying" | "failed";
+
+function StageDot() {
   return (
-    <div className="flex min-h-full flex-col items-center justify-center p-6 text-center">
-      <DuckMark size={72} className="mb-6 text-muted-foreground/60" />
-      <div className="mb-2 text-lg font-semibold tracking-tight">waddle is asleep</div>
-      <p className="mb-1 max-w-sm text-sm leading-relaxed text-muted-foreground">
-        The instance is stopped. Nothing is running, and billing stopped with it.
-        Your data is sealed in your own store.
-      </p>
-      {note && <p className="mb-4 font-mono text-xs text-muted-foreground/70">{note}</p>}
-      <Button onClick={onWake} disabled={waking} size="lg" className="mt-4">
-        {waking ? "waking…" : "☀️ wake waddle"}
-      </Button>
-    </div>
+    <span className="relative h-4 w-4 shrink-0 rounded-full border-2 border-duck/40">
+      <span className="waddle-scan absolute inset-0 overflow-hidden rounded-full" />
+    </span>
+  );
+}
+
+/** The asleep journey, in product voice: a first-run sign-in card, staged
+ *  wake progress, an actionable failure, and a calm idle state. The raw
+ *  operator note ("waiting for the enclave… (87)") survives as a tiny
+ *  muted line — debuggability without the telemetry aesthetics. */
+export function AsleepScreen({
+  stage,
+  detail,
+  onWake,
+  onSignIn,
+}: {
+  stage: AsleepStage;
+  detail?: string;
+  onWake: () => void;
+  onSignIn?: () => void;
+}) {
+  const progress = stage === "finding" || stage === "waking" || stage === "verifying";
+  const needsSignIn = stage === "signin" && !!onSignIn;
+  return (
+    <CeremonyFrame>
+      <div className="space-y-5">
+        {needsSignIn ? (
+          <>
+            <div className="space-y-2">
+              <div className="text-lg font-semibold tracking-tight">Sign in to wake your agent</div>
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                waddle is your agent in a private machine that only you can open. It sleeps
+                when idle — you pay nothing while it rests, and everything is saved.
+              </p>
+            </div>
+            <Button onClick={onSignIn} size="lg" className="w-full">
+              Sign in
+            </Button>
+            <p className="text-center text-xs text-muted-foreground">
+              It takes about a minute to set up the first time.
+            </p>
+          </>
+        ) : stage === "signin" ? (
+          <>
+            <div className="text-lg font-semibold tracking-tight">waddle is asleep</div>
+            <p className="text-sm leading-relaxed text-muted-foreground">
+              Sign in from the footer below to wake your agent.
+            </p>
+          </>
+        ) : progress ? (
+          <div className="space-y-4">
+            <div className="flex items-center gap-3">
+              <StageDot />
+              <div className="text-sm font-medium">
+                {stage === "finding" && "Finding your machine…"}
+                {stage === "waking" && "Waking your machine…"}
+                {stage === "verifying" && "Almost there…"}
+              </div>
+            </div>
+            <p className="text-sm leading-relaxed text-muted-foreground">
+              {stage === "finding"
+                ? "This is usually instant."
+                : stage === "waking"
+                  ? "A fresh start takes a minute or two. Your data is on its way — nothing is lost while it sleeps."
+                  : "Checking that everything came back healthy."}
+            </p>
+          </div>
+        ) : stage === "failed" ? (
+          <>
+            <div className="space-y-2">
+              <div className="text-lg font-semibold tracking-tight">Couldn’t wake your machine</div>
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                {detail?.includes("gave up waiting")
+                  ? "It took longer than expected to start. This is rare — trying again usually works."
+                  : "Something got in the way. Trying again usually works; the details below say what happened."}
+              </p>
+            </div>
+            <Button onClick={onWake} size="lg" className="w-full">
+              Try again
+            </Button>
+          </>
+        ) : (
+          <>
+            <div className="space-y-2">
+              <div className="text-lg font-semibold tracking-tight">waddle is asleep</div>
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                Nothing is running, and nothing is being billed. Your conversations and files
+                are sealed in your store, exactly as you left them.
+              </p>
+            </div>
+            <Button onClick={onWake} size="lg" className="w-full">
+              Wake waddle
+            </Button>
+          </>
+        )}
+        {detail && progress && (
+          <p className="truncate font-mono text-[10px] text-muted-foreground/50">{detail}</p>
+        )}
+      </div>
+    </CeremonyFrame>
   );
 }
 
