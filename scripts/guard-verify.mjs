@@ -22,14 +22,34 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "waddle-guard-verify-"));
 // The deployed tree lives at /app (WORKDIR); this script is mounted
 // elsewhere, so import by absolute path.
 const { enforcePlaypenInto } = await import("/app/dist/guard/playpen.js");
-const { uidShellOperations } = await import("/app/dist/guard/exec.js");
 const { agentOwnedWriteOperations } = await import("/app/dist/guard/extension.js");
+const { scrubEnv } = await import("/app/dist/guard/policy.js");
 
 const DATA = process.env.DATA_DIR;
 const AGENT = 1100;
 const BROWSER = 1101;
 const MODE = (p) => statSync(p).mode & 0o7777; // includes the sticky bit
 const OWNER = (p) => statSync(p).uid;
+
+/** Spawn argv directly as a uid — no shell anywhere (bash is gone). This
+ *  is how the kernel wall is proven now: the property that used to ride
+ *  the agent's shell still guards the workspace the file tools hand over
+ *  to uid 1100, and any future uid-1100 execution seam. */
+import { spawn } from "node:child_process";
+const spawnAs = (uid, argv, cwd) =>
+  new Promise((resolve) => {
+    let out = "";
+    const child = spawn(argv[0], argv.slice(1), {
+      cwd,
+      uid,
+      gid: uid,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    child.stdout?.on("data", (d) => (out += d.toString("utf-8")));
+    child.stderr?.on("data", (d) => (out += d.toString("utf-8")));
+    child.once("error", (err) => resolve({ code: 1, out: String(err) }));
+    child.once("close", (code) => resolve({ code: code ?? 1, out }));
+  });
 
 // ── 1. The playpen choreography with the REAL uids ──────────────────────
 mkdirSync(join(DATA, "log"), { recursive: true });
@@ -46,36 +66,30 @@ assert.equal(MODE(join(DATA, "log")), 0o700);
 assert.equal(MODE(join(DATA, "log", "events.jsonl")), 0o600, "a loose restore is re-tightened");
 console.log("✓ playpen choreography (uids 1100/1101, root-only system tree)");
 
-// ── 2. The shell runs as the agent uid and hits the kernel wall ─────────
-const ops = uidShellOperations(AGENT, AGENT);
-const run = async (command) => {
-  let out = "";
-  const r = await ops.exec(command, join(DATA, "workspace"), {
-    onData: (d) => (out += d.toString("utf-8")),
-  });
-  return { code: r.exitCode, out };
-};
-
-const denied = await run("cat ../log/events.jsonl");
+// ── 2. The kernel wall: uid 1100 cannot read the system tree ──────────
+const denied = await spawnAs(AGENT, ["cat", join(DATA, "log", "events.jsonl")], join(DATA, "workspace"));
 assert.notEqual(denied.code, 0, "reading the system tree must fail");
 assert.match(denied.out, /Permission denied|denied/, `the kernel says no: ${denied.out.slice(0, 200)}`);
 
-const profileDenied = await run("cat ../browser/Default/Cookies 2>&1 || true");
+const profileDenied = await spawnAs(AGENT, ["cat", join(DATA, "browser", "Default", "Cookies")], join(DATA, "workspace"));
 assert.match(profileDenied.out, /Permission denied/, "the browser profile (cookies) is the browser uid's");
-console.log("✓ shell as uid 1100: system tree and browser profile are EACCES");
+console.log("✓ uid 1100: system tree and browser profile are EACCES");
 
-// ── 3. The scrubbed env: platform secrets never reach the child ─────────
-const env = await run("printenv");
-assert.ok(!env.out.includes("container-secret-xyz"), "concierge secret must not reach the child");
-assert.ok(!env.out.includes("container-key-xyz"), "inference key must not reach the child");
-assert.match(env.out, /PATH=/, "the allowlist passes what shells need");
-console.log("✓ child env scrubbed under the uid exec path");
+// ── 3. The scrubbed env: platform secrets never leave the gateway ───────
+// (scrubEnv is what the browser env and any future exec seam build on.)
+const env = scrubEnv(process.env);
+for (const [key, value] of Object.entries(env)) {
+  assert.ok(!String(value).includes("container-secret-xyz"), `concierge secret leaked via ${key}`);
+  assert.ok(!String(value).includes("container-key-xyz"), `inference key leaked via ${key}`);
+}
+assert.ok(env.PATH, "the allowlist passes what children need");
+console.log("✓ scrubEnv: platform secrets stay in the gateway");
 
-// ── 4. The shell owns its workspace ─────────────────────────────────────
-const wrote = await run("echo agent-made > mine.txt");
+// ── 4. The agent uid owns and can work in its workspace ────────────────
+const wrote = await spawnAs(AGENT, ["touch", "mine.txt"], join(DATA, "workspace"));
 assert.equal(wrote.code, 0, `agent write must succeed: ${wrote.out}`);
 assert.equal(OWNER(join(DATA, "workspace", "mine.txt")), AGENT);
-console.log("✓ the agent works freely inside its workspace");
+console.log("✓ the agent uid works freely inside its workspace");
 
 // ── 5. Tool-written files hand over to the agent uid ────────────────────
 // The write tool executes in-process as root; without the ownership wrap
@@ -85,10 +99,10 @@ await writeOps.mkdir(join(DATA, "workspace", "tool-made", "deep"));
 await writeOps.writeFile(join(DATA, "workspace", "tool-made", "deep", "file.txt"), "tool-made");
 assert.equal(OWNER(join(DATA, "workspace", "tool-made")), AGENT, "mkdir'd components hand over");
 assert.equal(OWNER(join(DATA, "workspace", "tool-made", "deep", "file.txt")), AGENT, "tool-written files hand over");
-const catBack = await run("cat tool-made/deep/file.txt");
-assert.equal(catBack.code, 0, `the shell must read what the write tool created: ${catBack.out}`);
+const catBack = await spawnAs(AGENT, ["cat", "tool-made/deep/file.txt"], join(DATA, "workspace"));
+assert.equal(catBack.code, 0, `uid 1100 must read what the write tool created: ${catBack.out}`);
 assert.match(catBack.out, /tool-made/);
-console.log("✓ write-tool files are agent-owned (shell + tools interoperate)");
+console.log("✓ write-tool files are agent-owned (tools + uid interoperate)");
 
 // ── 6. Chromium boots as the browser uid and owns its tree ─────────
 // The review-caught gap: nothing exercised the browser uid. The playpen
@@ -119,13 +133,11 @@ console.log("✓ Chromium boots as uid 1101 and owns its profile + XDG dirs");
 // ── 7. Symlink attacks on the file tools are refused ───────────────
 // The shell (uid 1100) plants a link in its own workspace; the root
 // file tools must neither write through it nor hand its target over.
-const { readFileSync, existsSync } = await import("node:fs");
-const plant = await run("ln -s ../log link");
-assert.equal(plant.code, 0, `planting a link in the workspace must succeed: ${plant.out}`);
+const { readFileSync, existsSync, symlinkSync } = await import("node:fs");
+symlinkSync(join(DATA, "log"), join(DATA, "workspace", "link"));
 // Dangling escape link: realpath ENOENTs but the write would CREATE the
 // root-owned target (review-caught — the nastiest shape).
-const dangle = await run("ln -s /etc/waddle-pwned dangling");
-assert.equal(dangle.code, 0);
+symlinkSync("/etc/waddle-pwned", join(DATA, "workspace", "dangling"));
 await assert.rejects(
   () => writeOps.writeFile(join(DATA, "workspace", "link", "events.jsonl"), "evil"),
   /outside the workspace/,
@@ -161,6 +173,31 @@ try {
   renameSync(join(DATA, "workspace.real"), join(DATA, "workspace"));
 }
 console.log("✓ planted symlinks: no writes, no handoff, system tree intact");
+
+// ── 8. Codemode executes in the container (QuickJS sandbox loads) ──────
+// bash is gone; scripts are the agent's only computation. Prove the
+// sandbox actually runs in this image — a pure-computation script (no
+// tools; those need a model-driven turn's pipeline, pi's own contract).
+const { createCodemodeToolDefinition } = await import(
+  "/app/node_modules/@earendil-works/pi-coding-agent/dist/extensions/codemode/tool.js"
+);
+const codemodeTool = createCodemodeToolDefinition({
+  appendEntry: () => undefined,
+  getToolNamespace: () => undefined,
+  getToolGuidelines: () => new Map(),
+  getMode: () => "on",
+  getInlineBudget: () => undefined,
+});
+const scriptResult = await codemodeTool.execute(
+  "verify-1",
+  { code: 'return "sandbox says " + (6 * 7);' },
+  undefined,
+  undefined,
+  undefined,
+);
+const scriptText = scriptResult.content.map((c) => (c.type === "text" ? c.text : "")).join("");
+assert.match(scriptText, /sandbox says 42/, `QuickJS executes in the container: ${scriptText.slice(0, 300)}`);
+console.log("✓ codemode: the QuickJS sandbox executes in-container");
 
 rmSync(DATA, { recursive: true, force: true });
 console.log("guard-verify: all kernel-boundary properties hold");

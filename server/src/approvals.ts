@@ -1,16 +1,20 @@
 /**
  * The ask-gate: the agent proposes, only the gate executes.
  *
- * Rules (the read/write halves of the three rules):
- *   - read/grep/find/ls: auto-allow
- *   - write/edit: auto-allow when the target stays inside the workspace
- *   - bash: ASK — arbitrary commands are the open-ended surface; the
- *     browser shows the exact parameters and approve/deny decides.
+ * There is no bash (codemode's sandbox replaced the shell), so the askable
+ * surface is just the browser's URL gate: allowlisted domains pass,
+ * everything else asks — the browser shows the exact URL and approve/deny
+ * decides. The file tools never ask: their workspace containment and the
+ * system-tree tripwires are deterministic, so they answer on their own.
+ *
+ * Autonomous runs (scheduled fires, no human attached) convert every ask
+ * into an immediate block with a reason — a 180s wait for a dialog nobody
+ * can see is worse than a clear no.
  *
  * The gate pauses the turn: pi's tool_call handler awaits our promise,
  * which the browser resolves (or the timeout denies).
  */
-import { resolve } from "node:path";
+import { checkToolCall } from "./guard/tripwire.js";
 
 export interface ApprovalRequest {
   type: "approval_request";
@@ -30,7 +34,6 @@ export interface ApprovalOutcome {
 
 type Emit = (event: ApprovalRequest | (ApprovalOutcome & { at: string })) => void;
 
-const WORKSPACE = resolve(process.env.DATA_DIR ?? "/tmp/waddle-data", "workspace");
 const TIMEOUT_MS = 180_000;
 
 // The pending map keeps the tool name so approval outcomes can report
@@ -54,35 +57,48 @@ const BROWSER_ALLOWLIST = (process.env.WADDLE_BROWSER_ALLOWLIST ?? "example.com,
   .map((d) => d.trim().toLowerCase())
   .filter(Boolean);
 
-/** Does this call need the human? */
-export function needsApproval(toolName: string, input: Record<string, unknown>): boolean {
-  if (toolName === "bash" || toolName === "powershell") return true;
-  if (toolName === "browser_open") {
-    // The URL/domain gate: allowlisted domains pass, everything else asks.
-    // Same normalization as the tool itself — the model often passes bare domains.
-    const raw = String(input.url ?? "").trim();
-    const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
-    try {
-      const host = new URL(withScheme).hostname.toLowerCase();
-      if (host && BROWSER_ALLOWLIST.some((d) => host === d || host.endsWith(`.${d}`))) return false;
-    } catch {
-      /* unparsable URL: ask */
-    }
-    return true;
-  }
-  if (toolName === "write" || toolName === "edit") {
-    // Writes auto-allow inside the workspace; anything else asks.
-    return !inWorkspace(String(input.path ?? ""));
-  }
-  return false; // read/grep/find/ls
+/** Autonomous-turn state: set by the scheduled-run path so the gate can
+ *  fail fast instead of waiting on a dialog no one can answer. */
+let autonomousTurn = false;
+export function setAutonomousTurn(on: boolean): void {
+  autonomousTurn = on;
+}
+export function isAutonomousTurn(): boolean {
+  return autonomousTurn;
 }
 
-function inWorkspace(p: string): boolean {
-  if (p === "") return false; // absent path: ask, never assume
-  // Relative paths are workspace-relative (that is the tools' cwd);
-  // resolve() collapses traversal, so ../ escapes fall outside.
-  const full = p.startsWith("/") ? resolve(p) : resolve(WORKSPACE, p);
-  return full === WORKSPACE || full.startsWith(`${WORKSPACE}/`);
+/** The full gate decision for a tool call: tripwire blocks first, then
+ *  the ask set (browser_open off-allowlist), with autonomous runs
+ *  converting asks into blocks. Pure except for the autonomous flag. */
+export function gateDecision(
+  toolName: string,
+  input: Record<string, unknown>,
+): { action: "allow" } | { action: "ask"; reason: string } | { action: "block"; reason: string } {
+  const trip = checkToolCall(toolName, input);
+  if (trip.verdict === "block") return { action: "block", reason: trip.reason };
+  if (toolName === "browser_open" && !allowlistedBrowserUrl(input)) {
+    if (autonomousTurn) {
+      return {
+        action: "block",
+        reason: "refused: that domain is not on the allowlist, and autonomous runs have no user to approve it — ask the user to open it themselves, or suggest adding the domain to the allowlist",
+      };
+    }
+    return { action: "ask", reason: "the browser shows the exact URL; approve or deny decides" };
+  }
+  return { action: "allow" };
+}
+
+/** Does this browser_open input target an allowlisted host? */
+function allowlistedBrowserUrl(input: Record<string, unknown>): boolean {
+  const raw = String(input.url ?? "").trim();
+  const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    const host = new URL(withScheme).hostname.toLowerCase();
+    if (host && BROWSER_ALLOWLIST.some((d) => host === d || host.endsWith(`.${d}`))) return true;
+  } catch {
+    /* unparsable URL: ask */
+  }
+  return false;
 }
 
 /** Pause for the browser's verdict. Resolves false on timeout. */

@@ -2,59 +2,38 @@
  * The waddle guard extension — pi-core behavior changes ride the extension
  * seam, never ad-hoc tool surgery:
  *
- *   1. `bash` is re-registered from pi's own factory with guarded
- *      operations: as root (the enclave) the shell runs as the unprivileged
- *      agent uid — the kernel boundary — with a scrubbed env; unprivileged
- *      dev keeps pi's local execution with the env scrub alone.
- *   2. `write`/`edit` are re-registered with operations that hand created
- *      files to the agent uid: the tools execute in-process as root, so
- *      without this a tool-written workspace file would be root-only and
- *      the shell could not touch what the agent just wrote.
- *   3. A `tool_result` handler redacts registered secrets from every
+ *   1. `write`/`edit` are re-registered with operations that hand created
+ *      files to the agent uid and refuse symlink escapes: the tools execute
+ *      in-process as root, so without this a tool-written workspace file
+ *      would be root-only and any lexically-in-workspace path could point
+ *      anywhere (realpath containment, hiro's confineTo lesson).
+ *   2. A `tool_result` handler redacts registered secrets from every
  *      tool's output at the transcript boundary (content and
  *      structuredContent together — replacing one drops the other).
  *
- * Known limit, accepted: bash's truncated-output spools are root 0600 in
- * the shared tmp (umask) — agent-invisible; slice 2's uid separation
- * already closed the system-tree half of this.
+ * There is no `bash` (and no `run`): the agent has no shell and no program
+ * execution at all. Arbitrary agent code runs only inside codemode's
+ * QuickJS sandbox, which has no fs/network/Node APIs and reaches the world
+ * exclusively through gated tools — so the whole "parse the command line"
+ * problem class (hiro's extractCommands, tripwire regexes over shell text,
+ * safety-model argv classification) does not exist here.
  */
 import { constants as fsConstants } from "node:fs";
 import { lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { access as fsAccess, mkdir as fsMkdir, open as fsOpen, readFile as fsReadFile, writeFile as fsWriteFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import {
-  createBashToolDefinition,
   createEditToolDefinition,
-  createLocalBashOperations,
   createWriteToolDefinition,
-  type BashOperations,
   type EditOperations,
   type ExtensionAPI,
   type InlineExtension,
-  type ToolDefinition,
   type ToolResultEvent,
   type ToolResultEventResult,
   type WriteOperations,
 } from "@earendil-works/pi-coding-agent";
-import { AGENT_UID, WORKSPACE, isWorkspacePath, playpenActive, scrubEnv } from "./policy.js";
-import { uidShellOperations } from "./exec.js";
+import { AGENT_UID, WORKSPACE, playpenActive } from "./policy.js";
 import { containsSecret, scrubJson, scrubSecrets } from "./redact.js";
-
-/** pi's local execution with the child env filtered to the allowlist. */
-function scrubbedLocalOperations(): BashOperations {
-  const local = createLocalBashOperations();
-  return {
-    exec: (command, cwd, options) =>
-      local.exec(command, cwd, { ...options, env: scrubEnv(options.env ?? process.env) }),
-  };
-}
-
-/** The shell runs as the agent uid when the playpen is active (the env
- *  scrub happens inside uidShellOperations); dev hosts keep the scrub
- *  wrapper around pi's own execution. */
-function guardedOperations(): BashOperations {
-  return playpenActive() ? uidShellOperations(AGENT_UID, AGENT_UID) : scrubbedLocalOperations();
-}
 
 /** The components to hand over (pure, testable): the workspace root plus
  *  every segment of the path — stopping at a symlink (the workspace root
@@ -197,13 +176,6 @@ export function agentOwnedEditOperations(): EditOperations {
   };
 }
 
-/** pi's bash tool, guarded — export for direct tests. The erased
- *  annotation keeps the concrete generics (pi's render-state types are
- *  not re-exported portably); registerTool() accepts the definition as-is. */
-export function buildGuardedBashTool(workspace: string): ToolDefinition<any, any, any> {
-  return createBashToolDefinition(workspace, { operations: guardedOperations() });
-}
-
 /**
  * Redact secrets from a finished tool result. Returns undefined when
  * nothing matched (a clean no-op for the handler chain).
@@ -243,7 +215,6 @@ export function createGuardExtension(workspace: string): InlineExtension {
   return {
     name: "waddle-guard",
     factory: (pi: ExtensionAPI) => {
-      pi.registerTool(buildGuardedBashTool(workspace));
       pi.registerTool(createWriteToolDefinition(workspace, { operations: agentOwnedWriteOperations() }));
       pi.registerTool(createEditToolDefinition(workspace, { operations: agentOwnedEditOperations() }));
       pi.on("tool_result", redactToolResult);

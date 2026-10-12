@@ -18,7 +18,7 @@ import {
   type ToolDefinition,
   type ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
-import { createGuardExtension, buildGuardedBashTool, redactToolResult, handoffComponents, assertWorkspaceContained } from "./extension.js";
+import { createGuardExtension, redactToolResult, handoffComponents, assertWorkspaceContained } from "./extension.js";
 import { registerSecret, unregisterSecret } from "./policy.js";
 
 const NAME = "guard-test-secret";
@@ -41,17 +41,14 @@ function fakePi() {
   return { api, registeredTools, handlers };
 }
 
-test("factory: registers the guarded tools and the tool_result redactor", () => {
+test("factory: registers the guarded file tools and the tool_result redactor", () => {
   const { api, registeredTools, handlers } = fakePi();
   const factory = createGuardExtension("/tmp/workspace");
   assert.ok(typeof factory === "object" && "factory" in factory);
   (factory as { factory: (pi: ExtensionAPI) => void }).factory(api);
 
   const names = registeredTools.map((t) => t.name).sort();
-  assert.deepEqual(names, ["bash", "edit", "write"], "same names ⇒ override the built-ins");
-  const bash = registeredTools.find((t) => t.name === "bash");
-  assert.ok(bash, "bash must be registered");
-  assert.equal(bash.promptSnippet, "Execute bash commands (ls, grep, find, etc.)", "pi's bash craft survives the override");
+  assert.deepEqual(names, ["edit", "write"], "same names ⇒ override the built-ins");
   assert.equal(handlers.get("tool_result")?.length, 1, "the redactor rides tool_result");
 });
 
@@ -91,44 +88,6 @@ test("redactor: image content is untouchable and passes through", () => {
   const image = { type: "image", data: "abc", mimeType: "image/png" } as ToolResultEvent["content"][number];
   const out = redactToolResult(resultEvent([{ type: "text", text: `see ${VALUE}` }, image]));
   assert.equal(out?.content?.[1], image, "the image part keeps its reference");
-});
-
-test("guarded bash: children never see the gateway's secrets", async () => {
-  const ws = mkdtempSync(join(tmpdir(), "waddle-bash-"));
-  const tool = buildGuardedBashTool(ws);
-  const saved = { CONCIERGE_SHARED_SECRET: process.env.CONCIERGE_SHARED_SECRET, TINFOIL_API_KEY: process.env.TINFOIL_API_KEY };
-  process.env.CONCIERGE_SHARED_SECRET = "env-secret-concierge-xyz";
-  process.env.TINFOIL_API_KEY = "env-secret-inference-xyz";
-  try {
-    const res = await tool.execute("t1", { command: "printenv" }, undefined, undefined, undefined as never);
-    const text = res.content.map((c) => (c.type === "text" ? c.text : "")).join("");
-    assert.ok(!text.includes("env-secret-concierge-xyz"), "the concierge secret must not reach a child");
-    assert.ok(!text.includes("env-secret-inference-xyz"), "the inference key must not reach a child");
-    assert.match(text, /PATH=/, "the allowlist still passes what shells need");
-  } finally {
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete process.env[k as keyof typeof saved];
-      else process.env[k as keyof typeof saved] = v;
-    }
-    rmSync(ws, { recursive: true, force: true });
-  }
-});
-
-test("layering: bash output is raw at the tool, redacted at the transcript boundary", async () => {
-  const ws = mkdtempSync(join(tmpdir(), "waddle-bash-"));
-  try {
-    const tool = buildGuardedBashTool(ws);
-    const res = await tool.execute("t1", { command: `echo says ${VALUE}` }, undefined, undefined, undefined as never);
-    const raw = res.content.map((c) => (c.type === "text" ? c.text : "")).join("");
-    assert.ok(raw.includes(VALUE), "the tool itself returns raw output");
-
-    const out = redactToolResult(resultEvent(res.content as ToolResultEvent["content"]));
-    const scrubbed = out?.content?.map((c) => (c.type === "text" ? c.text : "")).join("") ?? "";
-    assert.ok(!scrubbed.includes(VALUE), "the redactor scrubs it before the transcript");
-    assert.ok(scrubbed.includes(`[REDACTED:${NAME}]`));
-  } finally {
-    rmSync(ws, { recursive: true, force: true });
-  }
 });
 
 test("handoff components stop at a symlink — chown must never follow a planted link", () => {

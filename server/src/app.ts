@@ -249,7 +249,9 @@ export function buildApp(): WaddleServer {
     log?.append({ type: "message", role: "user", text: `[scheduled: ${s.title}] ${s.prompt}`, at: nowIso() });
     if (sockets.size === 0) applyQuietSink();
     try {
-      await chat(`[scheduled task "${s.title}"] ${s.prompt}`);
+      // Autonomous: no user is watching a scheduled fire — the gate must
+      // fail fast on asks rather than wait out the approval timeout.
+      await chat(`[scheduled task "${s.title}"] ${s.prompt}`, { autonomous: true });
     } catch (e) {
       slog.warn("scheduled run failed", { err: String(e), id: s.id });
       log?.append({ type: "message", role: "assistant", text: `scheduled run failed: ${errText(e)}`, at: nowIso() });

@@ -10,7 +10,7 @@ const TOOL_META: Record<string, { icon: string; label: string }> = {
   browser_snapshot: { icon: "🌐", label: "reads the page" },
   browser_click: { icon: "🖱️", label: "clicks" },
   browser_type: { icon: "⌨️", label: "types" },
-  bash: { icon: "💻", label: "runs a command" },
+  codemode: { icon: "🧮", label: "runs a script" },
   read: { icon: "📄", label: "reads" },
   write: { icon: "✍️", label: "writes" },
   edit: { icon: "✍️", label: "edits" },
