@@ -58,17 +58,19 @@ function ask(text, timeoutMs = 120_000) {
     const ws = new WebSocket(`${BASE.replace(/^http/, "ws")}/ws?token=${encodeURIComponent(u.token)}`);
     const tools = [];
     let final = null;
-    let sent = false; // ignore the connect-time replay — it re-delivers the
-    // PREVIOUS turn's tool events and assistant message, which would
-    // bleed into this ask's collectors (live-caught: task 2 scored against
-    // task 1's "Example Domain").
+    let armed = false; // ignore the connect-time replay (hello + backlog) —
+    // it re-delivers the PREVIOUS turn's tool events and assistant
+    // message, which would bleed into this ask's collectors (live-caught
+    // twice: task 2 scored against task 1's "Example Domain"). The arm
+    // flips on replay_done, which terminates every connection's backlog.
     const done = () => {
       try { ws.close(); } catch {}
       resolve({ final, tools });
     };
     ws.onmessage = (m) => {
-      if (!sent) return;
       const e = JSON.parse(m.data);
+      if (e.type === "replay_done") { armed = true; return; }
+      if (!armed) return;
       if (e.type === "approval_request") {
         ws.send(JSON.stringify({ type: "approval_response", callId: e.callId, approved: true }));
         return;
@@ -77,10 +79,7 @@ function ask(text, timeoutMs = 120_000) {
       if (e.type === "message" && e.role === "assistant") final = e.text;
       if (e.type === "error") reject(new Error(e.message));
     };
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ type: "user_message", text }));
-      sent = true;
-    };
+    ws.onopen = () => ws.send(JSON.stringify({ type: "user_message", text }));
     ws.onclose = () => (final !== null ? done() : reject(new Error("closed before final")));
     setTimeout(() => (final !== null ? done() : reject(new Error("timeout"))), timeoutMs);
   });
