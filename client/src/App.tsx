@@ -579,14 +579,9 @@ export function App() {
               onSignIn={bb.clientId ? () => void bb.login() : undefined}
             />
           )}
-          <StoreFooter
-            connected={bb.isAuthenticated}
-            handle={bb.handle ?? undefined}
-            opening={bb.isAuthenticated && !bbStore}
-            onConnect={bb.clientId ? () => void bb.login() : undefined}
-          />
         </div>
       ) : (
+        <div className="min-h-0 flex-1">
         <Shell
           browserLive={!!state.frameLive}
           background={background}
@@ -642,7 +637,18 @@ export function App() {
             </div>
           )}
         </Shell>
+        </div>
       )}
+      {/* Pinned in EVERY phase — the store connection is the user's data
+          story and the reconnect affordance; it scrolled below the fold
+          once (live-caught: the only sign-in link was unreachable on a
+          short viewport) and vanished entirely during chat. */}
+      <StoreFooter
+        connected={bb.isAuthenticated}
+        handle={bb.handle ?? undefined}
+        opening={bb.isAuthenticated && !bbStore}
+        onConnect={bb.clientId ? () => void bb.login() : undefined}
+      />
       {bgDialog && (
         <BackgroundDialog
           onAccept={() => {
