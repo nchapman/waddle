@@ -313,6 +313,9 @@ export function AsleepScreen({
         {detail && progress && (
           <p className="truncate font-mono text-[10px] text-muted-foreground/50">{detail}</p>
         )}
+        {detail && stage === "failed" && (
+          <p className="break-words font-mono text-[10px] text-muted-foreground/50">{detail}</p>
+        )}
       </div>
     </CeremonyFrame>
   );
