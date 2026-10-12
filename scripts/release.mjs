@@ -136,10 +136,18 @@ async function main() {
     const m = v.match(/^(\d+)\.(\d+)\.(\d+)$/);
     return `${m[1]}.${m[2]}.${Number(m[3]) + 1}`;
   };
-  const waddleNext = argValue("--waddle") || nextPatch(waddlePkg.version);
-  const conciergeNext = argValue("--concierge") || nextPatch(conciergePkg.version);
+  // RESUME: a train that died after its bump commit must not bump AGAIN on
+  // re-run (live-caught: died at the asset wait, re-run shipped vN+1 with
+  // nothing new). If HEAD is this train's own bump commit and the package
+  // versions match it, the CURRENT versions are the target — continue the
+  // train (build/pin/release are each already-done-checkable).
+  const head = shOut("git", ["log", "-1", "--format=%s"]);
+  const bumpResume = head?.match(/^Bump versions: server v([\d.]+), concierge v([\d.]+)$/);
+  const resuming = bumpResume && bumpResume[1] === waddlePkg.version && bumpResume[2] === conciergePkg.version;
+  const waddleNext = argValue("--waddle") || (resuming ? waddlePkg.version : nextPatch(waddlePkg.version));
+  const conciergeNext = argValue("--concierge") || (resuming ? conciergePkg.version : nextPatch(conciergePkg.version));
   if (!/^\d+\.\d+\.\d+$/.test(waddleNext) || !/^\d+\.\d+\.\d+$/.test(conciergeNext)) die(`bad version(s): ${waddleNext} / ${conciergeNext}`);
-  log(`train: waddle v${waddlePkg.version} → v${waddleNext}, concierge v${conciergePkg.version} → v${conciergeNext}`);
+  log(`train: waddle v${waddlePkg.version} → v${waddleNext}, concierge v${conciergePkg.version} → v${conciergeNext}${resuming ? " (RESUMING a died-after-bump train — not bumping again)" : ""}`);
   log(`treadmill reminder: every waddle release bumps the concierge too (STANDBY_CONFIG_TAG → v${waddleNext})`);
 
   // ---------- the plan (dry-run stops here after printing it) ----------
