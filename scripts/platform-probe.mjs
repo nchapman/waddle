@@ -86,6 +86,76 @@ function ask(text, timeoutMs = 120_000) {
   });
 }
 
+/** Two devices on one machine: second unlock (same secret, fresh
+ *  nonce → its own token), two sockets, ONE real turn — both must see
+ *  the identical stream live, and closing one must not kill the other. */
+async function multiClient() {
+  const unlock2 = await fetch(`${BASE}/unlock`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ secret, nonce: randomBytes(16).toString("base64"), inferenceKey }),
+  });
+  const u2 = await unlock2.json();
+  if (!u2.token || u2.token === u.token) throw new Error(`second unlock did not mint its own token: ${JSON.stringify(u2).slice(0, 120)}`);
+
+  const collect = (token) => {
+    const seen = { replayed: false, userEcho: null, assistant: [], deltas: 0 };
+    const ws = new WebSocket(`${BASE.replace(/^http/, "ws")}/ws?token=${encodeURIComponent(token)}`);
+    const done = new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("multi-client socket timeout")), 150_000);
+      ws.onclose = () => { clearTimeout(t); resolve(seen); };
+      ws.onerror = () => { clearTimeout(t); reject(new Error("socket error")); };
+    });
+    ws.onmessage = (m) => {
+      const e = JSON.parse(m.data);
+      if (e.type === "replay_done") { seen.replayed = true; return; }
+      if (!seen.replayed) return; // ignore the connect-time backlog replay
+      if (e.type === "approval_request") ws.send(JSON.stringify({ type: "approval_response", callId: e.callId, approved: true }));
+      if (e.type === "delta") seen.deltas++;
+      if (e.type === "message" && e.role === "user") seen.userEcho = e.text;
+      if (e.type === "message" && e.role === "assistant") seen.assistant.push(e.text);
+    };
+    return { ws, seen, done, send: (o) => ws.send(JSON.stringify(o)) };
+  };
+
+  const a = collect(u.token);
+  const b = collect(u2.token);
+  await new Promise((resolve, reject) => {
+    let opened = 0;
+    const t = setTimeout(() => reject(new Error("connect timeout")), 20_000);
+    for (const c of [a, b]) {
+      c.ws.onopen = () => { if (++opened === 2) { clearTimeout(t); resolve(); } };
+    }
+  });
+  await new Promise((r) => setTimeout(r, 1_500)); // replay_done lands for both
+  if (!a.seen.replayed || !b.seen.replayed) throw new Error("replay never completed for both clients");
+
+  // ONE turn, spoken on A: B must see the user's words AND the identical stream.
+  a.send({ type: "user_message", text: "Reply with only the single word: fanout" });
+  const waitFinal = (c, label) => new Promise((resolve, reject) => {
+    const t0 = Date.now();
+    const iv = setInterval(() => {
+      if (c.seen.assistant.length > 0) { clearInterval(iv); resolve(c.seen.assistant[0]); }
+      else if (Date.now() - t0 > 120_000) { clearInterval(iv); reject(new Error(`${label} never saw the turn`)); }
+    }, 250);
+  });
+  const [finalA, finalB] = await Promise.all([waitFinal(a, "A"), waitFinal(b, "B")]);
+
+  // B leaves; A must keep streaming (close must not quiet the sink).
+  b.ws.close();
+  await new Promise((r) => setTimeout(r, 1_000));
+  a.seen.assistant.length = 0; // only the post-close turn counts below
+  a.send({ type: "user_message", text: "Reply with only the single word: survivor" });
+  const survivor = await waitFinal(a, "A-after-B-closed");
+  a.ws.close();
+  await a.done.catch(() => {});
+
+  return {
+    pass: /fanout/i.test(finalA) && finalA === finalB && !!b.seen.userEcho?.includes("fanout") && /survivor/i.test(survivor),
+    note: `A="${finalA.slice(0, 60)}" B="${finalB.slice(0, 60)}" identical=${finalA === finalB} userEchoOnB=${!!b.seen.userEcho} survivor="${survivor.slice(0, 40)}" deltasA=${a.seen.deltas} deltasB=${b.seen.deltas}`,
+  };
+}
+
 const TASKS = [
   {
     name: "browser (uid-free spawn on the zero-cap platform)",
@@ -104,13 +174,16 @@ const TASKS = [
       note: `tools=[${r.tools.join(" | ")}] final=${(r.final ?? "").slice(0, 120)}`,
     }),
   },
+  {
+    name: "multi-client (two devices, one machine, one live turn)",
+    run: multiClient,
+  },
 ];
 
 const results = [];
 for (const t of TASKS) {
   try {
-    const r = await ask(t.prompt);
-    const { pass, note } = t.check(r);
+    const { pass, note } = t.run ? await t.run() : t.check(await ask(t.prompt));
     results.push({ name: t.name, pass });
     console.log(`[probe] ${pass ? "✓" : "✗"} ${t.name}\n         ${note}`);
   } catch (e) {
@@ -120,7 +193,7 @@ for (const t of TASKS) {
 }
 
 writeFileSync(
-  ".pi/evidence/platform-probe-v0.0.55.json",
+  `.pi/evidence/platform-probe-v${health.version}.json`,
   JSON.stringify({ base: BASE, at: new Date().toISOString(), playpen: health.playpen, results }, null, 2),
 );
 const failed = results.filter((r) => !r.pass).length;
