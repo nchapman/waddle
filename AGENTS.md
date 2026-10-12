@@ -2,6 +2,15 @@
 
 ## Standing policies
 
+- **The deploy ceremony is `node scripts/release.mjs`** (dogfooded v0.0.56→v0.0.57,
+  2026-10-12): one command runs checks, bump, buildx ×2, digest pins (python re.sub),
+  config mirrors, workflow releases, standby drain, `container update` ×2, health
+  polls, smoke. `--dry-run` plans; steps are idempotent so a died train is re-run
+  as-is (it RESUMES — do not hand-bump after a partial train, that double-bumps:
+  v0.0.56/v0.0.57 shipped the same code this way). Release completion = the
+  Publish workflow's ASSETS on the release (tinfoil.hash + tinfoil-deployment.json),
+  NOT the Release workflow's green. The manual steps below remain the SPEC the
+  train encodes — read them once before trusting the train.
 - **Always do the deploy ceremony** after verified changes that touch the
   server image: buildx push → pin digest in /tmp/waddle-config
   (git repo, origin git@github.com:nchapman/waddle-config.git) → commit+push →
@@ -80,6 +89,24 @@
 - Stray `.bak`/`.bak2` files are old debris — do not commit.
 
 ## Live-environment facts (as of v0.0.55 / concierge v0.4.14)
+
+- **Machines are multi-client since v0.0.56** (proven on the exact deployed digest,
+  zero-cap posture): the agent sink broadcasts turns to EVERY authenticated socket
+  (deltas/tools/finals/approvals/settled + the user's own echo); a socket close only
+  quiets the stream when the LAST client leaves; approvals are answered by whichever
+  client speaks first. Second device = second /unlock with the same secret (fresh
+  nonce → its own token; both stay valid 12h). Turn serialization unchanged: one
+  global run, a second user_message mid-turn STEERS it. ws-multi.test pins it.
+- **The wake gate is UNCONDITIONAL in the client (v0.0.56)**: even a /boot
+  "running" answer goes through /boot/ready (concierge re-verifies platform status
+  + cache-free DNS) before the client touches the machine's name — a table row is
+  not a DNS fact. /boot/ready 503s carry why:"status"|"dns" and the client surfaces
+  them. Consequence: the SMOKE stubs /boot AND /boot/ready (its fake bb token 401s
+  against the real concierge — live-caught at v0.0.57's train smoke).
+- **Fresh-create wedge STILL OPEN as of v0.0.57 train (2026-10-12 ~06:10Z)**: a
+  new `tinfoil container create` wedged at Starting twice more during the train
+  dogfood; updates (blue-green) kept working. Do not build plans that need fresh
+  creates until it heals; update-existing is the reliable path.
 
 - **Tinfoil containers run with ZERO Linux capabilities** (the `cap_add`
   allowlist is `IPC_LOCK`/`NET_BIND_SERVICE`/`SYS_NICE` only), permanent
