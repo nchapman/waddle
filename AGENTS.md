@@ -79,7 +79,30 @@
   wake-proofs.md narrative, which is tracked).
 - Stray `.bak`/`.bak2` files are old debris — do not commit.
 
-## Live-environment facts (as of v0.0.51 / concierge v0.4.8)
+## Live-environment facts (as of v0.0.55 / concierge v0.4.14)
+
+- **Tinfoil containers run with ZERO Linux capabilities** (the `cap_add`
+  allowlist is `IPC_LOCK`/`NET_BIND_SERVICE`/`SYS_NICE` only), permanent
+  `no-new-privileges`, and a read-only root fs by default. Live-caught at
+  v0.0.54: every playpen chown EPERM'd on a root gateway. There is NO
+  runtime chown/setuid on the platform — `playpenActive()` PROBES the
+  capability (chown-to-agent-uid, cached) instead of trusting uid 0, and
+  the uid wall degrades honestly (browser spawns uid-free, handoff skips,
+  arm gate passes; /health reason says "platform dropped capabilities").
+  The kernel wall is real only in local Docker (guard-verify proves it);
+  on the platform the boundaries are the enclave, zero-caps/no-new-privs,
+  and the deterministic tool gate. The parked native fix is per-container
+  baked uids — two containers, gateway + browser sidecar (PLAN.md §3c).
+- **Chromium runs `--no-sandbox`** and always has: it hard-refuses to
+  start as root otherwise, and both sandbox implementations are dead on
+  the platform (setuid helper vs no-new-privs; userns vs the seccomp
+  posture). Blast radius today = the whole DATA_DIR as root, bounded by
+  zero caps + read-only root (nothing to escalate into); shrinks to one
+  tmpfs profile under the parked §3c browser container.
+- **Containers on a shared network reach each other BY NAME**
+  (`http://browser:9222`), at most one egress network per container, and
+  the shim routes exactly one upstream container — the primitives the
+  parked two-container design builds on.
 
 - **End-of-life is DELETE, never stop-and-forget** (live-caught as the
   overnight graveyard of stopped proof/retired/swept machines). One

@@ -8,8 +8,11 @@
  * or hostile archive must never widen the playpen).
  *
  * Idempotent and cheap enough to run at boot and after every restore.
- * On a dev host (unprivileged) it degrades honestly: the report says so,
- * scrubbing/redaction are unaffected, and /health surfaces the gap.
+ * Where the kernel boundary is unavailable it degrades honestly: a dev
+ * host (unprivileged) never had it; the Tinfoil platform DROPS it from
+ * a root process (zero capabilities — playpenActive() probes, policy.ts).
+ * Either way the report says so, scrubbing/redaction are unaffected, and
+ * /health surfaces the gap.
  */
 import { chmodSync, chownSync, lstatSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -116,9 +119,17 @@ export function enforcePlaypenInto(
 /** Enforce with the production uids; honest no-op when unprivileged. */
 export function enforcePlaypen(): PlaypenReport {
   if (!playpenActive()) {
+    // Degrade honestly — and say WHICH wall is missing. The two cases
+    // need different operator reads: a dev host never had the boundary,
+    // while the platform DROPPED it from a root process (Tinfoil's
+    // capability policy — the parked fix is per-container baked uids,
+    // PLAN.md §3c).
+    const root = typeof process.getuid === "function" && process.getuid() === 0;
     lastReport = {
       enforced: false,
-      reason: "not running as root (dev host) — env scrub and redaction active, no kernel boundary",
+      reason: root
+        ? "platform dropped capabilities (chown refused) — no intra-container uid boundary; enclave + typed tools remain"
+        : "not running as root (dev host) — env scrub and redaction active, no kernel boundary",
       agentUid: AGENT_UID,
       browserUid: BROWSER_UID,
       at: new Date().toISOString(),

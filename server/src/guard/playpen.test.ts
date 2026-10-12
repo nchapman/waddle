@@ -31,6 +31,7 @@ const CAN_CHOWN = (() => {
 })();
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "waddle-playpen-"));
 const { enforcePlaypen, enforcePlaypenInto } = await import("./playpen.js");
+const { playpenActive } = await import("./policy.js");
 
 const MODE = (p: string) => statSync(p).mode & 0o7777; // includes the sticky bit
 
@@ -95,6 +96,18 @@ test("enforcePlaypen degrades honestly when unprivileged", () => {
   assert.equal(report.enforced, false);
   assert.match(report.reason ?? "", /root/, "the reason must say what is missing");
   assert.equal(report.agentUid, 1100, "the configured uids are still reported (they ship in /health)");
+});
+
+test("playpenActive probes rather than trusts uid 0 (the Tinfoil lesson)", () => {
+  if (ME === 0) return; // root+caps is guard-verify's branch: the probe must succeed there
+  // Unprivileged runner: uid != 0, so the probe refuses before any chown.
+  // The caps-dropped-root case (uid 0, chown EPERM) cannot be staged without
+  // privileges — the platform itself is that test, and /health's reason
+  // string distinguishes it from the dev-host case ("platform dropped
+  // capabilities" vs "not running as root"). What this pins: the verdict
+  // is a PROBE now, cached, and a false uid-0 reading can never arm the
+  // uid spawn on a box that cannot chown.
+  assert.equal(playpenActive(), false, "no boundary is claimed where it cannot be enforced");
 });
 
 test("enforce: refuses a symlinked playpen top — never chmod/chown through it", () => {

@@ -8,7 +8,8 @@
  * The agent is permissive inside its roots; the land — secrets in the
  * parent env, system state — is locked by construction, not by asking.
  */
-import { resolve } from "node:path";
+import { chownSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 /**
  * Env keys a child process may inherit. Everything else is dropped —
@@ -126,11 +127,41 @@ export function isWorkspacePath(path: string): boolean {
 export const AGENT_UID = Number(process.env.WADDLE_AGENT_UID ?? 1100);
 export const BROWSER_UID = Number(process.env.WADDLE_BROWSER_UID ?? 1101);
 
-/** The playpen needs root to chown/setuid children. On a dev host
- *  (unprivileged) it degrades honestly: scrubbing and redaction stay,
- *  the kernel boundary does not — /health says so. */
+/** The playpen needs the chown/setuid family of capabilities. Being uid 0
+ *  is NOT enough: Tinfoil drops every Linux capability (the cap_add
+ *  allowlist has no CHOWN/SETUID — live-caught 2026-10-12, v0.0.54: every
+ *  chown EPERM'd on a root gateway), so "root" there is root in name
+ *  only. Rather than infer, PROBE the one operation the whole
+ *  choreography hinges on — a chown to the agent uid on scratch — and
+ *  cache the verdict: capabilities are set at container start and never
+ *  change under us. The chown probe stands in for the setuid spawn too
+ *  (same policy class: if CHOWN is missing, SETUID certainly is).
+ *  Where the probe fails, every consumer — browser uid spawn, write
+ *  handoff, arm gate, enforcePlaypen — degrades honestly: scrubbing and
+ *  redaction stay, the intra-container kernel boundary does not, and
+ *  /health says so. */
+let probedBoundary: boolean | null = null;
 export function playpenActive(): boolean {
-  return typeof process.getuid === "function" && process.getuid() === 0;
+  if (probedBoundary === null) probedBoundary = probeKernelBoundary();
+  return probedBoundary;
+}
+
+function probeKernelBoundary(): boolean {
+  if (typeof process.getuid !== "function" || process.getuid() !== 0) return false; // dev host
+  const probe = join(DATA_DIR, "tmp", `playpen-probe-${process.pid}-${Math.random().toString(36).slice(2)}`);
+  try {
+    mkdirSync(dirname(probe), { recursive: true });
+    writeFileSync(probe, "");
+    try {
+      chownSync(probe, AGENT_UID, AGENT_UID);
+    } finally {
+      rmSync(probe, { force: true });
+    }
+    return true; // root with caps: local Docker / guard-verify shape
+  } catch {
+    rmSync(probe, { force: true });
+    return false; // caps dropped (the Tinfoil platform)
+  }
 }
 
 /** The guard's posture. Autonomous (scheduled) runs block what gray-area

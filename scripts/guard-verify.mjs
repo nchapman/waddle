@@ -56,6 +56,12 @@ mkdirSync(join(DATA, "log"), { recursive: true });
 writeFileSync(join(DATA, "log", "events.jsonl"), "sealed", { mode: 0o644 }); // what a loose restore carries
 const report = enforcePlaypenInto(DATA, AGENT, BROWSER);
 assert.equal(report.enforced, true, `enforcement must succeed: ${report.reason}`);
+// The capability probe must not false-negative under root WITH caps
+// (the Tinfoil lesson inverted: here the boundary is real, the probe
+// must say so — a false "inactive" would silently strip the browser
+// uid spawn and the write handoff on every properly-rooted host).
+const { playpenActive } = await import("/app/dist/guard/policy.js");
+assert.equal(playpenActive(), true, "root+caps: the probe must claim the boundary");
 assert.equal(OWNER(join(DATA, "workspace")), AGENT, "workspace belongs to the agent uid");
 assert.equal(MODE(join(DATA, "workspace")), 0o700);
 assert.equal(OWNER(join(DATA, "browser")), BROWSER, "the profile belongs to the browser uid");
