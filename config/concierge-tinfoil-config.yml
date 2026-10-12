@@ -4,7 +4,7 @@ memory: 2048
 
 containers:
   - name: "waddle-concierge"
-    image: "ghcr.io/nchapman/waddle-concierge@sha256:d35c75a1eda0661ecbec0306e07f1ec5a361803fc73af7c7c9c0e865e7e8ce76"
+    image: "ghcr.io/nchapman/waddle-concierge@sha256:7e6a0c05563a57d0f2ce1c1ff422ca14754a3957cd0ffe51c2f3f33c00486087"
     networks: [control]
     env:
       - CONCIERGE_PORT: "8081"
@@ -15,7 +15,7 @@ containers:
       - WARM_POOL_SIZE: "1"
       - STANDBY_TTL_MS: "3600000"
       - STANDBY_CONFIG_REPO: "nchapman/waddle-config"
-      - STANDBY_CONFIG_TAG: v0.0.54
+      - STANDBY_CONFIG_TAG: v0.0.55
       # fire→pull release window: 10 min — certificate issuance once
       # measured 5.4 min, closing the old hard 3-min window (v0.3.13)
       - WAKE_RELEASE_WINDOW_MS: "600000"
