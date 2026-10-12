@@ -157,8 +157,13 @@ async function main() {
       //   1. a minimal fake bb session — no key flags, so restore() skips the
       //      IndexedDB binding checks; the far-future expiry means getToken()
       //      returns the stub without a refresh
-      //   2. /boot answered with the already-deployed machine ("running":
-      //      the client skips /boot/ready and polls the real machine itself)
+      //   2. /boot answered with the already-deployed machine. The
+      //      client's awaitMachineReady ALWAYS gates through /boot/ready
+      //      now (even a "running" boot — a table row is not a DNS
+      //      fact), so the readiness verb is stubbed too: ready:true.
+      //      The gate's real legs (status + cache-free DNS) are covered by
+      //      the concierge's own tests; the smoke measures everything
+      //      downstream of the gate.
       // Everything downstream — /health, ATC attestation, the release
       // measurement, the TOFU pin, the unlock form — is REAL.
       await page.addInitScript(
@@ -185,6 +190,19 @@ async function main() {
           status: 200,
           headers: { ...cors, "content-type": "application/json" },
           body: JSON.stringify({ instance, url: machineUrl, status: "running", detail: "smoke discovery stub" }),
+        });
+      });
+      await page.route("**/boot/ready**", (route) => {
+        const cors = {
+          "access-control-allow-origin": `http://localhost:${CLIENT_PORT}`,
+          "access-control-allow-methods": "GET, OPTIONS",
+          "access-control-allow-headers": "authorization, content-type",
+        };
+        if (route.request().method() === "OPTIONS") return route.fulfill({ status: 204, headers: cors });
+        return route.fulfill({
+          status: 200,
+          headers: { ...cors, "content-type": "application/json" },
+          body: JSON.stringify({ instance, ready: true, detail: "smoke readiness stub" }),
         });
       });
 

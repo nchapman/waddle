@@ -98,10 +98,17 @@ export async function awaitMachineReady(
 ): Promise<{ ready: boolean; healthy: boolean }> {
   const intervalMs = opts.intervalMs ?? 2_000;
   let i = 0;
+  let lastWhy: string | undefined;
   const ready = booted.instance
-    ? await pollBootReady(auth, booted.instance, opts.readyAttempts ?? 90, () => onNote?.(`waiting for the enclave… (${++i})`), intervalMs)
+    ? await pollBootReady(
+        auth,
+        booted.instance,
+        opts.readyAttempts ?? 90,
+        (n, why) => { if (why) lastWhy = why; onNote?.(why ? `gate: ${why}` : `waiting for the enclave… (${n})`); },
+        intervalMs,
+      )
     : !booted.waking; // no instance to gate on: trust the boot answer as before
-  if (!ready) return { ready: false, healthy: false };
+  if (!ready) { onNote?.(lastWhy ? `gate never cleared (concierge says: ${lastWhy})` : "gate never cleared"); return { ready: false, healthy: false }; }
   let j = 0;
   const healthy = await pollUntilHealthy(booted.url, opts.healthAttempts ?? 30, () => onNote?.(`waking the agent… (${++j})`), intervalMs);
   return { ready: true, healthy };
@@ -117,21 +124,27 @@ export async function pollBootReady(
   auth: ConciergeAuth,
   instance: string,
   attempts = 90,
-  onTick?: (attempt: number) => void,
+  onTick?: (attempt: number, why?: string) => void,
   intervalMs = 2_000,
 ): Promise<boolean> {
   for (let i = 0; i < attempts; i++) {
+    let ticked = false;
     try {
       const res = await fetch(`${CONCIERGE_URL}/boot/ready?instance=${encodeURIComponent(instance)}`, {
         headers: await authHeaders(auth),
         signal: AbortSignal.timeout(5000),
       });
       if (res.ok) return true;
+      // Surface the concierge's actual verdict — a gate that never
+      // clears must be readable from the client, not guessed at.
+      const body = (await res.text().catch(() => "")) || "";
+      onTick?.(i + 1, `HTTP ${res.status} ${body.slice(0, 80)}`);
+      ticked = true;
     } catch {
       /* concierge hiccup — retry */
     }
     await new Promise((r) => setTimeout(r, intervalMs));
-    onTick?.(i + 1);
+    if (!ticked) onTick?.(i + 1);
   }
   return false;
 }
