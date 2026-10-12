@@ -731,3 +731,35 @@ for the next machine release. Standby-3 was manually drained at
 concierge-only + one sleeping user machine. Both release workflows now
 refuse broken digest pins (v0.0.52's empty digest was caught pre-deploy
 same day; strike-three prevention).
+
+## Proof 12 — scheduled pushes render live in a watching client (2026-10-12, v0.0.58 / concierge v0.4.17)
+
+The v0.0.58 headline fix, live-proven end to end on a dedicated greenfield
+account (**waddlebot**, created for agent-driven testing — credentials in
+`.pi/evidence/waddlebot-credentials.txt`, gitignored).
+
+1. **Greenfield chain** — Firefox (fresh context) → sign-up → consent →
+   auto-wake: first attempt died on the fresh-mint DNS window (the known
+   NXDOMAIN class; retry worked, as designed). `/boot` minted
+   `waddle-u750c1e69-20e2d8`; attested v0.0.58; enrolled with the
+   inference key (memory-only); background tasks enabled via the warned
+   dialog.
+2. **Book** — "remind me in 1 minute" → reminder `8e44f714` booked for
+   2026-10-12T21:54:55Z (assistant confirmed with the ID).
+3. **Watch, untouched** — the tab sat open, no reload, from booking
+   through fire. At 21:55:06Z the whole turn rendered by itself:
+   collapsed `⏰ [scheduled: verify live push]` chip (raw prompt behind
+   the details toggle) + "⏰ Reminder fired on time…" nudge. The
+   transport's collectIdle → ServerRowsBridge path carried the
+   server-fired rows into the running runtime — the original repro
+   ("reminders never appear without a reload") closed.
+4. **Evidence** — `.pi/evidence/live-push-v0.0.58-proof.png`
+   (full-thread screenshot) + raw note in `wake-proofs-appendix.md`.
+
+Two small catches on the way: a stray `python3 -m http.server 5173`
+(debris from an earlier session) was shadowing vite on IPv4 — killed;
+and the failed wake card promised "details below" without rendering
+them — fixed in 31045a6 (detail now shows on the failed stage).
+
+**Verdict**: v0.0.58 fully verified live — wake, TOFU, unlock, booking,
+fire, and live delivery to an untouched tab.
