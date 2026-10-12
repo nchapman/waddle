@@ -1,8 +1,8 @@
 /**
  * The guard extension: the factory's registration contract, the
- * tool_result redactor's pairing rules, and — the load-bearing one —
- * the guarded bash running real commands whose children never see the
- * gateway's secrets.
+ * tool_result redactor's pairing rules, and the load-bearing one —
+ * the guarded file tools loading in a real session, with no shell
+ * anywhere in the loadout.
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -171,7 +171,7 @@ test("workspace containment: realpath check catches symlink escapes, allows in-w
   }
 });
 
-test("integration: the guard extension loads in a real session and keeps bash active", async () => {
+test("integration: the guard extension loads in a real session — no shell, guarded write", async () => {
   const dir = mkdtempSync(join(tmpdir(), "waddle-guard-session-"));
   mkdirSync(join(dir, "workspace"), { recursive: true });
   // Outer try/finally: a pi API drift that breaks reload()/createAgentSession
@@ -190,10 +190,13 @@ test("integration: the guard extension loads in a real session and keeps bash ac
       cwd: workspace,
       resourceLoader: loader,
       sessionManager: SessionManager.inMemory(),
-      tools: ["read", "bash"],
+      tools: ["read", "edit", "write"],
     }));
-    assert.ok(session.getActiveToolNames().includes("bash"), "the overridden bash is the active one");
-    assert.match(session.systemPrompt, /Execute bash commands/, "pi's bash snippet reaches the prompt");
+    const active = session.getActiveToolNames();
+    assert.ok(!active.includes("bash"), "the guard registers no shell — there is nothing to run it with");
+    assert.ok(active.includes("write"), "the guarded write tool is the active one");
+    assert.ok(active.includes("edit"), "the guarded edit tool is the active one");
+    assert.match(session.systemPrompt, /oldText/, "pi's file-tool craft reaches the prompt");
     assert.doesNotMatch(session.systemPrompt, new RegExp(VALUE));
   } finally {
     session?.dispose();

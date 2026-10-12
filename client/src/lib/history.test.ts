@@ -32,7 +32,7 @@ test("row builders round-trip through the legacy mono format", () => {
   const end = toolEndRow("read", "contents", false);
   assert.deepEqual(parseToolText(start.text), { name: "read", args: { path: "/a" } });
   assert.deepEqual(parseToolText(end.text), { name: "read", result: "contents", isError: false });
-  const failed = toolEndRow("bash", "exit 1", true);
+  const failed = toolEndRow("codemode", "exit 1", true);
   assert.equal(parseToolText(failed.text)!.isError, true);
 });
 
@@ -57,7 +57,7 @@ test("rowsToUIMessages pairs tool start+end rows into one dynamic-tool part", ()
 
 test("rowsToUIMessages: a start-only row (crash/interrupt) stays input-available", () => {
   const rows = eventsToRows([
-    { type: "tool_start", tool: "bash", args: { cmd: "long" } },
+    { type: "tool_start", tool: "codemode", args: { code: "long" } },
     // no tool_end — the run died mid-call
   ]);
   const msgs = rowsToUIMessages(rows);
@@ -67,8 +67,8 @@ test("rowsToUIMessages: a start-only row (crash/interrupt) stays input-available
 
 test("rowsToUIMessages: an errored pair renders output-error", () => {
   const rows = eventsToRows([
-    { type: "tool_start", tool: "bash", args: { cmd: "x" } },
-    { type: "tool_end", tool: "bash", result: "boom", isError: true },
+    { type: "tool_start", tool: "codemode", args: { code: "x" } },
+    { type: "tool_end", tool: "codemode", result: "boom", isError: true },
   ]);
   const tool = dynamicParts(rowsToUIMessages(rows)[0]!)[0] as { state: string; errorText: string };
   assert.equal(tool.state, "output-error");
@@ -88,7 +88,7 @@ test("rowsToUIMessages: adjacent calls of the same tool still pair correctly", (
 });
 
 test("an orphan end row (start absent or consumed) still renders its result", () => {
-  const messages = rowsToUIMessages([toolEndRow("bash", "late result", false)]);
+  const messages = rowsToUIMessages([toolEndRow("codemode", "late result", false)]);
   const parts = messages[0]!.parts.filter((p) => p.type === "dynamic-tool");
   assert.equal(parts.length, 1);
   const part = parts[0] as { state: string; input: unknown; output: unknown };

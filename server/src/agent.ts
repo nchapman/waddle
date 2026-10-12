@@ -4,9 +4,10 @@
  * every request (TEE-to-TEE); the API key arrives from the client at
  * unlock — memory-only, never on disk.
  *
- * The Hands: pi's built-in tool loop (read/bash/edit/write) runs against
- * an encrypted workspace on scratch; tool events stream out live; sessions
- * are file-backed so context survives reconnects.
+ * The Hands: pi's built-in tool loop (read/edit/write/grep/find/ls plus
+ * codemode — there is no shell) runs against an encrypted workspace on
+ * scratch; tool events stream out live; sessions are file-backed so
+ * context survives reconnects.
  */
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";

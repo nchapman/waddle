@@ -14,7 +14,7 @@ import { resolve } from "node:path";
  * Env keys a child process may inherit. Everything else is dropped —
  * in particular CONCIERGE_SHARED_SECRET and TINFOIL_API_KEY, which live
  * only in the gateway's env. PI_* is pi's session metadata (id, model),
- * not a secret; the bash tool's guidelines tell the agent about them.
+ * not a secret.
  */
 const ENV_ALLOW: RegExp = /^(?:PATH|HOME|TMPDIR|TZ|LANG|LC_[A-Z0-9_]+|TERM|SHELL|XDG_[A-Z0-9_]+|PI_[A-Z0-9_]+)$/;
 
@@ -101,7 +101,7 @@ export function nonAgentAbsPaths(): string[] {
   return NON_AGENT_PATHS.map((p) => `${DATA_DIR}/${p}`);
 }
 
-/** The agent's writable root (bash cwd, file-tool base). */
+/** The agent's writable root (file-tool base, workspace-relative paths). */
 export const WORKSPACE = `${DATA_DIR}/workspace`;
 
 /** Resolve like the file tools do (relative paths are workspace-relative)
@@ -115,10 +115,12 @@ export function isWorkspacePath(path: string): boolean {
 // ── The playpen's uids (slice 2: kernel separation) ────────────────────
 // The gateway stays root: it owns the system tree (umask 077 makes every
 // file it creates root-only) and re-owns restored trees. Children are
-// unprivileged: bash runs as the agent uid, Chromium as the browser uid —
-// so the shell cannot read the log, verifier, sessions, schedules, pi's
-// config, or the browser profile (cookies), and cannot ptrace the root
-// gateway (the "memory-only" master secret becomes actually unreachable).
+// unprivileged: Chromium runs as the browser uid — so it cannot read the
+// log, verifier, sessions, schedules, or pi's config. The agent itself
+// has no process at all (codemode's sandbox is in-VM), but the workspace
+// stays owned by uid 1100 so the kernel wall still bounds any future
+// uid-1100 execution seam (and the "memory-only" master secret stays
+// unreachable to any child).
 
 /** Numeric ids; overridable via env for compose/dev experiments. */
 export const AGENT_UID = Number(process.env.WADDLE_AGENT_UID ?? 1100);

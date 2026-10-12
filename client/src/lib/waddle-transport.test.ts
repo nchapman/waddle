@@ -49,9 +49,9 @@ test("full turn: deltas open the text part first, tools close it, verdicts appen
   const stream = await transport.sendMessages({ trigger: "submit-message", messages: [msg("what time is it?")] });
   transport.dispatch({ type: "delta", messageId: "live", text: "It is " });
   transport.dispatch({ type: "delta", messageId: "live", text: "noon." });
-  transport.dispatch({ type: "tool_start", callId: "t1", tool: "bash", args: { command: "date" } });
-  transport.dispatch({ type: "tool_end", callId: "t1", tool: "bash", result: "12:00", isError: false });
-  transport.dispatch({ type: "approval", callId: "t1", tool: "bash", approved: true });
+  transport.dispatch({ type: "tool_start", callId: "t1", tool: "codemode", args: { code: "date" } });
+  transport.dispatch({ type: "tool_end", callId: "t1", tool: "codemode", result: "12:00", isError: false });
+  transport.dispatch({ type: "approval", callId: "t1", tool: "codemode", approved: true });
   transport.dispatch({ type: "run_settled" });
   const chunks = await drain(stream);
 
@@ -77,8 +77,8 @@ test("full turn: deltas open the text part first, tools close it, verdicts appen
 test("a failed tool renders tool-output-error, and an error event closes the turn with finishReason error", async () => {
   const { transport } = harness();
   const stream = await transport.sendMessages({ trigger: "submit-message", messages: [msg("x")] });
-  transport.dispatch({ type: "tool_start", callId: "t1", tool: "bash", args: {} });
-  transport.dispatch({ type: "tool_end", callId: "t1", tool: "bash", result: "boom", isError: true });
+  transport.dispatch({ type: "tool_start", callId: "t1", tool: "codemode", args: {} });
+  transport.dispatch({ type: "tool_end", callId: "t1", tool: "codemode", result: "boom", isError: true });
   transport.dispatch({ type: "error", message: "gateway exploded" });
   const chunks = await drain(stream);
   assert.deepEqual(shape(chunks), [
@@ -113,7 +113,7 @@ test("non-chat events reach the app tap without an open stream (and dispatch wit
   const { transport } = harness();
   const seen: string[] = [];
   transport.setAppTap((e) => seen.push(e.type));
-  transport.dispatch({ type: "approval_request", callId: "c", tool: "bash", input: {} });
+  transport.dispatch({ type: "approval_request", callId: "c", tool: "codemode", input: {} });
   transport.dispatch({ type: "sleep", reason: "idle" }); // no active tap — must not throw
   assert.deepEqual(seen, ["approval_request", "sleep"]);
 });

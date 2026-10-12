@@ -85,16 +85,17 @@ export function enforcePlaypenInto(
       mkdirSync(join(dir, "home", ".config"), { recursive: true });
       mkdirSync(join(dir, "home", ".cache"), { recursive: true });
     });
-    // The agent's root: owned by the bash uid, agent-private.
+    // The agent's root: owned by the agent uid, agent-private (no process
+    // runs as it today — codemode is in-VM — but the ownership is the
+    // playpen contract for any future execution seam).
     step("workspace", () => ensureOwned(join(dir, "workspace"), agentUid, 0o700, note));
     // Chromium's own: the profile (cookies = bearer tokens) and its HOME —
     // browser-uid-owned, NOT part of the root-owned system tree (the
     // container check caught exactly this mix-up: the system tighten loop
     // chowned the profile back to root and Chromium could not write it).
     for (const p of BROWSER_PATHS) step(p, () => ensureOwned(join(dir, p), browserUid, 0o700, note));
-    // Shared scratch: bash TMPDIR, browser TMPDIR, restore slots, pi's
-    // bash-output spools (those are root 0600 under the umask — the agent
-    // cannot read them back). Sticky like any /tmp.
+    // Shared scratch: browser TMPDIR, restore slots. Sticky like any
+    // /tmp — cross-uid creation works, mutual reading does not.
     step("tmp", () => ensureTmp(join(dir, "tmp")));
     // The system tree: system-uid-only, no group/other bits, regardless
     // of what a restored archive carried.

@@ -1,8 +1,8 @@
 /**
  * Pins the system-prompt composition: pi's default prompt is APPENDED to,
  * never replaced, and the workspace cannot reconfigure the agent. The
- * default carries the tool craft (edit precision rules, bash guidelines,
- * per-tool snippets — including waddle's custom tools); an override would
+ * default carries the tool craft (edit precision rules, per-tool
+ * snippets — including waddle's custom tools); an override would
  * silently drop all of it. Everything in the prompt is a boot-time
  * constant — the property that keeps provider KV caching valid across
  * turns.
@@ -33,7 +33,7 @@ test("system prompt: pi defaults + waddle addendum, never replaced", async () =>
     resourceLoader: loader,
     sessionManager: SessionManager.inMemory(),
     customTools: buildCustomTools(),
-    tools: ["read", "bash", "edit", "write", "browser_open", "browser_snapshot", "schedule_create"],
+    tools: ["read", "codemode", "edit", "write", "browser_open", "browser_snapshot", "schedule_create"],
   });
   try {
     const prompt = session.systemPrompt;

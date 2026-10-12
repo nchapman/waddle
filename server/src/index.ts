@@ -19,8 +19,8 @@ registerBootSecrets();
 // to root by default (the sealed log, verifier, schedules, sessions).
 process.umask(0o077);
 // Scratch lives on the writable volume, never /tmp (the enclave mounts it
-// read-only — a truncated-output spool or restore slot would EROFS). bash
-// children inherit this through the env allowlist; the browser sets its own.
+// read-only — a restore slot would EROFS). Children inherit this through
+// the env allowlist; the browser sets its own.
 if (!process.env.TMPDIR) process.env.TMPDIR = `${DATA_DIR}/tmp`;
 
 const PORT = Number(process.env.PORT ?? 8080);
