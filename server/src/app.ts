@@ -19,7 +19,7 @@ import { hello, type GatewayEvent, type DeltaEvent, type ErrorEvent, type Unlock
 import pkg from "../package.json" with { type: "json" };
 import { Lock, freshNonce } from "./state.js";
 import { EventLog } from "./log.js";
-import { initAgent, chat, agentReady, stageSessionJsonl, stageHistoryRows, setBlackbox, setSink, getSessionJsonl } from "./agent.js";
+import { initAgent, chat, agentReady, stageSessionJsonl, stageHistoryRows, setBlackbox, setSink, getSessionJsonl, type Sink } from "./agent.js";
 import { resolveApproval, denyAllPending, setOutcomeEmitter } from "./approvals.js";
 import { setBrowserEvents, browserLive, captureNow, userInput, releaseUserControl, setControlNotifier, stopBrowser } from "./browser.js";
 // (Machine backup is bb-backup.ts + archive.ts — the enclave shelves
@@ -92,6 +92,8 @@ export interface WaddleServer {
   handleIntent(send: (event: GatewayEvent | DeltaEvent | ErrorEvent) => void, raw: unknown): Promise<void>;
   /** Hand the listening server over so the sleep gate can close it. */
   setServer(server: HttpServer): void;
+  /** The agent turn stream — fans out to every authenticated socket. */
+  agentSink: Sink;
 }
 
 export function buildApp(): WaddleServer {
@@ -198,6 +200,38 @@ export function buildApp(): WaddleServer {
     const wire = JSON.stringify(payload);
     for (const s of sockets) if (s.readyState === WebSocket.OPEN) s.send(wire);
   }
+  /** The agent turn stream — fans out to EVERY authenticated socket, not
+   *  just the newest connection: several browsers can watch (and answer
+   * approvals on) the same turn. One shared object for the process: every
+   * onOpen re-installs the same wiring, and a close only quiets it when the
+   * LAST client leaves (see onClose). Turn serialization is unchanged —
+   * one global run; a second user_message mid-turn steers it. */
+  const agentSink: Sink = {
+    onDelta: (d) => {
+      touch(); // streaming tokens are work too — a long turn must not be reaped
+      broadcast({ type: "delta", messageId: "live", text: d });
+    },
+    onToolStart: (callId, tool, args) => {
+      touch();
+      const evt = { type: "tool_start", callId, tool, args, at: nowIso() } as const;
+      log?.append({ ...evt });
+      broadcast(evt);
+    },
+    onToolEnd: (callId, tool, result, isError) => {
+      touch();
+      const evt = { type: "tool_end", callId, tool, result, isError, at: nowIso() } as const;
+      log?.append({ ...evt });
+      broadcast(evt);
+    },
+    onApprovalRequest: (req) => broadcast(req), // any client may answer; resolveApproval accepts from any socket
+    onSettled: () => broadcast({ type: "run_settled", at: nowIso() }),
+    onAssistantFinal: (text) => {
+      touch();
+      const evt = { type: "message", role: "assistant", text, at: nowIso() } as const;
+      log?.append({ ...evt });
+      broadcast(evt);
+    },
+  };
 
   // Crash black box — set once the log exists (post-unlock). Sync-append so it
   // survives the death of the process that wrote it.
@@ -825,32 +859,7 @@ export function buildApp(): WaddleServer {
             void captureNow(); // fresh frame for the new viewer
           }
           touch();
-          setSink({
-            onDelta: (d) => {
-              touch(); // streaming tokens are work too — a long turn must not be reaped
-              send({ type: "delta", messageId: "live", text: d });
-            },
-            onToolStart: (callId, tool, args) => {
-              touch();
-              const evt = { type: "tool_start", callId, tool, args, at: nowIso() } as const;
-              log?.append(evt);
-              send(evt);
-            },
-            onToolEnd: (callId, tool, result, isError) => {
-              touch();
-              const evt = { type: "tool_end", callId, tool, result, isError, at: nowIso() } as const;
-              log?.append(evt);
-              send(evt);
-            },
-            onApprovalRequest: (req) => send(req),
-            onSettled: () => send({ type: "run_settled", at: nowIso() }),
-            onAssistantFinal: (text) => {
-              touch();
-              const evt = { type: "message", role: "assistant", text, at: nowIso() } as const;
-              log?.append({ ...evt });
-              send(evt);
-            },
-          });
+          setSink(agentSink); // fan-out wiring — same object every open
           send({ type: "hello", hello: hello(VERSION, false) });
           const backlog = log?.all ?? [];
           for (const event of backlog) send(event as GatewayEvent);
@@ -870,8 +879,13 @@ export function buildApp(): WaddleServer {
           // disconnect side effects — a locked probe's 4401 close must not
           // quiet the sink or deny a live client's pending approvals.
           if (!sockets.delete(sock)) return;
-          // Mid-turn disconnect: keep logging the run (the sealed log is the truth);
-          // only the live wire is gone. Deltas drop, finals and tools persist.
+          // The LAST client's close quiets the stream and denies pending
+          // approvals; with clients remaining, the turn keeps streaming to
+          // them (closing a second tab must not kill the first's session).
+          // Mid-turn with nobody watching: keep logging the run (the sealed
+          // log is the truth); only the live wire is gone. Deltas drop,
+          // finals and tools persist.
+          if (sockets.size > 0) return;
           applyQuietSink();
           denyAllPending(); // no client: the gate denies, the turn never hangs
         },
@@ -906,10 +920,11 @@ export function buildApp(): WaddleServer {
       if (!callId || typeof approved !== "boolean") return;
       const tool = resolveApproval(callId, approved);
       if (tool !== null) {
-        // The verdict is history: replay shows the human's decision.
+        // The verdict is history: replay shows the human's decision — and
+        // every OTHER live client learns it now (they all saw the request).
         const evt = { type: "approval", callId, tool, approved, at: nowIso() } as const;
         log?.append(evt);
-        send(evt);
+        broadcast(evt);
       }
       return;
     }
@@ -982,7 +997,7 @@ export function buildApp(): WaddleServer {
     }
     const userEvent = { type: "message", role: "user", text: intent.text, at: nowIso() } as const;
     log?.append({ ...userEvent });
-    send(userEvent);
+    broadcast(userEvent); // every connected browser sees the user's words, not just the sender
     try {
       await chat(intent.text); // deltas/tools/finals stream via the sink
     } catch (e) {
@@ -1108,5 +1123,5 @@ export function buildApp(): WaddleServer {
     }
   }
 
-  return { app, wakeBoot, handleIntent, setServer };
+  return { app, wakeBoot, handleIntent, setServer, agentSink };
 }

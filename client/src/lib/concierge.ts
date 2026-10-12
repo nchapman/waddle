@@ -80,6 +80,33 @@ export async function bootInstance(
   }
 }
 
+/** The full wake gate, concierge-first — machine-second. A
+ *  "running" /boot answer is a platform table row, not a DNS fact: a
+ *  stale row, a torn-down redeploy, or resolver lag can all leave the
+ *  name dark while the table says Running. /boot/ready re-verifies
+ *  status + DNS on the concierge (cache-free c-ares) and only its 200
+ *  clears the client to touch the machine's name — an early query
+ *  would teach the browser's resolver chain a 30-minute NXDOMAIN for
+ *  a machine that's about to be fine. The health leg runs client-side
+ *  after the gate (the concierge's egress allowlist cannot reach
+ *  instance hosts — architectural, see AGENTS.md). */
+export async function awaitMachineReady(
+  auth: ConciergeAuth,
+  booted: { url: string; instance?: string; waking?: boolean },
+  onNote?: (note: string) => void,
+  opts: { readyAttempts?: number; healthAttempts?: number; intervalMs?: number } = {},
+): Promise<{ ready: boolean; healthy: boolean }> {
+  const intervalMs = opts.intervalMs ?? 2_000;
+  let i = 0;
+  const ready = booted.instance
+    ? await pollBootReady(auth, booted.instance, opts.readyAttempts ?? 90, () => onNote?.(`waiting for the enclave… (${++i})`), intervalMs)
+    : !booted.waking; // no instance to gate on: trust the boot answer as before
+  if (!ready) return { ready: false, healthy: false };
+  let j = 0;
+  const healthy = await pollUntilHealthy(booted.url, opts.healthAttempts ?? 30, () => onNote?.(`waking the agent… (${++j})`), intervalMs);
+  return { ready: true, healthy };
+}
+
 /** Readiness poll — against the CONCIERGE, never the booting machine.
  *  The machine's DNS record doesn't exist until seconds after it goes
  *  Running; polling it early teaches every cache in the browser's

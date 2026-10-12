@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pollUntilHealthy, bootInstance, pollBootReady } from "./concierge.js";
+import { pollUntilHealthy, bootInstance, pollBootReady, awaitMachineReady } from "./concierge.js";
 
 type Responder = { ok?: boolean; body?: unknown; throwErr?: Error };
 
@@ -135,4 +135,34 @@ test("bootInstance forwards fresh=true when the client watched a machine die", a
   const { calls } = stubFetch(() => ({ ok: true, body: { url: "https://waddle-u12345678-dead42.ddg-waddle.containers.tinfoil.dev", status: "waking" } }));
   await bootInstance(async () => "tok", 150_000, "ddg-waddle.containers.tinfoil.dev", true);
   assert.deepEqual(JSON.parse(String(calls[0]!.init!.body)), { fresh: true });
+});
+
+// ── awaitMachineReady (the unconditional gate) ─────────────────────────
+
+test("awaitMachineReady gates a 'running' boot through the concierge before any machine fetch", async () => {
+  // /boot said "running" — the OLD flow skipped the gate and hit the
+  // machine's name directly. The gate must still ask the concierge first.
+  let readyFlips = 0;
+  const { calls } = stubFetch((url) =>
+    url.includes("/boot/ready")
+      ? { ok: ++readyFlips >= 2 } // not-ready once, then ready
+      : { ok: true }, // the machine /health leg
+  );
+  const machine = "https://waddle-u12345678-dead42.ddg-waddle.containers.tinfoil.dev";
+  const r = await awaitMachineReady(async () => "tok", { url: machine, instance: "waddle-u12345678-dead42", waking: false }, undefined, { readyAttempts: 5, healthAttempts: 5, intervalMs: 1 });
+  assert.equal(r.ready, true);
+  assert.equal(r.healthy, true);
+  const firstMachineHit = calls.findIndex((c) => c.url.startsWith(machine));
+  const readyCalls = calls.filter((c) => c.url.includes("/boot/ready"));
+  assert.ok(readyCalls.length >= 2, "the gate polled the concierge, not the machine");
+  assert.ok(firstMachineHit > -1 && firstMachineHit >= readyCalls.length - 1, "no machine fetch before the gate cleared");
+});
+
+test("awaitMachineReady never touches the machine's name while the concierge says not-ready", async () => {
+  const { calls } = stubFetch((url) => ({ ok: !url.includes("/boot/ready") }));
+  const machine = "https://waddle-u12345678-dead42.ddg-waddle.containers.tinfoil.dev";
+  const r = await awaitMachineReady(async () => "tok", { url: machine, instance: "waddle-u12345678-dead42", waking: true }, undefined, { readyAttempts: 3, healthAttempts: 3, intervalMs: 1 });
+  assert.equal(r.ready, false, "gate exhausted");
+  assert.equal(r.healthy, false);
+  assert.equal(calls.filter((c) => c.url.startsWith(machine)).length, 0, "the machine's DNS name was never queried — no NXDOMAIN poisoning");
 });

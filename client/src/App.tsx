@@ -33,7 +33,7 @@ import { frameBus } from "./lib/frame-bus";
 import { WaddleChatTransport } from "./lib/waddle-transport";
 import { DEV, ENCLAVE_URL, CONFIG_REPO, BB_CLIENT_ID, BB_DOMAIN, ZONE } from "./lib/config";
 import { eventsToRows, rowsToUIMessages, toolStartRow, toolEndRow, approvalRow, historyRow, type ChatMessage } from "./lib/history";
-import { pollUntilHealthy, bootInstance, pollBootReady } from "./lib/concierge";
+import { pollUntilHealthy, bootInstance, awaitMachineReady } from "./lib/concierge";
 
 /** The machine /boot gave us — the ONLY live enclave target (no baked
  *  URL: a hardcoded primary was the tier-mix root, proof 9). */
@@ -157,21 +157,16 @@ export function App() {
       discoveryTriedRef.current = true;
       machineDiedRef.current = false;
       activeEnclave = booted.url;
-      // Waking: poll the CONCIERGE for readiness — never the machine
-      // (its record may not exist yet; an early query poisons the
-      // browser's resolver for 30min). Ready → the record is live →
-      // the agent poll below is safe (failures are refusals, not
-      // NXDOMAIN — nothing cacheable-negative).
-      const ready = booted.waking && booted.instance
-        ? await pollBootReady(conciergeAuth, booted.instance, 90, (i) =>
-            setState((st) => (st.phase === "asleep" ? { ...st, note: `waiting for the enclave… (${i})` } : st)),
-          )
-        : true;
-      const healthy = ready
-        ? await pollUntilHealthy(activeEnclave, 30, (i) =>
-            setState((st) => (st.phase === "asleep" ? { ...st, note: `waking the agent… (${i})` } : st)),
-          )
-        : false;
+      // ALWAYS gate through the concierge before touching the machine's
+      // name — even when /boot said "running" (a table row is not a DNS
+      // fact; a stale row or resolver lag would otherwise poison the
+      // browser's resolver with a 30-min NXDOMAIN). awaitMachineReady:
+      // concierge re-verifies status + DNS first, health second.
+      const { healthy } = await awaitMachineReady(
+        conciergeAuth,
+        { url: booted.url, instance: booted.instance, waking: booted.waking },
+        (note) => setState((st) => (st.phase === "asleep" ? { ...st, note } : st)),
+      );
       if (healthy) {
         void run();
         return;
