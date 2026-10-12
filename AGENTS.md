@@ -99,6 +99,23 @@
   posture). Blast radius today = the whole DATA_DIR as root, bounded by
   zero caps + read-only root (nothing to escalate into); shrinks to one
   tmpfs profile under the parked §3c browser container.
+- **Fresh `tinfoil container create` wedged at Starting (2026-10-12
+  03:30-04:00Z, twice)**: status Starting, zero CPU/memory in metrics,
+  DNS + TLS SNI never registered (ingress IP reachable, handshake
+  dropped). `update` (blue-green) worked fine minutes earlier — the
+  wedge is specific to NEW container deploys. Delete + recreate with
+  --no-wait did not help. If it persists, standby fills / cattle
+  minting are affected (they create fresh containers); demo on the
+  EXISTING machine is unaffected (wake = deploy of the existing
+  container, not a create). Unresolved — platform-side.
+- **The platform's /tmp is WRITABLE** (inferred, soundly): chromium 154
+  is identical in the v0.0.53 and v0.0.55 images, and its partition
+  allocator hardcodes /tmp for a startup temp file — under a read-only
+  /tmp it dies instantly (ThreadContextFcntl assertion, reproduced
+  locally with --read-only). The v0.0.53 browser ran live on the
+  platform, so /tmp cannot be read-only there. Local sim of the
+  platform posture: --cap-drop=ALL --security-opt no-new-privileges,
+  but NOT --read-only (over-simulates; /tmp is the platform's scratch).
 - **Containers on a shared network reach each other BY NAME**
   (`http://browser:9222`), at most one egress network per container, and
   the shim routes exactly one upstream container — the primitives the

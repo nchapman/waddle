@@ -19,6 +19,9 @@ if (!BASE) {
   process.exit(1);
 }
 const secret = randomBytes(64).toString("base64");
+// The platform injects TINFOIL_API_KEY as env; a locally-run image takes
+// it at unlock (compose shape). Either way the probe needs the agent live.
+const inferenceKey = process.env.PROBE_INFERENCE_KEY || undefined;
 
 // 1. Wait for the boot: cert issuance + deploy can take minutes.
 let health = null;
@@ -40,7 +43,7 @@ console.log(`[probe] machine up: v${health.version} locked=${health.locked} play
 const unlock = await fetch(`${BASE}/unlock`, {
   method: "POST",
   headers: { "content-type": "application/json" },
-  body: JSON.stringify({ secret, nonce: randomBytes(16).toString("base64") }),
+  body: JSON.stringify({ secret, nonce: randomBytes(16).toString("base64"), inferenceKey }),
 });
 const u = await unlock.json();
 if (!u.token) {
@@ -55,11 +58,16 @@ function ask(text, timeoutMs = 120_000) {
     const ws = new WebSocket(`${BASE.replace(/^http/, "ws")}/ws?token=${encodeURIComponent(u.token)}`);
     const tools = [];
     let final = null;
+    let sent = false; // ignore the connect-time replay — it re-delivers the
+    // PREVIOUS turn's tool events and assistant message, which would
+    // bleed into this ask's collectors (live-caught: task 2 scored against
+    // task 1's "Example Domain").
     const done = () => {
       try { ws.close(); } catch {}
       resolve({ final, tools });
     };
     ws.onmessage = (m) => {
+      if (!sent) return;
       const e = JSON.parse(m.data);
       if (e.type === "approval_request") {
         ws.send(JSON.stringify({ type: "approval_response", callId: e.callId, approved: true }));
@@ -69,7 +77,10 @@ function ask(text, timeoutMs = 120_000) {
       if (e.type === "message" && e.role === "assistant") final = e.text;
       if (e.type === "error") reject(new Error(e.message));
     };
-    ws.onopen = () => ws.send(JSON.stringify({ type: "user_message", text }));
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type: "user_message", text }));
+      sent = true;
+    };
     ws.onclose = () => (final !== null ? done() : reject(new Error("closed before final")));
     setTimeout(() => (final !== null ? done() : reject(new Error("timeout"))), timeoutMs);
   });
