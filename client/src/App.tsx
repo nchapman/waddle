@@ -642,13 +642,18 @@ export function App() {
       {/* Pinned in EVERY phase — the store connection is the user's data
           story and the reconnect affordance; it scrolled below the fold
           once (live-caught: the only sign-in link was unreachable on a
-          short viewport) and vanished entirely during chat. */}
-      <StoreFooter
-        connected={bb.isAuthenticated}
-        handle={bb.handle ?? undefined}
-        opening={bb.isAuthenticated && !bbStore}
-        onConnect={bb.clientId ? () => void bb.login() : undefined}
-      />
+          short viewport) and vanished entirely during chat. Hidden only
+          on the first-run sign-in card, where a second sign-in affordance
+          is duplicate noise (and where the card points to the footer if
+          there's no betterbase client, so that path keeps it). */}
+      {!(state.phase === "asleep" && bb.clientId && !bb.isAuthenticated && !bb.isLoading) && (
+        <StoreFooter
+          connected={bb.isAuthenticated}
+          handle={bb.handle ?? undefined}
+          opening={bb.isAuthenticated && !bbStore}
+          onConnect={bb.clientId ? () => void bb.login() : undefined}
+        />
+      )}
       {bgDialog && (
         <BackgroundDialog
           onAccept={() => {
