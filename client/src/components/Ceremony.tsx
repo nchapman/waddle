@@ -274,13 +274,13 @@ export function AsleepScreen({
                 {stage === "verifying" && "Almost there…"}
               </div>
             </div>
-            <p className="text-sm leading-relaxed text-muted-foreground">
-              {stage === "finding"
-                ? "This is usually instant."
-                : stage === "waking"
+            {stage !== "finding" && (
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                {stage === "waking"
                   ? "A fresh start takes a minute or two. Your data is on its way — nothing is lost while it sleeps."
                   : "Checking that everything came back healthy."}
-            </p>
+              </p>
+            )}
           </div>
         ) : stage === "failed" ? (
           <>
