@@ -142,7 +142,13 @@ async function main() {
   // versions match it, the CURRENT versions are the target — continue the
   // train (build/pin/release are each already-done-checkable).
   const head = shOut("git", ["log", "-1", "--format=%s"]);
-  const bumpResume = head?.match(/^Bump versions: server v([\d.]+), concierge v([\d.]+)$/);
+  // Deaths after the bump land on EITHER train commit (bump, or the
+  // mirror commit that follows the pins) — match both (review-caught:
+  // the asset-wait death the guard was written for sits on the mirror
+  // commit, where a bump-only match misses it and double-bumps).
+  const bumpResume =
+    head?.match(/^Bump versions: server v([\d.]+), concierge v([\d.]+)$/) ??
+    head?.match(/^Release train: waddle v([\d.]+) \+ concierge v([\d.]+) config mirrors$/);
   const resuming = bumpResume && bumpResume[1] === waddlePkg.version && bumpResume[2] === conciergePkg.version;
   const waddleNext = argValue("--waddle") || (resuming ? waddlePkg.version : nextPatch(waddlePkg.version));
   const conciergeNext = argValue("--concierge") || (resuming ? conciergePkg.version : nextPatch(conciergePkg.version));

@@ -97,7 +97,6 @@ export async function awaitMachineReady(
   opts: { readyAttempts?: number; healthAttempts?: number; intervalMs?: number } = {},
 ): Promise<{ ready: boolean; healthy: boolean }> {
   const intervalMs = opts.intervalMs ?? 2_000;
-  let i = 0;
   let lastWhy: string | undefined;
   const ready = booted.instance
     ? await pollBootReady(
