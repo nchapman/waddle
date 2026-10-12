@@ -173,7 +173,7 @@
 - Waddle deploys take ~75-95s (platform-side); wake fire → restored+
   self-unlocked ≈ 80-96s (observed 79s at v0.0.47, 96s at v0.0.45).
 
-## The guard (2026-10-11, PLAN.md §3b — slices 1–3 shipped, 4 pending)
+## The guard (2026-10-11, PLAN.md §3b — all four slices shipped)
 
 Hard land, wild playpen: the agent is permissive inside its roots; the
 land is locked by construction. `server/src/guard/` — all pi-core changes
@@ -206,12 +206,20 @@ ride the `waddle-guard` pi extension (never ad-hoc tool surgery).
   reads/writes block; concierge/CDP URLs in browser_open block. CDP is on
   localhost:9222 in the shared netns — uid separation cannot gate it;
   the URL check is the mitigation, CDP-over-pipe is parked.
+- **Arm hygiene (slice 4)** (guard/arm.ts): the sleep gate refuses the
+  escrow (and its wake rows) from a machine whose playpen failed to
+  enforce — the report `restoreArchive` deliberately surfaces is the
+  input. The context snapshot is verified pre-seal: no browser profile,
+  no registered secret in plaintext; dirty → context-free arm, loudly.
+  Autonomous-run special handling (sealed-for-review, restricted scope)
+  is deliberately parked — no premature guardrails (PLAN.md).
 - **Verification**: macOS dev cannot chown (playpen degrades honestly —
   see /health `playpen` field). The kernel boundary is verified in the
   container: `docker build -t waddle-guard-verify . && docker run --rm -v
   "$PWD/scripts:/verify:ro" waddle-guard-verify node /verify/guard-verify.mjs`
   (add the two -e secret vars to also exercise the env scrub). Includes
-  the codemode sandbox in-container (QuickJS executes).
+  the codemode sandbox and the arm-hygiene gate in-container (the only
+  place the enforced-root playpen verdict runs).
 
 ## Browser-driving rules (Playwright MCP against the client)
 

@@ -258,6 +258,9 @@ test("wakeBoot: an armed credential unlocks into restricted autonomous mode", as
     body: JSON.stringify({ secret: SECRET_A, nonce: randomBytes(16).toString("base64") }),
   });
   assert.equal(unlock.status, 200);
+  // Takeover consumes the wake credential (wakeboot's documented
+  // lifetime is boot-or-takeover — a live user outranks the file).
+  assert.equal(existsSync(join(DATA_DIR, "wake-credential.json")), false);
   const { sent: after, send: sendAfter } = collector();
   await srv2.handleIntent(sendAfter as never, JSON.stringify({ type: "user_message", text: "hi" }));
   assert.match(String(after[0]?.message), /no inference key/); // NOT the autonomous refusal

@@ -199,5 +199,63 @@ const scriptText = scriptResult.content.map((c) => (c.type === "text" ? c.text :
 assert.match(scriptText, /sandbox says 42/, `QuickJS executes in the container: ${scriptText.slice(0, 300)}`);
 console.log("✓ codemode: the QuickJS sandbox executes in-container");
 
+// ── 9. Arm hygiene (slice 4): the escrow gate in the deployed shape ──
+// The container is the one place the playpen verdict runs as ROOT with
+// the real uids (dev tests can never exercise the enforced branch), and
+// the boot secrets sit in the registry the way index.ts registers them.
+const { checkPlaypenForArm, checkSnapshotHygiene } = await import("/app/dist/guard/arm.js");
+const { createArchive } = await import("/app/dist/archive.js");
+const { registerBootSecrets } = await import("/app/dist/guard/policy.js");
+registerBootSecrets(process.env);
+
+// A properly enforced root machine passes the playpen gate — this script
+// ran the full choreography in section 1, so the report says enforced.
+const pen = checkPlaypenForArm();
+assert.equal(pen.ok, true, `enforced machine must arm: ${JSON.stringify(pen)}`);
+console.log("✓ arm hygiene: an enforced root machine passes the playpen gate");
+
+// A clean tree passes the snapshot gate.
+mkdirSync(join(DATA, "workspace"), { recursive: true });
+writeFileSync(join(DATA, "workspace", "note.txt"), "context only\n");
+assert.deepEqual(checkSnapshotHygiene(createArchive(true).body), { ok: true });
+console.log("✓ arm hygiene: a clean snapshot passes");
+
+// A plaintext platform secret in a workspace file refuses — and names the
+// file, never the value. Only meaningful with the secret env the run
+// instructions pass; without it this property skips (registerSecret drops
+// null/undefined, so there would be nothing to find — not a failure).
+if (process.env.CONCIERGE_SHARED_SECRET) {
+  writeFileSync(join(DATA, "workspace", "leak.txt"), `leaked ${process.env.CONCIERGE_SHARED_SECRET}\n`);
+  const dirty = checkSnapshotHygiene(createArchive(true).body);
+  assert.equal(dirty.ok, false);
+  assert.match(dirty.reason, /"concierge-shared-secret" in snapshot at workspace\/leak\.txt/);
+  rmSync(join(DATA, "workspace", "leak.txt"));
+  console.log("✓ arm hygiene: a plaintext secret in the snapshot refuses, naming the file");
+} else {
+  console.log("– arm hygiene: secret-scan property skipped (no CONCIERGE_SHARED_SECRET; pass the -e vars to exercise it)");
+}
+
+// The browser profile must never ride the escrow — the full/shelf variant
+// (createArchive(false)) is the standing regression shape for a wrong flag.
+mkdirSync(join(DATA, "browser", "Default"), { recursive: true });
+writeFileSync(join(DATA, "browser", "Default", "Cookies"), "bearer tokens");
+const browsered = checkSnapshotHygiene(createArchive(false).body);
+assert.equal(browsered.ok, false);
+assert.match(browsered.reason, /browser profile in snapshot: browser\//); // first member = the dir entry
+console.log("✓ arm hygiene: the browser profile refuses (wrong-variant regression caught)");
+
+// GNU tar's long-name dialect ('L' members) — this container is the only
+// place that branch runs (macOS bsdtar uses pax records instead).
+const { walkTar } = await import("/app/dist/guard/arm.js");
+const { decodeArchive } = await import("/app/dist/archive.js");
+const LONG = `${"g".repeat(140)}.txt`;
+writeFileSync(join(DATA, "browser", "Default", LONG), "x");
+const gnuNames = walkTar(decodeArchive(createArchive(false).body)).map((m) => m.name);
+assert.ok(
+  gnuNames.some((n) => n === `browser/Default/${LONG}`),
+  `GNU longname resolved in full: ${gnuNames.join(",")}`,
+);
+console.log("✓ arm hygiene: GNU long-name members walk in full");
+
 rmSync(DATA, { recursive: true, force: true });
 console.log("guard-verify: all kernel-boundary properties hold");

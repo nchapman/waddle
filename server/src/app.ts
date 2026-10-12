@@ -29,6 +29,7 @@ import { setBbGrant, clearBbGrant, bbGrantActive, pushMachineBackup, pullMachine
 import { createSchedule, listSchedules, cancelSchedule, markRun, dueSchedules, dueSoon, activeSchedules, nextDueMs, replaceAllSchedules, seedSchedules, type Schedule } from "./schedules.js";
 import { handshakeConcierge, conciergeActive, renewIdleStop, deathFlare, writeTimer, armHandoff, pullHandoff, postPostbox, pullPostbox, currentInstance, UNADOPTED } from "./concierge.js";
 import { autonomyEnabled, armWakeCredential, readWakeCredential, clearWakeCredential } from "./wakeboot.js";
+import { checkPlaypenForArm, checkSnapshotHygiene } from "./guard/arm.js";
 import { registerSecret } from "./guard/policy.js";
 import { playpenReport } from "./guard/playpen.js";
 import { sealPostbox, openPostbox, mergeSchedules, schedulableRows } from "./postbox.js";
@@ -337,6 +338,11 @@ export function buildApp(): WaddleServer {
         autonomous = false;
         log?.append({ type: "message", role: "user", text: "[system] user unlock — autonomous session taken over", at: nowIso() });
       }
+      // The wake credential's contract is boot-or-takeover (wakeboot.ts):
+      // the boot path consumed or rejected it already, and a live user
+      // session outranks the file — a leftover would hand a stale master
+      // to any later unattended boot.
+      clearWakeCredential();
       if (!log) log = new EventLog(lock.logKey, lock.storage);
       // The clock starts the moment the machine wakes to a client — never
       // sooner (boot), never mid-restore (restoring guard below).
@@ -564,10 +570,30 @@ export function buildApp(): WaddleServer {
     // must share one condition (background off = tier 0 = pre-autonomy
     // semantics: near dues hit the stayalive refusal above, far dues
     // re-fire at the next unlock — no concierge involvement either way).
+    // Slice 4 adds the same shape one level up: a machine whose playpen
+    // failed to enforce refuses the ESCROW ITSELF — no wake rows either, since
+    // they could never boot; due work re-fires at the next attended
+    // unlock, exactly like tier 0. The user's unattended OUTPUT still
+    // posts (the postbox rides the shelf, not the escrow), and the death
+    // flare fires either way — it is the billing/stop teardown, not a
+    // wake row (review-caught: it must not die with the refused escrow).
     if (conciergeActive() && autonomyEnabled() && backgroundTasksEnabled()) {
-      await writeWakeRows();
-      await postAutonomousMail();
-      await rearmEscrow();
+      await deathFlare();
+      const gate = checkPlaypenForArm();
+      if (!gate.ok) {
+        slog.warn("sleep gate: escrow REFUSED — playpen not enforced", { reason: gate.reason });
+        log?.append({
+          type: "message",
+          role: "user",
+          text: `[system] escrow refused — playpen not enforced (${gate.reason}); due schedules re-fire at next attended unlock`,
+          at: nowIso(),
+        });
+        await postAutonomousMail();
+      } else {
+        await writeWakeRows();
+        await postAutonomousMail();
+        await rearmEscrow();
+      }
     }
     setTimeout(() => process.exit(0), 500).unref();
     await new Promise<void>((resolve) => (httpServer ? httpServer.close(() => resolve()) : resolve()));
@@ -611,7 +637,6 @@ export function buildApp(): WaddleServer {
    *  occurrence. Refusal (no concierge + schedules due soon) already ran
    *  in holdIfUncovered — this path is safe to fire. */
   async function writeWakeRows(): Promise<void> {
-    await deathFlare();
     for (const s of activeSchedules()) {
       const d = nextDueMs(s);
       // Floor at 1 s: due_ms 0 is the concierge's cancel verb, and an
@@ -685,22 +710,44 @@ export function buildApp(): WaddleServer {
     // run still fires); a failed re-arm is NOT silent: the wake rows
     // above are already written, so the next boot would arrive locked
     // and the work lost — better to see it in the ring.
+    // The arm carries the whole machine: secret + due work + a sealed
+    // snapshot (the same archive the shelf uses), so the next boot
+    // wakes WITH its state — full delegation, per the opt-in. A failed
+    // snapshot seals a credential without one (context-free boot, the
+    // run still fires); a failed re-arm is NOT silent: the wake rows
+    // above are already written, so the next boot would arrive locked
+    // and the work lost — better to see it in the ring.
     let snapshot: string | undefined;
     try {
-      // Context snapshot: everything but the browser profile (the
-      // profile alone is tens of MiB — over any body limit — and an
-      // unattended run needs log/workspace/verifier, not logins; the
-      // shelf keeps serving full-profile restores when attended).
-      const sealed = sealSnapshot(armSecret, createArchive(true).body);
-      // The concierge's /handoff takes the default body limit (1MiB) —
-      // a lived-in machine's archive can outgrow it. Oversize → arm
-      // context-free (the run still fires, state degrades honestly).
-      const MAX_SNAP_B64 = 768 * 1024;
-      if (sealed.length > MAX_SNAP_B64) {
-        slog.warn("sleep gate: snapshot oversize — arming context-free", { bytes: sealed.length, cap: MAX_SNAP_B64 });
+      const archive = createArchive(true);
+      // Slice 4 — snapshot hygiene: the exclusion of the browser profile
+      // and the absence of plaintext secrets are verified on the actual
+      // bytes, not assumed from createArchive's flags. A dirty snapshot
+      // degrades to a context-free arm (same as oversize): the run still
+      // fires, the dirty bytes stay home — loudly, so a builder
+      // regression or a leaked-into-workspace secret gets seen.
+      const hygiene = checkSnapshotHygiene(
+        archive.body,
+        armInferenceKey ? ([["arm-inference-key", armInferenceKey]] as Array<[string, string]>) : [],
+      );
+      if (!hygiene.ok) {
+        slog.warn("sleep gate: snapshot dirty — arming context-free", { reason: hygiene.reason });
       } else {
-        snapshot = sealed;
-        slog.info("sleep gate: snapshot sealed for escrow", { bytes: snapshot.length });
+        // Context snapshot: everything but the browser profile (the
+        // profile alone is tens of MiB — over any body limit — and an
+        // unattended run needs log/workspace/verifier, not logins; the
+        // shelf keeps serving full-profile restores when attended).
+        const sealed = sealSnapshot(armSecret, archive.body);
+        // The concierge's /handoff takes the default body limit (1MiB) —
+        // a lived-in machine's archive can outgrow it. Oversize → arm
+        // context-free (the run still fires, state degrades honestly).
+        const MAX_SNAP_B64 = 768 * 1024;
+        if (sealed.length > MAX_SNAP_B64) {
+          slog.warn("sleep gate: snapshot oversize — arming context-free", { bytes: sealed.length, cap: MAX_SNAP_B64 });
+        } else {
+          snapshot = sealed;
+          slog.info("sleep gate: snapshot sealed for escrow", { bytes: snapshot.length });
+        }
       }
     } catch (e) {
       slog.warn("sleep gate: snapshot seal failed — arming context-free", { err: String(e) });

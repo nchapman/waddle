@@ -147,8 +147,10 @@ export function createArchive(withoutBrowser = false): Archive {
 
 /** Decode the zstd'd tar body (the pack path's mirror). Throws on a
  *  non-zstd body. (The decoded tar goes through a temp FILE downstream,
- *  not stdin — macOS bsdtar cannot pipe through stdin reliably.) */
-function detarBody(body: Buffer): Buffer {
+ *  not stdin — macOS bsdtar cannot pipe through stdin reliably.) Exported
+ *  for guard/arm.ts, whose hygiene checks read the member list and scan
+ *  for secret values BEFORE the snapshot is sealed and escrowed. */
+export function decodeArchive(body: Buffer): Buffer {
   // Slots are zstd'd tar — the pack path's mirror. The body goes
   // through a temp FILE, not stdin — macOS bsdtar cannot pipe through
   // stdin reliably.
@@ -174,7 +176,7 @@ export function restoreArchive(body: Buffer): { files: number } {
   try {
     // Inside the try: a failed/partial write must never leak a partial
     // tarball onto the persistent volume.
-    writeFileSync(slotPath, detarBody(body));
+    writeFileSync(slotPath, decodeArchive(body));
     return restoreFrom(slotPath);
   } finally {
     rmSync(slotPath, { force: true });
