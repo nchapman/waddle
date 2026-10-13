@@ -58,6 +58,10 @@ type State =
       browserUrl?: string;
       browserTitle?: string;
       browserHeld?: boolean;
+      /** A run is in flight (the Stop control's visibility). */
+      runActive?: boolean;
+      /** Stop sent, waiting for the run to settle. */
+      stopping?: boolean;
     };
 
 const fp = (s: string) => `${s.slice(0, 16)}…${s.slice(-8)}`;
@@ -239,7 +243,12 @@ export function App() {
 
   useEffect(() => {
     void run();
-    return () => connRef.current?.close();
+    return () => {
+      connRef.current?.close();
+      // Timers must not outlive the tree (and their closures with them).
+      if (runQuietRef.current) clearTimeout(runQuietRef.current);
+      if (stoppingTimerRef.current) clearTimeout(stoppingTimerRef.current);
+    };
   }, [run]);
 
   // Sign-in → wake, hands free: the first-run card's whole job is "sign in
@@ -259,6 +268,23 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bb.isAuthenticated]);
 
+
+  /** The stop backstop's timer (cleared on unmount + each re-stop). */
+  const stoppingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Run-liveness backstop: any run activity re-arms a long quiet timer; a
+  // run whose terminal event was missed (dropped frame, reaped agent)
+  // clears the Stop control once it has been quiet well past any real
+  // tool/thinking gap. A stalled-but-alive run keeps re-arming it — the
+  // control stays available exactly when stopping is meaningful.
+  const runQuietRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const armRunQuiet = () => {
+    if (runQuietRef.current) clearTimeout(runQuietRef.current);
+    runQuietRef.current = setTimeout(() => {
+      runQuietRef.current = null;
+      setState((s) => (s.phase === "chat" && s.runActive ? { ...s, runActive: false, stopping: false } : s));
+    }, 5 * 60_000);
+  };
 
   const onServerEvent = useCallback((event: ServerEvent) => {
     // Frame events never touch React state: they publish to the bus (the
@@ -281,6 +307,23 @@ export function App() {
       setBackground(event.background);
       return;
     }
+    // Run-liveness timers run in the HANDLER body, never inside the
+    // updater (React may double-invoke updaters — timers are side
+    // effects). Suppressed = backlog still streaming over the seed: those
+    // rows are history, not a live run, and must not arm the backstop.
+    if (!suppressReplayRef.current) {
+      if (event.type === "delta" || event.type === "tool_start" || event.type === "tool_end") {
+        armRunQuiet();
+      } else if (event.type === "message" && event.role === "user" && !event.text.startsWith("[system]")) {
+        armRunQuiet();
+      }
+    }
+    if (event.type === "run_settled" || event.type === "error") {
+      if (runQuietRef.current) {
+        clearTimeout(runQuietRef.current);
+        runQuietRef.current = null;
+      }
+    }
     setState((s) => {
       // replay_done must land even while the unlock transition is finishing,
       // or the chat waits forever on "replaying history…". It also disarms
@@ -292,6 +335,22 @@ export function App() {
       if (suppressReplayRef.current) {
         // Backlog duplicate of the seeded history — drop.
         if (event.type === "message" || event.type === "history_row" || event.type === "tool_start" || event.type === "tool_end") return s;
+      }
+      // Run-liveness for the Stop control — armed by a turn's first sign
+      // of life (its user echo — a real turn, not a [system] bookkeeping
+      // row — a delta, or a tool) and cleared when the run settles or
+      // fails. Applied by REASSIGNING s (never an early return): the row
+      // reducer below must still run, and every {...s} it returns carries
+      // the transition. Only AFTER the backlog replay: seeded history is
+      // not a live run.
+      if (s.phase === "chat" && s.replayed) {
+        if (event.type === "delta" || event.type === "tool_start") {
+          if (!s.runActive) s = { ...s, runActive: true, stopping: false };
+        } else if (event.type === "message" && event.role === "user" && !event.text.startsWith("[system]")) {
+          s = { ...s, runActive: true, stopping: false };
+        } else if (event.type === "run_settled" || event.type === "error") {
+          if (s.runActive || s.stopping) s = { ...s, runActive: false, stopping: false };
+        }
       }
       // A turn this client is streaming renders through its own stream — its
       // user echo, tool rows, verdicts, and final all arrive via the
@@ -445,7 +504,9 @@ export function App() {
           (event) => transport.dispatch(event),
           () => {
             transport.detach();
-            setState((s) => (s.phase === "chat" ? { ...s, connected: false } : s));
+            // A dead socket can neither stream nor stop — a stale "stop run"
+            // chip must not linger over a thread that is no longer running.
+            setState((s) => (s.phase === "chat" ? { ...s, connected: false, runActive: false, stopping: false } : s));
           },
         );
         connRef.current = conn;
@@ -567,6 +628,20 @@ export function App() {
     [state],
   );
 
+  /** Stop the active run: the enclave denies pending approvals, aborts,
+   *  and settles — run_settled flips the control away. The backstop
+   *  re-arms the control if no terminal event arrives (stop raced the
+   *  lazy boot, the enclave wedged) — a stop the user can retry. */
+  const doStop = useCallback(() => {
+    connRef.current?.send({ type: "stop" });
+    setState((s) => (s.phase === "chat" && s.runActive ? { ...s, stopping: true } : s));
+    if (stoppingTimerRef.current) clearTimeout(stoppingTimerRef.current);
+    stoppingTimerRef.current = setTimeout(() => {
+      stoppingTimerRef.current = null;
+      setState((s) => (s.phase === "chat" && s.stopping ? { ...s, stopping: false } : s));
+    }, 8_000);
+  }, []);
+
   const tree = (
     <div className="flex h-full flex-col">
       {state.phase !== "chat" ? (
@@ -638,6 +713,21 @@ export function App() {
                 {state.connected ? "stream live" : "disconnected — reload"}
               </Chip>
               {state.frameLive && <Chip tone="duck">👁 eyes on</Chip>}
+              {state.runActive && (
+                <button
+                  onClick={doStop}
+                  disabled={state.stopping || !state.connected}
+                  title="Stop the running turn — the enclave aborts it, pending approvals are denied"
+                  className={
+                    "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors " +
+                    (state.stopping
+                      ? "border-border bg-secondary text-muted-foreground"
+                      : "border-gate-strong/50 bg-gate-strong/10 text-gate-strong hover:bg-gate-strong/20")
+                  }
+                >
+                  {state.stopping ? "stopping…" : "■ stop run"}
+                </button>
+              )}
             </>
           }
           browser={

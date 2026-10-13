@@ -19,7 +19,7 @@ import { hello, type GatewayEvent, type DeltaEvent, type ErrorEvent, type Unlock
 import pkg from "../package.json" with { type: "json" };
 import { Lock, freshNonce } from "./state.js";
 import { EventLog } from "./log.js";
-import { initAgent, chat, agentReady, stageSessionJsonl, stageHistoryRows, setBlackbox, setSink, getSessionJsonl, type Sink } from "./agent.js";
+import { initAgent, chat, agentReady, stageSessionJsonl, stageHistoryRows, setBlackbox, setSink, getSessionJsonl, stopRun, type Sink } from "./agent.js";
 import { resolveApproval, denyAllPending, setOutcomeEmitter } from "./approvals.js";
 import { setBrowserEvents, browserLive, captureNow, userInput, releaseUserControl, setControlNotifier, stopBrowser } from "./browser.js";
 // (Machine backup is bb-backup.ts + archive.ts — the enclave shelves
@@ -922,14 +922,31 @@ export function buildApp(): WaddleServer {
     const intent = JSON.parse(String(raw)) as { type?: string; text?: string };
     // Restricted mode (SME review): a credential-unlocked machine serves
     // its schedules and streams state — interactive verbs refuse. The
-    // user's unlock flips `autonomous` off and full mode returns.
-    if (autonomous && (intent.type === "user_message" || intent.type === "browser_input" || intent.type === "browser_release")) {
+    // user's unlock flips `autonomous` off and full mode returns. Stop is
+    // on the deny list with the rest: this session is the machine acting
+    // unattended, and a stop is exactly the interactive interference the
+    // mode exists to refuse — an unlocked user (takeover) can stop.
+    if (autonomous && (intent.type === "user_message" || intent.type === "browser_input" || intent.type === "browser_release" || intent.type === "stop")) {
       send({ type: "error", message: "machine is in autonomous mode (scheduled work only) — unlock to take over" });
       return;
     }
     if (intent.type === "sleep_now") {
       send({ type: "sleep_proposed", reason: "user requested" });
       void sleep("user requested");
+      return;
+    }
+    if (intent.type === "stop") {
+      // Deny-and-abort: pending approvals unblock first (the gate would
+      // otherwise hold the unwind for its full timeout), then the run dies
+      // and settles — every client's stream closes on run_settled. The
+      // system row lands only for the stop that DROVE the stop (a duplicate
+      // inside the unwind window is idempotent — no second sealed row).
+      const outcome = await stopRun();
+      if (outcome === "stopped") {
+        const evt = { type: "message", role: "assistant", text: "[system] run stopped by the user", at: nowIso() } as const;
+        log?.append({ ...evt });
+        broadcast(evt);
+      }
       return;
     }
     if (intent.type === "approval_response") {

@@ -88,17 +88,24 @@ export function gateDecision(
   return { action: "allow" };
 }
 
-/** Does this browser_open input target an allowlisted host? */
-function allowlistedBrowserUrl(input: Record<string, unknown>): boolean {
-  const raw = String(input.url ?? "").trim();
+/** Does this URL target an allowlisted host? Public for the new-tab
+ *  follower (browser.ts): following a fresh page is the same reading
+ *  class as opening it — the existing policy applies, unchanged. */
+export function browserUrlAllowlisted(url: string): boolean {
+  const raw = url.trim();
   const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
   try {
     const host = new URL(withScheme).hostname.toLowerCase();
     if (host && BROWSER_ALLOWLIST.some((d) => host === d || host.endsWith(`.${d}`))) return true;
   } catch {
-    /* unparsable URL: ask */
+    /* unparsable URL: not allowlisted */
   }
   return false;
+}
+
+/** Does this browser_open input target an allowlisted host? */
+function allowlistedBrowserUrl(input: Record<string, unknown>): boolean {
+  return browserUrlAllowlisted(String(input.url ?? ""));
 }
 
 /** Pause for the browser's verdict. Resolves false on timeout. */

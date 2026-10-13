@@ -41,6 +41,9 @@ export class WaddleChatTransport implements ChatTransport<UIMessage> {
   private heldRows: ChatMessage[] = [];
   /** Backstop for a turn whose terminal event never comes. */
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  /** A cancel whose stop intent hasn't left yet (the steering grace —
+   *  see the abort listener in sendMessages). */
+  private stopIntentTimer: ReturnType<typeof setTimeout> | null = null;
   /** Collected rows beyond this deliver immediately (a runaway turn must
    *  not grow the buffer unbounded). */
   private maxIdleRows: number;
@@ -73,6 +76,10 @@ export class WaddleChatTransport implements ChatTransport<UIMessage> {
     if (this.idleTimer) {
       clearTimeout(this.idleTimer);
       this.idleTimer = null;
+    }
+    if (this.stopIntentTimer) {
+      clearTimeout(this.stopIntentTimer);
+      this.stopIntentTimer = null;
     }
     this.tap?.({ type: "error", message: "connection lost — reload to re-replay" });
     this.tap = null;
@@ -226,7 +233,9 @@ export class WaddleChatTransport implements ChatTransport<UIMessage> {
     // A new stream supersedes any open one (steering/queueing). A
     // half-collected idle turn is the SAME run being steered — deliver
     // its head rows now (the stream renders the rest live), never a stale
-    // flush at an unrelated boundary.
+    // flush at an unrelated boundary. It also cancels a pending cancel's
+    // stop intent: a submit-while-running aborts the old stream first,
+    // and that abort must never stop the run the new message steers.
     if (this.idleRows) {
       const rows = this.idleRows;
       this.idleRows = null;
@@ -235,6 +244,10 @@ export class WaddleChatTransport implements ChatTransport<UIMessage> {
         this.idleTimer = null;
       }
       this.onServerRows?.(rows);
+    }
+    if (this.stopIntentTimer) {
+      clearTimeout(this.stopIntentTimer);
+      this.stopIntentTimer = null;
     }
     this.tap = null;
     const sendIntent = this.sendIntent;
@@ -331,7 +344,23 @@ export class WaddleChatTransport implements ChatTransport<UIMessage> {
           }
         };
         self.tap = tap;
-        options.abortSignal?.addEventListener("abort", () => finish());
+        options.abortSignal?.addEventListener("abort", () => {
+          finish();
+          // The runtime aborts the old stream when a NEW submit supersedes
+          // it (steering) — indistinguishable here from a genuine cancel at
+          // abort time. Grace: hold the stop intent briefly; a superseding
+          // sendMessages (top of this method) cancels it. A genuine cancel
+          // fires it after the window and the enclave stops the run. The
+          // window is generous (a submit follows its abort within a tick
+          // in practice; a genuine stop just lands half a second later); a
+          // framework gap longer than it would stop a steered run — the
+          // "[system] run stopped" row makes that visible, not silent.
+          if (self.stopIntentTimer) clearTimeout(self.stopIntentTimer);
+          self.stopIntentTimer = setTimeout(() => {
+            self.stopIntentTimer = null;
+            self.sendIntent?.({ type: "stop" });
+          }, 500);
+        });
         sendIntent?.({ type: "user_message", text: userText });
       },
     });

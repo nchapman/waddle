@@ -338,9 +338,15 @@ closed — no bb changes.
   fresh-volume boots still start a new pi session — the planned seam
   (`session.sendCustomMessage(..., {deliverAs: "nextTurn"})` on
   history_restore) stays parked for smoothing the UI-replay path.
-- Browser tools: no scroll, and body links on long pages (wikipedia) fall
-  outside the 80-element clickable index — the agent works around it by
-  navigating directly (observed live).
+- Browser tools: scroll, waits (browser_wait_for text/gone), real key
+  events (browser_press_key — Enter submits), dropdowns (browser_select),
+  and agent-click new-tab following (the newest page is attached, the old
+  stays open; USER-opened tabs are deliberately never followed — their
+  tabs are theirs) shipped 2026-10-12; browser_type writes through the
+  native value setter (React-controlled inputs see it). Still open:
+  navigation-time URL gating (the allowlist only gates browser_open —
+  clicks navigate ungated; deliberately deferred), shadow DOM/iframe
+  widgets, no hover/drag, and only one attached page (no tab list tool).
 - Live stream is jpeg-over-ws (~10fps); WebRTC is the production upgrade.
 - k=1 accepted risks (per-machine identity + UCAN is the k>1 fix, PLAN.md):
   shared secret as identity proxy, "unadopted" sentinel until adopted

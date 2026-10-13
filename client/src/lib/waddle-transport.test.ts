@@ -100,6 +100,39 @@ test("an empty/whitespace message produces an empty stream and sends nothing", a
   assert.deepEqual(intents, []);
 });
 
+test("canceling the stream sends the stop intent after the steering grace window", async () => {
+  const { transport, intents } = harness();
+  const ac = new AbortController();
+  const stream = await transport.sendMessages({ trigger: "submit-message", messages: [msg("x")], abortSignal: ac.signal });
+  transport.dispatch({ type: "delta", messageId: "live", text: "work" });
+  ac.abort(); // the composer's stop control
+  const chunks = await drain(stream); // closes client-side without a terminal server event
+  assert.ok(Array.isArray(chunks), "the aborted stream closes, it cannot hang");
+  // The grace holds the intent: an instant re-check sees only the submit.
+  assert.deepEqual(intents.map((i) => i.type), ["user_message"]);
+  await new Promise((r) => setTimeout(r, 560));
+  assert.deepEqual(intents.map((i) => i.type), ["user_message", "stop"], "a genuine cancel stops the enclave's run");
+});
+
+test("a steering submit inside the grace window cancels the stop — the steered run lives", async () => {
+  const { transport, intents } = harness();
+  const ac = new AbortController();
+  const stream1 = await transport.sendMessages({ trigger: "submit-message", messages: [msg("first")], abortSignal: ac.signal });
+  transport.dispatch({ type: "delta", messageId: "live", text: "…" });
+  ac.abort(); // the runtime aborts the old stream as the new submit lands
+  await drain(stream1);
+  const stream2 = await transport.sendMessages({ trigger: "submit-message", messages: [msg("second")] });
+  transport.dispatch({ type: "delta", messageId: "live", text: "steered" });
+  transport.dispatch({ type: "run_settled" });
+  await drain(stream2);
+  await new Promise((r) => setTimeout(r, 560));
+  assert.deepEqual(
+    intents.map((i) => i.type),
+    ["user_message", "user_message"],
+    "no stop intent — the submit was a steer, not a cancel",
+  );
+});
+
 test("detach mid-stream finishes the open turn — it can never hang", async () => {
   const { transport } = harness();
   const stream = await transport.sendMessages({ trigger: "submit-message", messages: [msg("x")] });

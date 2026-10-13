@@ -107,6 +107,8 @@ export interface StateResponse {
 export type UserIntent =
   | { type: "user_message"; text: string }
   | { type: "sleep_now" }
+  /** Stop the active run (deny pending approvals, abort, settle). No-op when idle. */
+  | { type: "stop" }
   | { type: "approval_response"; callId: string; approved: boolean }
   /** Relay a decrypted snapshot into the fresh enclave's sealed log. */
   | { type: "history_restore"; rows: Array<{ role: "user" | "assistant" | "tool"; text: string }> }

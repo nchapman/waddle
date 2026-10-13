@@ -45,6 +45,10 @@ const KEY_TABLE: Record<string, { code: string; vk: number; mod?: number }> = {
   Meta: { code: "MetaLeft", vk: 91, mod: 4 },
 };
 
+/** The keys the wire contract supports — surfaced to the agent (and tests)
+ *  so an unsupported key gets an honest listing, not a silent drop. */
+export const KEY_NAMES: readonly string[] = Object.keys(KEY_TABLE);
+
 const MODS = { Alt: 1, Control: 2, Meta: 4, Shift: 8 } as const;
 
 /** Translate a batch of user events to CDP messages against a viewport of
@@ -103,7 +107,10 @@ export function toCdp(events: UserInputEvent[], viewport: { w: number; h: number
         break;
       }
       case "key": {
-        const k = KEY_TABLE[ev.k];
+        // hasOwn, not a bare lookup: inherited names ("constructor",
+        // "toString") are truthy on a plain object and would dispatch a
+        // bogus key event (review-caught).
+        const k = Object.hasOwn(KEY_TABLE, ev.k) ? KEY_TABLE[ev.k] : undefined;
         if (!k) break; // unknown key: dropped (v1 table is the contract)
         if (k.mod) {
           // Held-while-down: the client sends press (up=false) and release

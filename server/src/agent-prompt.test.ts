@@ -33,7 +33,7 @@ test("system prompt: pi defaults + waddle addendum, never replaced", async () =>
     resourceLoader: loader,
     sessionManager: SessionManager.inMemory(),
     customTools: buildCustomTools(),
-    tools: ["read", "codemode", "edit", "write", "browser_open", "browser_snapshot", "schedule_create"],
+    tools: ["read", "codemode", "edit", "write", "browser_open", "browser_snapshot", "browser_click", "browser_type", "browser_press_key", "browser_wait_for", "browser_select", "schedule_create"],
   });
   try {
     const prompt = session.systemPrompt;
@@ -46,6 +46,13 @@ test("system prompt: pi defaults + waddle addendum, never replaced", async () =>
     // The real custom tools' snippets reach the tools section.
     assert.match(prompt, /browser_snapshot\(\): current page text/);
     assert.match(prompt, /schedule_create\(title, prompt/);
+    // The new browser verbs ride along: deterministic waits, real keys,
+    // dropdowns — and the addendum teaches when to reach for them.
+    assert.match(prompt, /browser_wait_for\(text \| gone, timeout_ms\?\)/);
+    assert.match(prompt, /browser_press_key\(key\)/);
+    assert.match(prompt, /browser_select\(index, value\)/);
+    assert.match(prompt, /browser_wait_for\(text or gone\) until the exact thing/);
+    assert.match(prompt, /Enter submits a form when there is no button/);
     // The workspace never reconfigures the agent.
     assert.doesNotMatch(prompt, /POISON/);
   } finally {

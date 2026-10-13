@@ -169,6 +169,17 @@ test("user_message without an inference key errors honestly", async () => {
   assert.match(String(sent[0]?.message), /no inference key/);
 });
 
+test("stop is a quiet no-op when no run is live (never boots the agent)", async () => {
+  const { sent, send } = collector();
+  await handleIntent(send as never, JSON.stringify({ type: "stop" }));
+  // Nothing broadcast, nothing sealed: no run → no "stopped" row, and the
+  // lazy boot must not be forced by a stop of nothing.
+  assert.equal(sent.length, 0);
+  const res = await app.request("/state", { headers: { authorization: `Bearer ${token}` } });
+  const state2 = await res.json();
+  assert.equal(state2.events.filter((e: { type: string; text?: string }) => e.type === "message" && String(e.text).includes("stopped")).length, 0);
+});
+
 test("a non-JSON frame rejects (the socket path relies on crash logging)", async () => {
   const { send } = collector();
   await assert.rejects(() => handleIntent(send as never, "{not json"));

@@ -23,6 +23,7 @@ const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager,
   "@earendil-works/pi-coding-agent"
 );
 const { createGuardExtension } = await import("./guard/extension.js");
+const { buildCustomTools } = await import("./agent.js");
 
 test("the session exposes codemode, never bash, and guarded file tools", async () => {
   const agentDir = join(scratch, "pi-agent");
@@ -41,9 +42,10 @@ test("the session exposes codemode, never bash, and guarded file tools", async (
     modelRuntime,
     resourceLoader: loader,
     sessionManager,
+    customTools: buildCustomTools(),
     tools: [
       "read", "edit", "write", "grep", "find", "ls", "codemode",
-      "browser_open", "browser_snapshot", "browser_click", "browser_type", "browser_scroll",
+      "browser_open", "browser_snapshot", "browser_click", "browser_type", "browser_press_key", "browser_wait_for", "browser_select", "browser_scroll",
       "schedule_create", "schedule_list", "schedule_cancel",
     ],
   });
@@ -53,6 +55,10 @@ test("the session exposes codemode, never bash, and guarded file tools", async (
   assert.ok(!active.includes("bash"), "there is no shell — bash must not be active");
   assert.equal(session.getToolDefinition("bash"), undefined, "bash is not even registered");
   assert.equal(session.getToolDefinition("powershell"), undefined, "no powershell either");
+  // The smoothed browser surface is present in full: waits, keys, dropdowns.
+  for (const t of ["browser_wait_for", "browser_press_key", "browser_select", "browser_scroll"]) {
+    assert.ok(active.includes(t), `${t} must be active`);
+  }
   // Scripts cannot start other scripts, so codemode is never in the CALLABLE
   // set — but the file tools are, for composition from inside scripts.
   const callable = session.getCallableToolNames();
